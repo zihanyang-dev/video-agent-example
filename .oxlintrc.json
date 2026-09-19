@@ -1,0 +1,16 @@
+{
+  "plugins": ["typescript", "oxc"],
+  "categories": { "correctness": "error" },
+  "rules": {
+    "max-depth": ["error", 2],
+    "complexity": ["error", 10],
+    "max-params": ["error", 4],
+    "max-nested-callbacks": ["error", 3],
+    "max-lines-per-function": ["error", 60],
+    "max-statements": ["error", 25],
+    "typescript/no-explicit-any": "error",
+    "typescript/no-extraneous-class": "error",
+    "typescript/method-signature-style": ["error", "property"]
+  },
+  "ignorePatterns": ["dist/**", "node_modules/**"]
+}

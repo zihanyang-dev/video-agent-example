@@ -1,0 +1,28 @@
+{
+  "compilerOptions": {
+    "target": "ESNext",
+    "lib": ["ESNext"],
+    "module": "Preserve",
+    "moduleResolution": "bundler",
+    "types": ["bun"],
+    "paths": {
+      "@vid/contract": ["./packages/contract/src/index.ts"],
+      "@vid/queue": ["./packages/queue/src/index.ts"],
+      "@vid/store": ["./packages/store/src/index.ts"]
+    },
+
+    "strict": true,
+    "strictFunctionTypes": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "verbatimModuleSyntax": true,
+    "erasableSyntaxOnly": true,
+    "isolatedModules": true,
+    "skipLibCheck": true,
+
+    "noEmit": true
+  },
+  "include": ["apps/*/src/**/*.ts", "packages/*/src/**/*.ts", "packages/*/scripts/**/*.ts"]
+}

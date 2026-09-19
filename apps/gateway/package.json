@@ -1,0 +1,14 @@
+{
+  "name": "@vid/gateway",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun --watch src/main.ts",
+    "start": "bun src/main.ts"
+  },
+  "dependencies": {
+    "hono": "^4.13.8",
+    "zod": "^4.0.0"
+  }
+}

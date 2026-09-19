@@ -1,0 +1,172 @@
+/**
+ * One turn, start to finish.
+ *
+ * The boundary: it composes a sandbox, a harness, the projection and the three stores, and
+ * owns no product policy of its own. Every rule it applies belongs to something it calls.
+ *
+ * It imports the two ports, never an implementation, so which sandbox and which harness are
+ * decisions made once in `main.ts` and nowhere else.
+ */
+import { EventType, type Event, type Message } from '@ag-ui/core'
+import type { TurnRequest } from '@vid/queue'
+import type { Files, LiveStream, Messages, Sessions } from '@vid/store'
+import { createProjection } from './projection'
+import type { ModelChoice, SkillIndex, StartHarness } from './harness/harness'
+import type { RentSandbox, Sandbox } from './sandbox/sandbox'
+
+export type TurnParts = {
+  rentSandbox: RentSandbox
+  startHarness: StartHarness
+  live: LiveStream
+  messages: Messages
+  sessions: Sessions
+  files: Files
+  model: ModelChoice
+  sandboxImage: string
+  /** Injected into the sandbox. The agent is never told these exist (architecture.md §8). */
+  sandboxEnv: Record<string, string>
+  skills: readonly SkillIndex[]
+  systemPrompt: string
+}
+
+export type TakeTurn = (request: TurnRequest) => Promise<void>
+
+export const createTurn = (parts: TurnParts): TakeTurn => {
+  return async (request) => {
+    const sandbox = await parts.rentSandbox({ image: parts.sandboxImage, env: parts.sandboxEnv })
+
+    try {
+      await carryIn(parts.files, sandbox, request.threadID)
+      await runInside(parts, sandbox, request)
+      await carryOut(parts.files, sandbox, request.threadID)
+    } finally {
+      // The sandbox is rented, not owned. It goes back whatever happened, including when
+      // carrying files out is what failed.
+      await sandbox.destroy()
+    }
+  }
+}
+
+const runInside = async (
+  parts: TurnParts,
+  sandbox: Sandbox,
+  request: TurnRequest,
+): Promise<void> => {
+  const projection = createProjection()
+  const deliver = createDelivery(parts, request.threadID)
+
+  const harness = await parts.startHarness({
+    sandbox,
+    model: parts.model,
+    systemPrompt: parts.systemPrompt,
+    skills: parts.skills,
+    history: (await parts.sessions.read(request.threadID)) ?? undefined,
+    projection,
+    onEvent: (event) => deliver.take(event),
+    turnID: request.turnID,
+    threadID: request.threadID,
+  })
+
+  try {
+    await harness.run(request.message)
+  } finally {
+    // A step that announced `running` and then died would otherwise spin on someone's
+    // screen forever; the turn ending is the only evidence that it stopped.
+    for (const abandoned of projection.settle()) deliver.take(abandoned)
+
+    await deliver.drain()
+    await parts.sessions.write(request.threadID, harness.entries())
+    harness.dispose()
+  }
+}
+
+/**
+ * Where a visible event goes.
+ *
+ * Two destinations with different units: the stream carries fragments to whoever is
+ * watching, the database carries completed things to whoever arrives tomorrow
+ * (architecture.md §3.1).
+ *
+ * Text is assembled here because AG-UI's TEXT_MESSAGE_END carries no content -- it says a
+ * message finished, not what it said.
+ */
+const createDelivery = (parts: TurnParts, threadID: string) => {
+  const assembling = new Map<string, string>()
+  const settled = new Set<string>()
+  const writes: Promise<unknown>[] = []
+
+  const take = (event: Event): void => {
+    writes.push(parts.live.publish(threadID, event))
+
+    const durable = keep(event, assembling)
+    if (durable === null) return
+
+    const seen = settled.has(durable.id)
+    settled.add(durable.id)
+    writes.push(
+      seen ? parts.messages.replace(threadID, durable) : parts.messages.append(threadID, durable),
+    )
+  }
+
+  /** Every store write started during the turn has landed before the turn reports done. */
+  const drain = async (): Promise<void> => {
+    await Promise.all(writes)
+  }
+
+  return { take, drain }
+}
+
+/** Null for anything a page reload should not replay. */
+const keep = (event: Event, assembling: Map<string, string>): Message | null => {
+  if (event.type === EventType.TEXT_MESSAGE_CONTENT) {
+    assembling.set(event.messageId, (assembling.get(event.messageId) ?? '') + event.delta)
+    return null
+  }
+
+  if (event.type === EventType.TEXT_MESSAGE_END) {
+    const text = assembling.get(event.messageId) ?? ''
+    assembling.delete(event.messageId)
+    return { id: event.messageId, role: 'assistant', content: text }
+  }
+
+  if (event.type === EventType.ACTIVITY_SNAPSHOT) {
+    // A running step is not kept: tomorrow it would be a spinner nobody will ever stop.
+    if (isRunning(event.content)) return null
+    return {
+      id: event.messageId,
+      role: 'activity',
+      activityType: event.activityType,
+      content: event.content,
+    }
+  }
+
+  return null
+}
+
+const isRunning = (content: Record<string, unknown>): boolean => content['state'] === 'running'
+
+/**
+ * The thread's files, into a machine that has none.
+ *
+ * This is what makes a conversation feel continuous across a sandbox that only lives for one
+ * turn: the agent's notes, its cut list, what it decided about shot three, are files.
+ */
+const carryIn = async (files: Files, sandbox: Sandbox, threadID: string): Promise<void> => {
+  const prefix = workspaceOf(threadID)
+
+  for (const key of await files.list(prefix)) {
+    const bytes = await files.get(key)
+    await sandbox.writeFile(`${sandbox.roots.sandbox}/${key.slice(prefix.length)}`, bytes)
+  }
+}
+
+const carryOut = async (files: Files, sandbox: Sandbox, threadID: string): Promise<void> => {
+  const prefix = workspaceOf(threadID)
+
+  for (const path of await sandbox.list()) {
+    const bytes = await sandbox.readFile(`${sandbox.roots.sandbox}/${path}`)
+    await files.put(`${prefix}${path}`, bytes)
+  }
+}
+
+const workspaceOf = (threadID: string): string => `threads/${threadID}/`
