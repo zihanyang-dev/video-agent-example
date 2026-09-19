@@ -64,7 +64,13 @@ export const createRedisLiveStream = (url: string): RedisLiveStream => {
     }
   }
 
-  return { publish, read, close: () => client.close() }
+  /**
+   * Abort the readers first. Closing the connection under a blocked read raises from a call
+   * nobody is waiting on any more.
+   */
+  const close = (): void => client.close()
+
+  return { publish, read, close }
 }
 
 const keyOf = (threadID: string): string => `live:${threadID}`
