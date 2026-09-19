@@ -129,19 +129,35 @@ const claimNext = async (
   consumer: string,
 ): Promise<{ id: string; turn: TurnRequest }[]> => {
   // ">" means entries no one in this group has claimed.
-  const reply = await client.send('XREADGROUP', [
-    'GROUP',
-    GROUP,
-    consumer,
-    'BLOCK',
-    String(BLOCK_MS),
-    'COUNT',
-    '1',
-    'STREAMS',
-    STREAM,
-    '>',
-  ])
-  return entriesOf(reply)
+  const read = (): Promise<unknown> =>
+    client.send('XREADGROUP', [
+      'GROUP',
+      GROUP,
+      consumer,
+      'BLOCK',
+      String(BLOCK_MS),
+      'COUNT',
+      '1',
+      'STREAMS',
+      STREAM,
+      '>',
+    ])
+
+  try {
+    return entriesOf(await read())
+  } catch (error) {
+    // The group existed at startup and does not any more. Redis restarting without
+    // persistence does this, and so does anything that drops the key -- measured: running
+    // the test suite against the same Redis killed a running agent outright.
+    //
+    // Recreating and retrying loses nothing. The group is bookkeeping, not the work: turns
+    // already claimed are recovered from the pending list, and what was never claimed is
+    // still in the stream.
+    if (!String(error).includes('NOGROUP')) throw error
+
+    await ensureGroup(client)
+    return entriesOf(await read())
+  }
 }
 
 /**

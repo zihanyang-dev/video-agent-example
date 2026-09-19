@@ -50,6 +50,13 @@ const gateway = Bun.serve({
         header: 'x-provider-key',
         key: REAL_KEY,
       },
+      // A provider this deployment has an opinion about.
+      pinned: {
+        baseUrl: `http://localhost:${provider.port}`,
+        header: 'x-provider-key',
+        key: REAL_KEY,
+        models: ['doubao-seedance-2-0-260128'],
+      },
     },
     readToken: createTokenReader(SECRET, () => clock),
     onSpend: (token, name, path) => spends.push(`${token.turnID} ${name}${path}`),
@@ -170,6 +177,57 @@ describe('a compressed answer', () => {
     const response = await call('/seedance/compressed', withToken())
 
     expect(response.headers.get('content-encoding')).toBeNull()
+  })
+})
+
+describe('a model this deployment does not pay for', () => {
+  test('is refused, because a skill cannot stop the agent asking for it directly', async () => {
+    const response = await call('/pinned/v1/generations', {
+      ...withToken(),
+      method: 'POST',
+      body: JSON.stringify({ model: 'doubao-seedance-1-0-pro-fast-251015', content: [] }),
+    })
+
+    expect(response.status).toBe(403)
+    expect(await response.text()).toContain('doubao-seedance-1-0-pro-fast-251015')
+  })
+
+  test('is not recorded as spending, because nothing was spent', async () => {
+    const before = spends.length
+
+    await call('/pinned/v1/generations', {
+      ...withToken(),
+      method: 'POST',
+      body: JSON.stringify({ model: 'something-else' }),
+    })
+
+    expect(spends).toHaveLength(before)
+  })
+
+  test('does not stop the one it does pay for', async () => {
+    const response = await call('/pinned/v1/generations', {
+      ...withToken(),
+      method: 'POST',
+      body: JSON.stringify({ model: 'doubao-seedance-2-0-260128', content: [] }),
+    })
+
+    expect(response.status).toBe(200)
+  })
+
+  test('does not stop polling a task, which names no model and buys nothing', async () => {
+    const response = await call('/pinned/v1/tasks/cgt-1', withToken())
+
+    expect(response.status).toBe(200)
+  })
+
+  test('leaves a provider with no opinion alone', async () => {
+    const response = await call('/seedance/v1/generations', {
+      ...withToken(),
+      method: 'POST',
+      body: JSON.stringify({ model: 'anything-at-all' }),
+    })
+
+    expect(response.status).toBe(200)
   })
 })
 

@@ -8,8 +8,8 @@
     "packages/*"
   ],
   "scripts": {
-    "check": "tsc --build && oxlint . && bun run schema && git diff --exit-code packages/store/schema.sql && bun test",
-    "typecheck": "tsc --build",
+    "check": "bun run typecheck && oxlint . && bun run schema && git diff --exit-code packages/store/schema.sql && bun test",
+    "typecheck": "tsc --build && tsc -p apps/web",
     "test": "bun test",
     "schema": "bun --cwd packages/store scripts/schema.ts",
     "migrate": "bun --cwd packages/store scripts/migrate.ts",
@@ -17,7 +17,8 @@
     "services:ready": "docker compose -f deploy/docker/compose.yaml run --rm objects-ready",
     "services:down": "docker compose -f deploy/docker/compose.yaml down --volumes",
     "sandbox": "docker build -t vid-sandbox:dev deploy/sandbox",
-    "fmt": "prettier --write ."
+    "fmt": "prettier --write .",
+    "web": "bun --cwd apps/web run dev"
   },
   "devDependencies": {
     "@types/bun": "^1.4.2",

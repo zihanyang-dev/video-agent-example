@@ -13,6 +13,15 @@ export type Provider = {
   /** Attached on the way out. Never leaves this process. */
   header: string
   key: string
+  /**
+   * Which models this deployment pays for. Omitted means any.
+   *
+   * Measured, not imagined: an agent read a parameter error as the model being unavailable,
+   * picked a different one, and generated footage on it. Nothing refused, and the only
+   * record was a sentence in a notes file. A skill cannot prevent this -- the agent can read
+   * the script, so anything the script may do it may do directly -- which leaves here.
+   */
+  models?: readonly string[]
 }
 
 /**
@@ -29,6 +38,7 @@ export const Providers = z.record(
     baseUrl: z.string().min(1),
     header: z.string().min(1),
     key: z.string().min(1),
+    models: z.array(z.string().min(1)).optional(),
   }),
 )
 

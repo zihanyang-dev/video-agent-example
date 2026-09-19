@@ -126,6 +126,27 @@ describe('a turn that failed', () => {
   })
 })
 
+describe('the stream disappearing underneath a running agent', () => {
+  test('does not stop it working, because the group is bookkeeping and not the work', async () => {
+    const worked: string[] = []
+    const queue = join('agent-survivor')
+    void queue.take(async (claimed) => {
+      worked.push(claimed.turnID)
+    })
+    await Bun.sleep(100)
+
+    // What a Redis restart without persistence leaves behind, and what running this suite
+    // against a shared Redis did to a live agent.
+    await admin.send('DEL', ['turns'])
+    await Bun.sleep(400)
+
+    await queue.put(turn(7))
+    await Bun.sleep(600)
+
+    expect(worked).toEqual(['turn-7'])
+  }, 10_000)
+})
+
 describe('shutting down', () => {
   test('waits for the turn in flight', async () => {
     const queue = join('agent-d')

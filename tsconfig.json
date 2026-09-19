@@ -25,5 +25,10 @@
 
     "noEmit": true
   },
-  "include": ["apps/*/src/**/*.ts", "packages/*/src/**/*.ts", "packages/*/scripts/**/*.ts"]
+  "include": ["apps/*/src/**/*.ts", "packages/*/src/**/*.ts", "packages/*/scripts/**/*.ts"],
+
+  // The browser has its own config. Kept out of this one so that server and agent code
+  // cannot reach `document` or `window` by accident -- they have no screen, and code that
+  // compiles against one would fail at runtime rather than here.
+  "exclude": ["apps/web"]
 }

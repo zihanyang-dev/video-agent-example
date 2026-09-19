@@ -27,6 +27,16 @@ To animate an image you already have, pass it as a third argument:
 ./generate.sh "the camera pushes in slowly" 5 stills/lake.png
 ```
 
+## The model is not your decision
+
+The script asks for the model this deployment pays for. **If a call is refused, do not pick
+a different model and try again** — the gateway will refuse that too, and on the day it does
+not, the bill is for something nobody chose.
+
+Read the refusal instead. A rejected _parameter_ says so and names the parameter: durations
+in particular are not free-form, and not every length is offered for every model. Fix the
+argument and call the script again.
+
 ## What it does about failure
 
 The script writes the job id to `.jobs/` **before** it starts waiting. If something kills

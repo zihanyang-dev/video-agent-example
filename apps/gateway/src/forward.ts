@@ -47,14 +47,23 @@ export const createForwarder = (parts: ForwardParts): Hono => {
     if (provider === undefined) return context.text(`no provider called ${name}`, 404)
 
     const path = context.req.path.slice(`/${name}`.length)
+
+    const sending = await checked(context.req.raw, provider.models)
+    if (sending.refused !== null) {
+      return context.text(
+        `this deployment does not pay for ${sending.refused}. It pays for: ${(provider.models ?? []).join(', ')}`,
+        403,
+      )
+    }
+
     parts.onSpend(token, name, path)
 
     const answered = await fetch(`${provider.baseUrl}${path}${searchOf(context.req.url)}`, {
       method: context.req.method,
       headers: { ...passedThrough(context.req.raw.headers), [provider.header]: provider.key },
-      body: context.req.raw.body,
+      body: sending.body,
       // Node and Bun both require this once a body is a stream.
-      ...(context.req.raw.body === null ? {} : { duplex: 'half' }),
+      ...(sending.body instanceof ReadableStream ? { duplex: 'half' } : {}),
     } as RequestInit)
 
     return new Response(answered.body, {
@@ -65,6 +74,43 @@ export const createForwarder = (parts: ForwardParts): Hono => {
   })
 
   return app
+}
+
+/**
+ * Looks at one field, and only when this deployment said which models it pays for.
+ *
+ * This is the single exception to forwarding bytes unread, and it is deliberately the
+ * smallest one that closes the hole: a name is compared against a list, nothing about the
+ * request is understood, and a provider that renames a field elsewhere changes nothing here.
+ * A request that names no model is forwarded -- polling a task and fetching a result both
+ * have to keep working, and neither of them buys anything.
+ *
+ * Reading the body costs the streaming path, which is why it only happens when a list is
+ * configured. Generation requests are a few hundred bytes; results come back the other way.
+ */
+const checked = async (
+  request: Request,
+  allowed: readonly string[] | undefined,
+): Promise<{ body: ReadableStream | string | null; refused: string | null }> => {
+  if (allowed === undefined || request.body === null) {
+    return { body: request.body, refused: null }
+  }
+
+  const raw = await request.text()
+  const named = modelNamedIn(raw)
+
+  if (named === null || allowed.includes(named)) return { body: raw, refused: null }
+  return { body: raw, refused: named }
+}
+
+/** Null when the body is not JSON, or is JSON that names no model. */
+const modelNamedIn = (raw: string): string | null => {
+  try {
+    const named = (JSON.parse(raw) as { model?: unknown }).model
+    return typeof named === 'string' ? named : null
+  } catch {
+    return null
+  }
 }
 
 const searchOf = (url: string): string => new URL(url).search

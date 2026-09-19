@@ -8,6 +8,7 @@
  * decisions made once in `main.ts` and nowhere else.
  */
 import { EventType, type Event, type Message } from '@ag-ui/core'
+import { ARTIFACT, ArtifactContent } from '@vid/contract'
 import type { TurnRequest } from '@vid/queue'
 import type { Files, LiveStream, Messages, Sessions } from '@vid/store'
 import { createProjection } from './projection'
@@ -94,7 +95,7 @@ const runInside = async (
   request: TurnRequest,
 ): Promise<void> => {
   const projection = createProjection()
-  const deliver = createDelivery(parts, request.threadID)
+  const deliver = createDelivery(parts, request.threadID, sandbox)
 
   const harness = await parts.startHarness({
     sandbox,
@@ -140,7 +141,7 @@ type Delivery = {
   drain: () => Promise<void>
 }
 
-const createDelivery = (parts: TurnParts, threadID: string): Delivery => {
+const createDelivery = (parts: TurnParts, threadID: string, sandbox: Sandbox): Delivery => {
   const assembling = new Map<string, string>()
   const settled = new Set<string>()
 
@@ -152,16 +153,28 @@ const createDelivery = (parts: TurnParts, threadID: string): Delivery => {
   let stored: Promise<unknown> = Promise.resolve()
 
   const take = (event: Event): void => {
-    published = published.then(() => parts.live.publish(threadID, event))
+    // Resolved once, awaited by both chains, so the two stores never disagree about what an
+    // event said.
+    const ready = deliverable(parts, threadID, sandbox, event)
 
-    const durable = keep(event, assembling)
-    if (durable === null) return
+    published = published.then(async () => {
+      const settledEvent = await ready
+      if (settledEvent !== null) await parts.live.publish(threadID, settledEvent)
+    })
 
-    const seen = settled.has(durable.id)
-    settled.add(durable.id)
-    stored = stored.then(() =>
-      seen ? parts.messages.replace(threadID, durable) : parts.messages.append(threadID, durable),
-    )
+    stored = stored.then(async () => {
+      const settledEvent = await ready
+      if (settledEvent === null) return
+
+      const durable = keep(settledEvent, assembling)
+      if (durable === null) return
+
+      const seen = settled.has(durable.id)
+      settled.add(durable.id)
+      await (seen
+        ? parts.messages.replace(threadID, durable)
+        : parts.messages.append(threadID, durable))
+    })
   }
 
   /** Every write started during the turn has landed before the turn reports done. */
@@ -170,6 +183,41 @@ const createDelivery = (parts: TurnParts, threadID: string): Delivery => {
   }
 
   return { take, drain }
+}
+
+/**
+ * Turns what a script announced into what a person may receive. Null drops the event.
+ *
+ * Only artifacts need this. A script announces the workspace path of the thing it made --
+ * it has no credential and cannot mint anything -- and the file leaves here as a short-lived
+ * URL. The file is carried out now rather than at the end of the turn, because a person
+ * watching sees the artifact appear and will click it immediately.
+ *
+ * A path that cannot be turned into a URL is dropped rather than forwarded. Passing it on
+ * would put an internal path on a screen, which is the one thing the contract exists to
+ * prevent, and a link to it would be a link to nothing anyway.
+ */
+const deliverable = async (
+  parts: TurnParts,
+  threadID: string,
+  sandbox: Sandbox,
+  event: Event,
+): Promise<Event | null> => {
+  if (event.type !== EventType.ACTIVITY_SNAPSHOT || event.activityType !== ARTIFACT) return event
+
+  const announced = ArtifactContent.safeParse(event.content)
+  if (!announced.success) return null
+
+  const path = announced.data.url.replace(/^\/+/, '')
+  const key = `${workspaceOf(threadID)}${path}`
+
+  try {
+    await parts.files.put(key, await sandbox.readFile(`${sandbox.roots.sandbox}/${path}`))
+    return { ...event, content: { ...announced.data, url: await parts.files.downloadUrl(key) } }
+  } catch (error) {
+    console.error(`turn on ${threadID}: announced ${path}, which could not be delivered`, error)
+    return null
+  }
 }
 
 /** Null for anything a page reload should not replay. */

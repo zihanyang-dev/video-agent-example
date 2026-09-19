@@ -6,7 +6,8 @@
  * start rendering lost the record of what it had bought, and the next attempt would have
  * paid again.
  */
-import type { Message } from '@ag-ui/core'
+import { EventType, type Event, type Message } from '@ag-ui/core'
+import { ARTIFACT } from '@vid/contract'
 import type { TurnRequest } from '@vid/queue'
 import type { Files, LiveStream, Messages, Sessions, Thread } from '@vid/store'
 import { describe, expect, test } from 'bun:test'
@@ -48,6 +49,7 @@ const parts = (
     startHarness?: StartHarness
     stored?: Map<string, Uint8Array>
     written?: Message[]
+    shown?: Event[]
   } = {},
 ): TurnParts => {
   const stored = overrides.stored ?? new Map<string, Uint8Array>()
@@ -77,7 +79,9 @@ const parts = (
 
   const sessions: Sessions = { read: async () => null, write: async () => {} }
   const live: LiveStream = {
-    publish: async () => {},
+    publish: async (_thread, event) => {
+      overrides.shown?.push(event)
+    },
     read: async function* () {
       // Nothing reads the stream in these cases.
     },
@@ -152,7 +156,6 @@ describe('a turn that failed, what it hangs on to', () => {
 
     expect(wasDestroyed()).toBe(true)
   })
-
 })
 
 describe('a turn that failed, what it says', () => {
@@ -229,5 +232,66 @@ describe('a turn that worked', () => {
     await take(request)
 
     expect([...stored.keys()].filter((key) => key.startsWith('threads/t1/skills'))).toEqual([])
+  })
+})
+
+/** What `deliver.sh` prints. The script is the only thing that may put this on a screen. */
+const announceArtifact = (path: string): Event => ({
+  type: EventType.ACTIVITY_SNAPSHOT,
+  messageId: `artifact:${path}`,
+  activityType: ARTIFACT,
+  content: { url: path, role: 'final' },
+})
+
+describe('something the agent made', () => {
+  test('reaches a person as a link, never as a path on this machine', async () => {
+    const shown: Event[] = []
+    const inside = new Map<string, Uint8Array>()
+    const { sandbox } = fakeSandbox(inside)
+
+    const take = createTurn(
+      parts({
+        shown,
+        rentSandbox: async () => sandbox,
+        startHarness: async (input: HarnessInput) => {
+          await input.sandbox.writeFile('/work/opener.mp4', new Uint8Array([1, 2, 3]))
+          return quietHarness(async () => {
+            input.onEvent(announceArtifact('opener.mp4'))
+          })
+        },
+      }),
+    )
+
+    await take(request)
+
+    const artifact = shown.find((event) => event.type === EventType.ACTIVITY_SNAPSHOT)
+    expect(artifact).toMatchObject({ content: { url: 'https://objects/download' } })
+  })
+
+  test('is not shown at all when the file it named is not there', async () => {
+    const shown: Event[] = []
+    const { sandbox } = fakeSandbox(new Map())
+    const missing: Sandbox = {
+      ...sandbox,
+      readFile: async () => {
+        throw new Error('no such file')
+      },
+    }
+
+    const take = createTurn(
+      parts({
+        shown,
+        rentSandbox: async () => missing,
+        startHarness: async (input: HarnessInput) =>
+          quietHarness(async () => {
+            input.onEvent(announceArtifact('never-made.mp4'))
+          }),
+      }),
+    )
+
+    await take(request)
+
+    // Better than a link to nothing, and it keeps the path off the screen either way.
+    expect(shown.filter((event) => event.type === EventType.ACTIVITY_SNAPSHOT)).toEqual([])
   })
 })

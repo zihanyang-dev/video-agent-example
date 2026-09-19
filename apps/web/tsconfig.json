@@ -1,0 +1,28 @@
+{
+  "//": "The browser's config. Separate from the root one because the globals are genuinely different: this is the only code here with a document, and the server and agent must not be able to reach one.",
+  "compilerOptions": {
+    "target": "ESNext",
+    "lib": ["ESNext", "DOM", "DOM.Iterable"],
+    "module": "Preserve",
+    "moduleResolution": "bundler",
+    "types": ["bun"],
+    "jsx": "react-jsx",
+    "paths": {
+      "@vid/contract": ["../../packages/contract/src/index.ts"]
+    },
+
+    "strict": true,
+    "strictFunctionTypes": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "verbatimModuleSyntax": true,
+    "erasableSyntaxOnly": true,
+    "isolatedModules": true,
+    "skipLibCheck": true,
+
+    "noEmit": true
+  },
+  "include": ["src/**/*.ts", "src/**/*.tsx", "*.ts"]
+}
