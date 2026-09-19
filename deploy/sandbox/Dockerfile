@@ -8,7 +8,15 @@
 # showing the model, which is what makes "render, then look at a frame" possible.
 FROM debian:bookworm-slim
 
-RUN apt-get update -qq \
+# Measured from Shanghai: `apt-get update` takes 261s against deb.debian.org and 2s against
+# this one. Override it anywhere that is not true:
+#
+#   docker build --build-arg APT_MIRROR=deb.debian.org deploy/sandbox
+ARG APT_MIRROR=mirrors.tuna.tsinghua.edu.cn
+
+RUN sed -i "s|deb.debian.org|${APT_MIRROR}|g; s|security.debian.org|${APT_MIRROR}|g" \
+      /etc/apt/sources.list.d/debian.sources \
+  && apt-get update -qq \
   && apt-get install -y -qq --no-install-recommends \
     ffmpeg \
     file \

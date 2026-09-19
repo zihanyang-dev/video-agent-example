@@ -57,7 +57,11 @@ export const rentDockerSandbox: RentSandbox = async (spec): Promise<Sandbox> => 
     writeFile: async (path, bytes) => {
       const quoted = JSON.stringify(inside(path))
       const written = await docker(['exec', '-i', container, 'sh', '-c', `cat > ${quoted}`], bytes)
-      if (written.exitCode !== 0) throw new Error(`write failed: ${path}`)
+      // Say what the shell said. "write failed" alone sends whoever reads it looking in the
+      // wrong place -- a missing parent directory and a full disk read identically.
+      if (written.exitCode !== 0) {
+        throw new Error(`could not write ${path}: ${written.output.toString().trim()}`)
+      }
     },
     mkdir: async (path) => {
       await docker(['exec', container, 'mkdir', '-p', inside(path)])

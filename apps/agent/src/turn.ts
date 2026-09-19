@@ -176,8 +176,21 @@ const isRunning = (content: Record<string, unknown>): boolean => content['state'
  */
 const carryIn = async (files: Files, sandbox: Sandbox, threadID: string): Promise<void> => {
   const prefix = workspaceOf(threadID)
+  const keys = await files.list(prefix)
 
-  for (const key of await files.list(prefix)) {
+  // Directories first, and only the ones actually needed. A file written into a directory
+  // that is not there fails, and object storage has no directories to tell us about.
+  const wanted = new Set(
+    keys
+      .map((key) => key.slice(prefix.length))
+      .map((path) => path.slice(0, path.lastIndexOf('/')))
+      .filter((directory) => directory !== ''),
+  )
+  for (const directory of [...wanted].sort()) {
+    await sandbox.mkdir(`${sandbox.roots.sandbox}/${directory}`)
+  }
+
+  for (const key of keys) {
     const bytes = await files.get(key)
     await sandbox.writeFile(`${sandbox.roots.sandbox}/${key.slice(prefix.length)}`, bytes)
   }

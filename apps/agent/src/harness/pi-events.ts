@@ -17,6 +17,7 @@ import type { HarnessInput } from './harness'
 /** Returns the way to stop listening, which is the caller's to hold (code-style §8). */
 export const relayEvents = (session: AgentSession, input: HarnessInput): (() => void) => {
   let messageIndex = 0
+  const visible = createThinkingFilter()
 
   return session.subscribe((event) => {
     if (event.type === 'message_start') {
@@ -25,7 +26,7 @@ export const relayEvents = (session: AgentSession, input: HarnessInput): (() => 
     }
     if (event.type === 'message_update') {
       const id = `${input.turnID}:${messageIndex}`
-      for (const translated of fromAssistant(event.assistantMessageEvent, id)) {
+      for (const translated of fromAssistant(event.assistantMessageEvent, id, visible)) {
         input.onEvent(translated)
       }
       return
@@ -39,14 +40,21 @@ export const relayEvents = (session: AgentSession, input: HarnessInput): (() => 
   })
 }
 
-const fromAssistant = (event: AssistantEvent, id: string): readonly Event[] => {
+const fromAssistant = (
+  event: AssistantEvent,
+  id: string,
+  visible: (delta: string) => string,
+): readonly Event[] => {
   const messageId = 'contentIndex' in event ? `${id}:${event.contentIndex}` : id
 
   if (event.type === 'text_start') {
     return [{ type: EventType.TEXT_MESSAGE_START, messageId, role: 'assistant' }]
   }
   if (event.type === 'text_delta') {
-    return [{ type: EventType.TEXT_MESSAGE_CONTENT, messageId, delta: strip(event.delta) }]
+    const delta = visible(event.delta)
+    // A delta that was entirely reasoning becomes nothing at all rather than an empty one:
+    // an empty content event is a frame on the wire that says nothing.
+    return delta === '' ? [] : [{ type: EventType.TEXT_MESSAGE_CONTENT, messageId, delta }]
   }
   if (event.type === 'text_end') {
     return [{ type: EventType.TEXT_MESSAGE_END, messageId }]
@@ -74,11 +82,57 @@ const fromReasoning = (event: AssistantEvent, messageId: string): readonly Event
 
 /**
  * Some gateways inline reasoning into message text as a `<thinking>` block instead of
- * sending it on the reasoning channel. Observed once in three real runs against an
- * OpenAI-compatible endpoint. Rare is not good enough: a person seeing the model's private
- * working once is an incident, so it is removed here rather than hoped about.
+ * sending it on the reasoning channel. Seen in real runs against an OpenAI-compatible
+ * endpoint; rare is not good enough, because a person seeing the model's private working
+ * once is an incident.
+ *
+ * The whole block goes, not the tags. Removing only the tags leaves the reasoning sitting
+ * in the reply looking like something the model meant to say -- which is worse than leaving
+ * the tags on, where at least it reads as a leak.
+ *
+ * Deltas arrive split at arbitrary points, so a block can straddle several. What is kept
+ * back is held until the tag it is waiting for arrives or the message ends.
  */
-const strip = (delta: string): string => delta.replace(/<\/?thinking>/g, '')
+export const createThinkingFilter = (): ((delta: string) => string) => {
+  let inside = false
+  let pending = ''
+
+  return (delta) => {
+    let text = pending + delta
+    pending = ''
+    let kept = ''
+
+    while (text !== '') {
+      const looking = inside ? CLOSE : OPEN
+      const at = text.indexOf(looking)
+
+      if (at === -1) {
+        // A partial tag at the end is not yet known to be one. Hold back only that much.
+        const held = partialTagLength(text, looking)
+        pending = text.slice(text.length - held)
+        kept += inside ? '' : text.slice(0, text.length - held)
+        break
+      }
+
+      kept += inside ? '' : text.slice(0, at)
+      text = text.slice(at + looking.length)
+      inside = !inside
+    }
+
+    return kept
+  }
+}
+
+const OPEN = '<thinking>'
+const CLOSE = '</thinking>'
+
+/** How much of the end of `text` could still turn into `tag` once more arrives. */
+const partialTagLength = (text: string, tag: string): number => {
+  for (let length = Math.min(tag.length - 1, text.length); length > 0; length--) {
+    if (text.endsWith(tag.slice(0, length))) return length
+  }
+  return 0
+}
 
 /**
  * A tool's partial result is untyped on pi's side, so it is parsed rather than asserted --

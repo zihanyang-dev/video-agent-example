@@ -26,6 +26,8 @@ import { createTurn } from './turn'
 
 const env = readEnv()
 
+const SKILLS: never[] = []
+
 const sql = new SQL(env.DATABASE_URL)
 const live = createRedisLiveStream(env.REDIS_URL)
 
@@ -57,8 +59,8 @@ const takeTurn = createTurn({
   },
   // Empty until skills are published to object storage and carried in with the workspace.
   // The agent finds them by reading the directory, so nothing here changes when they exist.
-  skills: [],
-  systemPrompt: systemPrompt(),
+  skills: SKILLS,
+  systemPrompt: systemPrompt(SKILLS),
 })
 
 const queue = createRedisTurnQueue({
