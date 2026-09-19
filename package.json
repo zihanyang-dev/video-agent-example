@@ -18,7 +18,11 @@
     "services:down": "docker compose -f deploy/docker/compose.yaml down --volumes",
     "sandbox": "docker build -t vid-sandbox:dev deploy/sandbox",
     "fmt": "prettier --write .",
-    "web": "bun --cwd apps/web run dev"
+    "web": "bun --cwd apps/web run dev",
+    "skills": "bun --cwd packages/store scripts/publish-skills.ts",
+    "gateway": "docker compose -f deploy/docker/compose.yaml up -d --build gateway",
+    "server": "bun --cwd apps/server run dev",
+    "agent": "bun --cwd apps/agent run dev"
   },
   "devDependencies": {
     "@types/bun": "^1.4.2",
