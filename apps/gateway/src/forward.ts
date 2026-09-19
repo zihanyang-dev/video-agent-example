@@ -146,22 +146,59 @@ const fetchResult = async (
 
   parts.onSpend(token, name, '/_result')
 
-  // No credential attached: these links carry their own, and adding ours would hand a
-  // provider key's authority to whoever could get a URL in front of this.
-  const answered = await fetch(asked, { redirect: 'follow' })
+  const answered = await follow(asked, provider.results)
+  if (answered === null) return context.text('that redirected somewhere we do not fetch', 403)
+
   return new Response(answered.body, {
     status: answered.status,
     headers: decoded(answered.headers),
   })
 }
 
-/** False for anything that is not https at a host this deployment named. */
-const allowed = (asked: string, hosts: readonly string[] | undefined): boolean => {
-  if (hosts === undefined || hosts.length === 0) return false
+/**
+ * Fetches, checking every hop rather than only the first.
+ *
+ * `redirect: 'follow'` would make the allowlist a statement about one URL instead of about
+ * where the bytes come from: a host we trust could redirect anywhere, and "anywhere" from
+ * inside this network includes addresses nothing outside it can reach. Null when a hop
+ * leaves the list, or when they stop being worth following.
+ *
+ * No credential is attached at any hop: these links carry their own, and adding ours would
+ * hand a provider key's authority to whoever could get a URL in front of this.
+ */
+const follow = async (
+  from: string,
+  hosts: readonly string[] | undefined,
+): Promise<Response | null> => {
+  let at = from
+
+  for (let hop = 0; hop < 4; hop++) {
+    const answered = await fetch(at, { redirect: 'manual' })
+
+    const moved = answered.headers.get('location')
+    if (answered.status < 300 || answered.status > 399 || moved === null) return answered
+
+    const next = new URL(moved, at).href
+    if (!allowed(next, hosts)) return null
+    at = next
+  }
+
+  return null
+}
+
+/**
+ * False for anything that is not at an origin this deployment named.
+ *
+ * Origins rather than hostnames, so the scheme is part of what was named rather than a
+ * separate rule remembered somewhere else. `http://` somewhere internal and `https://` at
+ * the same name are different places, and a list of bare hostnames cannot say which one it
+ * meant.
+ */
+const allowed = (asked: string, origins: readonly string[] | undefined): boolean => {
+  if (origins === undefined || origins.length === 0) return false
 
   try {
-    const url = new URL(asked)
-    return url.protocol === 'https:' && hosts.includes(url.hostname)
+    return origins.includes(new URL(asked).origin)
   } catch {
     return false
   }

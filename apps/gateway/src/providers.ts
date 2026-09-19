@@ -23,13 +23,14 @@ export type Provider = {
    */
   models?: readonly string[]
   /**
-   * Hosts this provider puts finished results on.
+   * Origins this provider puts finished results on, such as
+   * `https://ark-acg-cn-beijing.tos-cn-beijing.volces.com`.
    *
    * A generation answers with a link to a CDN, and the sandbox has no route to it -- that is
    * what `internal: true` on its network means. So the fetch comes back through here, and
-   * this is the list of places it may fetch from. Empty or absent means nowhere: a gateway
-   * that fetched any URL it was handed would be an open proxy wearing our credentials'
-   * network position.
+   * this is the list of places it may fetch from, redirects included. Empty or absent means
+   * nowhere: a gateway that fetched any URL it was handed would be an open proxy wearing our
+   * credentials' network position.
    */
   results?: readonly string[]
 }

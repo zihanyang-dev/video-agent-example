@@ -24,6 +24,20 @@ const provider = Bun.serve({
     // Real providers compress. A gateway that forwards the encoding header along with a
     // body `fetch` already decompressed hands the caller a ZlibError -- which is how this
     // was found, on the first call that left the machine.
+    // A result host that sends the caller somewhere else.
+    if (url.pathname === '/bounce-away') {
+      return new Response(null, {
+        status: 302,
+        headers: { location: 'http://169.254.169.254/latest/meta-data/' },
+      })
+    }
+
+    if (url.pathname === '/bounce-home') {
+      return new Response(null, { status: 302, headers: { location: '/clip.mp4' } })
+    }
+
+    if (url.pathname === '/clip.mp4') return new Response('the bytes')
+
     if (url.pathname === '/compressed') {
       return new Response(Bun.gzipSync(new TextEncoder().encode('{"ok":true}')), {
         headers: { 'content-encoding': 'gzip', 'content-type': 'application/json' },
@@ -56,7 +70,8 @@ const gateway = Bun.serve({
         header: 'x-provider-key',
         key: REAL_KEY,
         models: ['doubao-seedance-2-0-260128'],
-        results: ['results.example.com'],
+        // The same server the provider runs on, standing in for a CDN.
+        results: [`http://localhost:${provider.port}`],
       },
     },
     readToken: createTokenReader(SECRET, () => clock),
@@ -233,35 +248,47 @@ describe('a model this deployment does not pay for', () => {
 })
 
 describe('fetching a finished result, which the sandbox cannot do itself', () => {
+  const at = (path: string): string => `http://localhost:${provider.port}${path}`
+
   const fetchResult = (url: string): Promise<Response> =>
     call(`/pinned/_result?url=${encodeURIComponent(url)}`, withToken())
 
-  test('is refused for a host this deployment did not name', async () => {
-    const response = await fetchResult('https://somewhere-else.example.com/clip.mp4')
+  test('comes back to the caller', async () => {
+    const response = await fetchResult(at('/clip.mp4'))
 
-    expect(response.status).toBe(403)
+    expect(response.status).toBe(200)
+    expect(await response.text()).toBe('the bytes')
   })
 
-  test('is refused for anything that is not https, so this cannot reach inside the network', async () => {
-    expect((await fetchResult('http://results.example.com/clip.mp4')).status).toBe(403)
+  test('is refused for an origin this deployment did not name', async () => {
+    expect((await fetchResult('https://somewhere-else.example.com/clip.mp4')).status).toBe(403)
     expect((await fetchResult('file:///etc/passwd')).status).toBe(403)
     expect((await fetchResult('http://169.254.169.254/latest/meta-data/')).status).toBe(403)
   })
 
-  test('is refused for a provider that names no result hosts at all', async () => {
+  test('is refused for a provider that names no result origins at all', async () => {
     const response = await call(
-      `/seedance/_result?url=${encodeURIComponent('https://results.example.com/clip.mp4')}`,
+      `/seedance/_result?url=${encodeURIComponent(at('/clip.mp4'))}`,
       withToken(),
     )
 
     expect(response.status).toBe(403)
   })
 
+  test('follows a redirect that stays on the list', async () => {
+    const response = await fetchResult(at('/bounce-home'))
+
+    expect(await response.text()).toBe('the bytes')
+  })
+
+  test('does not follow one that leaves it, however trusted the first hop was', async () => {
+    const response = await fetchResult(at('/bounce-away'))
+
+    expect(response.status).toBe(403)
+  })
+
   test('still needs a turn token', async () => {
-    const response = await call(
-      `/pinned/_result?url=${encodeURIComponent('https://results.example.com/clip.mp4')}`,
-      {},
-    )
+    const response = await call(`/pinned/_result?url=${encodeURIComponent(at('/clip.mp4'))}`, {})
 
     expect(response.status).toBe(401)
   })
