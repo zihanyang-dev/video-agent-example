@@ -8,10 +8,15 @@
     "packages/*"
   ],
   "scripts": {
-    "check": "tsc --build && oxlint . && bun run schema && git diff --exit-code packages/store/schema.sql",
+    "check": "tsc --build && oxlint . && bun run schema && git diff --exit-code packages/store/schema.sql && bun test",
     "typecheck": "tsc --build",
+    "test": "bun test",
     "schema": "bun --cwd packages/store scripts/schema.ts",
     "migrate": "bun --cwd packages/store scripts/migrate.ts",
+    "services": "docker compose -f deploy/docker/compose.yaml up -d --wait db redis objects",
+    "services:ready": "docker compose -f deploy/docker/compose.yaml run --rm objects-ready",
+    "services:down": "docker compose -f deploy/docker/compose.yaml down --volumes",
+    "sandbox": "docker build -t vid-sandbox:dev deploy/sandbox",
     "fmt": "prettier --write ."
   },
   "devDependencies": {
