@@ -58,6 +58,10 @@ bun run web       # 3000
 
 `TURN_TOKEN_SECRET` 两边必须一样:agent 签,gateway 验。
 
+`deploy/local/` 里可以放一份把这些环境变量都设好的脚本(`agent.sh` / `server.sh` / `web.sh`),
+整个目录不进 git —— 因为 agent 那份带着模型的 key。`agent.sh` 直接从 `gateway.env` 里读签名密钥,
+不自己存一份:两边一旦不一致,skill 的每一次调用都是 401。
+
 打开 <http://localhost:3000>,说一句想要什么。
 
 ## 改完跑什么

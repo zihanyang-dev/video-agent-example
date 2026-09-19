@@ -8,3 +8,6 @@ dist/
 # Real credentials. The gateway is the only process that holds them (architecture.md §1).
 deploy/docker/gateway.env
 .DS_Store
+
+# Local run scripts. They hold a model key.
+deploy/local/
