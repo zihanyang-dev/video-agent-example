@@ -18,10 +18,20 @@ const admin = new RedisClient(url)
 let joined: TurnQueue[] = []
 let failures: string[] = []
 
+/**
+ * A stream of this run's own.
+ *
+ * The default one belongs to whatever agent is running on this machine. Sharing it means
+ * taking each other's work, which is exactly what happened: an agent claimed ten of these
+ * turns and failed every one on threads that only exist in here.
+ */
+const STREAM = `turns-test-${crypto.randomUUID()}`
+
 const join = (consumer: string): TurnQueue => {
   const queue = createRedisTurnQueue({
     url,
     consumer,
+    stream: STREAM,
     onFailed: (turn) => failures.push(turn.turnID),
   })
   joined.push(queue)
@@ -37,14 +47,14 @@ const turn = (n: number): TurnRequest => ({
 
 /** How many entries the group is still holding for someone. */
 const stillClaimed = async (): Promise<number> => {
-  const pending = await admin.send('XPENDING', ['turns', 'agents'])
+  const pending = await admin.send('XPENDING', [STREAM, 'agents'])
   return Array.isArray(pending) ? Number(pending[0]) : 0
 }
 
 beforeEach(async () => {
   failures = []
   joined = []
-  await admin.send('DEL', ['turns'])
+  await admin.send('DEL', [STREAM])
 })
 
 afterEach(async () => {
@@ -137,7 +147,7 @@ describe('the stream disappearing underneath a running agent', () => {
 
     // What a Redis restart without persistence leaves behind, and what running this suite
     // against a shared Redis did to a live agent.
-    await admin.send('DEL', ['turns'])
+    await admin.send('DEL', [STREAM])
     await Bun.sleep(400)
 
     await queue.put(turn(7))

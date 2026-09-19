@@ -45,4 +45,21 @@ ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 
 RUN npm install -g hyperframes@0.8 >/dev/null 2>&1
 
+# GSAP, on disk, because the sandbox reaches exactly one thing and that thing is the gateway
+# (architecture.md §5). HyperFrames drives a composition by seeking a GSAP timeline, and the
+# project it scaffolds loads GSAP from a CDN -- which here is a script that never arrives and
+# a composition that renders one still frame for its whole duration. A skill writing a
+# composition points at this copy instead.
+ARG GSAP_VERSION=3.14.2
+RUN npm install -g gsap@${GSAP_VERSION} >/dev/null 2>&1 \
+  && mkdir -p /opt/vendor \
+  && cp /usr/lib/node_modules/gsap/dist/gsap.min.js /opt/vendor/gsap.min.js
+
+# Skills do not go looking for it. One name, stable across upgrades.
+ENV VID_GSAP=/opt/vendor/gsap.min.js
+
+# Nothing here can reach a telemetry endpoint, so every render would spend its time finding
+# that out. Turned off at build time rather than per run.
+RUN hyperframes telemetry disable >/dev/null 2>&1 || true
+
 WORKDIR /work

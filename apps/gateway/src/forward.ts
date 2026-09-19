@@ -11,7 +11,7 @@
  * decide what a skill is allowed to ask for.
  */
 import type { TurnToken } from '@vid/turn-token'
-import { Hono } from 'hono'
+import { Hono, type Context } from 'hono'
 import type { Providers } from './providers'
 
 export type ForwardParts = {
@@ -35,6 +35,20 @@ const HOP_BY_HOP = new Set([
 
 export const createForwarder = (parts: ForwardParts): Hono => {
   const app = new Hono()
+
+  /**
+   * Fetches a finished result on the sandbox's behalf.
+   *
+   * Registered before the general route because it is the one path that is ours rather than
+   * the provider's. A generation answers with a link to a CDN and the sandbox has no route
+   * off its network, so the bytes come back through here.
+   *
+   * Only hosts this deployment named, and only https. Anything else and this is an open
+   * proxy sitting inside our network, reachable by whatever command a model decided to run.
+   */
+  app.get('/:provider/_result', (context) =>
+    fetchResult(parts, context, context.req.param('provider')),
+  )
 
   app.all('/:provider/*', async (context) => {
     const token = await parts.readToken(context.req.header('authorization'))
@@ -110,6 +124,46 @@ const modelNamedIn = (raw: string): string | null => {
     return typeof named === 'string' ? named : null
   } catch {
     return null
+  }
+}
+
+const fetchResult = async (
+  parts: ForwardParts,
+  context: Context,
+  name: string,
+): Promise<Response> => {
+  const token = await parts.readToken(context.req.header('authorization'))
+  if (token === null) return context.text('not a usable turn token', 401)
+
+  const provider = parts.providers[name]
+  if (provider === undefined) return context.text(`no provider called ${name}`, 404)
+
+  const asked = context.req.query('url')
+  if (asked === undefined) return context.text('a url is required', 400)
+  if (!allowed(asked, provider.results)) {
+    return context.text('this deployment does not fetch results from there', 403)
+  }
+
+  parts.onSpend(token, name, '/_result')
+
+  // No credential attached: these links carry their own, and adding ours would hand a
+  // provider key's authority to whoever could get a URL in front of this.
+  const answered = await fetch(asked, { redirect: 'follow' })
+  return new Response(answered.body, {
+    status: answered.status,
+    headers: decoded(answered.headers),
+  })
+}
+
+/** False for anything that is not https at a host this deployment named. */
+const allowed = (asked: string, hosts: readonly string[] | undefined): boolean => {
+  if (hosts === undefined || hosts.length === 0) return false
+
+  try {
+    const url = new URL(asked)
+    return url.protocol === 'https:' && hosts.includes(url.hostname)
+  } catch {
+    return false
   }
 }
 

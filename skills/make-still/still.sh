@@ -11,7 +11,7 @@
 set -euo pipefail
 
 PROMPT="${1:?usage: still.sh "<prompt>" [WIDTHxHEIGHT]}"
-SIZE="${2:-1280x720}"
+SIZE="${2:-2560x1440}"
 
 MODEL="${VID_SEEDREAM_MODEL:?the sandbox was not told which model to use}"
 OUT="stills"
@@ -57,6 +57,9 @@ if [ -z "$url" ]; then
   exit 1
 fi
 
-curl -sS -o "$OUT/$slug.png" "$url"
+# Through the gateway: there is no route off this network (architecture.md §5).
+curl -sS -o "$OUT/$slug.png" \
+  -H "Authorization: Bearer $VID_TURN_TOKEN" \
+  --get --data-urlencode "url=$url" "$VID_GATEWAY/seedream/_result"
 activity "$slug" "Making a still" "done"
 echo "$OUT/$slug.png"

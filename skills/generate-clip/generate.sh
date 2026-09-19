@@ -72,7 +72,13 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
     succeeded)
       url=$(printf '%s' "$task" | python3 -c "import json,sys;print(json.load(sys.stdin).get('content',{}).get('video_url',''))")
       [ -n "$url" ] || { echo "succeeded but no video_url: $task" >&2; exit 1; }
-      curl -sS -o "$OUT/$slug.mp4" "$url"
+
+      # Through the gateway, not straight at the link. There is no route off this
+      # network -- the gateway is the only thing reachable from here, and it fetches
+      # only from hosts this deployment named (architecture.md §5).
+      curl -sS -o "$OUT/$slug.mp4" \
+        -H "Authorization: Bearer $VID_TURN_TOKEN" \
+        --get --data-urlencode "url=$url" "$VID_GATEWAY/seedance/_result"
       rm -f "$job_file"
       activity "$slug" "Generating footage" "done"
       echo "$OUT/$slug.mp4"

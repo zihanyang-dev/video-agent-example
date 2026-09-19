@@ -22,6 +22,16 @@ export type Provider = {
    * the script, so anything the script may do it may do directly -- which leaves here.
    */
   models?: readonly string[]
+  /**
+   * Hosts this provider puts finished results on.
+   *
+   * A generation answers with a link to a CDN, and the sandbox has no route to it -- that is
+   * what `internal: true` on its network means. So the fetch comes back through here, and
+   * this is the list of places it may fetch from. Empty or absent means nowhere: a gateway
+   * that fetched any URL it was handed would be an open proxy wearing our credentials'
+   * network position.
+   */
+  results?: readonly string[]
 }
 
 /**
@@ -39,6 +49,7 @@ export const Providers = z.record(
     header: z.string().min(1),
     key: z.string().min(1),
     models: z.array(z.string().min(1)).optional(),
+    results: z.array(z.string().min(1)).optional(),
   }),
 )
 

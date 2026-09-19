@@ -56,6 +56,7 @@ const gateway = Bun.serve({
         header: 'x-provider-key',
         key: REAL_KEY,
         models: ['doubao-seedance-2-0-260128'],
+        results: ['results.example.com'],
       },
     },
     readToken: createTokenReader(SECRET, () => clock),
@@ -228,6 +229,41 @@ describe('a model this deployment does not pay for', () => {
     })
 
     expect(response.status).toBe(200)
+  })
+})
+
+describe('fetching a finished result, which the sandbox cannot do itself', () => {
+  const fetchResult = (url: string): Promise<Response> =>
+    call(`/pinned/_result?url=${encodeURIComponent(url)}`, withToken())
+
+  test('is refused for a host this deployment did not name', async () => {
+    const response = await fetchResult('https://somewhere-else.example.com/clip.mp4')
+
+    expect(response.status).toBe(403)
+  })
+
+  test('is refused for anything that is not https, so this cannot reach inside the network', async () => {
+    expect((await fetchResult('http://results.example.com/clip.mp4')).status).toBe(403)
+    expect((await fetchResult('file:///etc/passwd')).status).toBe(403)
+    expect((await fetchResult('http://169.254.169.254/latest/meta-data/')).status).toBe(403)
+  })
+
+  test('is refused for a provider that names no result hosts at all', async () => {
+    const response = await call(
+      `/seedance/_result?url=${encodeURIComponent('https://results.example.com/clip.mp4')}`,
+      withToken(),
+    )
+
+    expect(response.status).toBe(403)
+  })
+
+  test('still needs a turn token', async () => {
+    const response = await call(
+      `/pinned/_result?url=${encodeURIComponent('https://results.example.com/clip.mp4')}`,
+      {},
+    )
+
+    expect(response.status).toBe(401)
   })
 })
 

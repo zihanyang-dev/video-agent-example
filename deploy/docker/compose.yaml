@@ -1,8 +1,15 @@
 # Everything a developer needs running to work on this, and nothing a deploy uses.
 #
 # The network is named rather than left to compose, because sandboxes join it by name. A
-# sandbox needs to reach exactly one thing -- the gateway -- and putting them on a network of
-# their own is what makes "exactly one thing" enforceable rather than aspirational.
+# sandbox needs to reach exactly one thing -- the gateway -- and `internal: true` is what
+# makes that a fact rather than a slogan.
+#
+# It was a slogan for a while. A user-defined bridge still routes to the internet, and it was
+# measured: a sandbox on it fetched https://github.com (200) and reached the provider's own
+# API host directly (401 -- refused, but reachable). Naming a network isolates nothing.
+#
+# So the gateway sits on both: `sandbox` for who may call it, `egress` for its own way out.
+# It is the only thing with a foot in each, which is the whole point of it existing.
 #
 # The Postgres patch version is pinned rather than floated. `pg_dump` stamps its own version
 # into the schema dump, so an image that moved underneath someone would make `check` fail on
@@ -10,6 +17,9 @@
 networks:
   sandbox:
     name: vid-sandbox
+    internal: true
+  egress:
+    name: vid-egress
 
 services:
   db:
@@ -65,7 +75,7 @@ services:
     # Missing file is still a hard failure, which is the part that was worth keeping.
     env_file: [gateway.env]
     ports: ['8080:8080']
-    networks: [sandbox]
+    networks: [sandbox, egress]
     # Docker's embedded resolver reaches the host's resolvers, which on some VM-backed
     # runtimes are not reachable from a user-defined network -- measured: the same lookup
     # succeeds on the default bridge and times out here.

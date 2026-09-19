@@ -11,21 +11,26 @@ A still costs a few cents and comes back in seconds. A clip costs dollars and ta
 ## Making one
 
 ```bash
-./still.sh "a misty lake at dawn, low sun, cold blue light" 1280x720
+./still.sh "a misty lake at dawn, low sun, cold blue light"
 ```
 
-The arguments are the prompt and the size. It prints the path of the file it wrote.
+The argument is the prompt; a size is optional and defaults to 2560x1440. It prints the path
+of the file it wrote.
 
-Sizes are `WIDTHxHEIGHT`. Match the size to the video you are cutting: a still made at a
-different aspect ratio has to be cropped, and the crop takes away the part of the frame you
-chose it for.
+**There is a floor: 3,686,400 pixels.** Anything smaller is refused outright, which rules out
+asking for 1280x720 even when that is the size you are cutting at — 2560x1440 is the
+smallest 16:9 that is accepted. Make it large and scale it down with ffmpeg; that way round
+also looks better.
+
+Match the _shape_ to the video you are cutting. A still made at a different aspect ratio has
+to be cropped, and the crop takes away the part of the frame you chose it for.
 
 ## Using it as a reference
 
 The usual reason to make a still is to animate it:
 
 ```bash
-./still.sh "a misty lake at dawn, low sun, cold blue light" 1280x720
+./still.sh "a misty lake at dawn, low sun, cold blue light"
 ./generate.sh "the camera pushes in slowly across the water" 5 stills/a-misty-lake-at-dawn.png
 ```
 

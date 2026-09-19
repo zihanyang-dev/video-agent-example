@@ -18,6 +18,9 @@ import { TurnRequest, type TurnQueue } from './turn-request'
 const STREAM = 'turns'
 const GROUP = 'agents'
 
+/** Which stream this membership reads and writes. */
+const streamOf = (membership: { stream?: string }): string => membership.stream ?? STREAM
+
 /** How long a read waits before looping, so a draining process notices within a second. */
 const BLOCK_MS = 1_000
 
@@ -32,18 +35,29 @@ export type QueueMembership = {
    * piling up in the pending list.
    */
   onFailed: (turn: TurnRequest, error: unknown) => void
+  /**
+   * Which stream. Defaults to the one a deployment uses.
+   *
+   * Configurable because a test suite and a running agent share one Redis, and sharing one
+   * queue means they take each other's work: measured, in both directions -- the agent
+   * claimed ten turns belonging to a test and failed every one of them on a thread that
+   * only existed inside the test, and the test was left waiting for turns that had already
+   * been eaten. A name per run costs nothing and ends it.
+   */
+  stream?: string
 }
 
 export const createRedisTurnQueue = (membership: QueueMembership): TurnQueue => {
   const client = new RedisClient(membership.url)
-  const ready = ensureGroup(client)
+  const stream = streamOf(membership)
+  const ready = ensureGroup(client, stream)
 
   let draining = false
   let consuming: Promise<void> | null = null
 
   const put = async (turn: TurnRequest): Promise<void> => {
     await ready
-    await client.send('XADD', [STREAM, '*', 'turn', JSON.stringify(turn)])
+    await client.send('XADD', [stream, '*', 'turn', JSON.stringify(turn)])
   }
 
   /**
@@ -80,7 +94,7 @@ const consume = async (
   draining: () => boolean,
 ): Promise<void> => {
   while (!draining()) {
-    for (const claimed of await claimNext(client, membership.consumer)) {
+    for (const claimed of await claimNext(client, membership.consumer, streamOf(membership))) {
       await settle(client, membership, handle, claimed)
     }
   }
@@ -99,7 +113,7 @@ const settle = async (
   const done = await finished(handle, claimed.turn, membership.onFailed)
   if (!done) return
 
-  await client.send('XACK', [STREAM, GROUP, claimed.id])
+  await client.send('XACK', [streamOf(membership), GROUP, claimed.id])
 }
 
 /**
@@ -127,6 +141,7 @@ const finished = async (
 const claimNext = async (
   client: RedisClient,
   consumer: string,
+  stream: string,
 ): Promise<{ id: string; turn: TurnRequest }[]> => {
   // ">" means entries no one in this group has claimed.
   const read = (): Promise<unknown> =>
@@ -139,12 +154,12 @@ const claimNext = async (
       'COUNT',
       '1',
       'STREAMS',
-      STREAM,
+      stream,
       '>',
     ])
 
   try {
-    return entriesOf(await read())
+    return entriesOf(await read(), stream)
   } catch (error) {
     // The group existed at startup and does not any more. Redis restarting without
     // persistence does this, and so does anything that drops the key -- measured: running
@@ -155,8 +170,8 @@ const claimNext = async (
     // still in the stream.
     if (!String(error).includes('NOGROUP')) throw error
 
-    await ensureGroup(client)
-    return entriesOf(await read())
+    await ensureGroup(client, stream)
+    return entriesOf(await read(), stream)
   }
 }
 
@@ -164,9 +179,9 @@ const claimNext = async (
  * The group has to exist before anyone reads, and creating it twice is not an error worth
  * propagating -- every process does this at startup and exactly one of them wins.
  */
-const ensureGroup = async (client: RedisClient): Promise<void> => {
+const ensureGroup = async (client: RedisClient, stream: string): Promise<void> => {
   try {
-    await client.send('XGROUP', ['CREATE', STREAM, GROUP, '$', 'MKSTREAM'])
+    await client.send('XGROUP', ['CREATE', stream, GROUP, '$', 'MKSTREAM'])
   } catch (error) {
     if (!String(error).includes('BUSYGROUP')) throw error
   }
@@ -177,10 +192,10 @@ const ensureGroup = async (client: RedisClient): Promise<void> => {
  * `[id, [field, value, ...]]`. An entry that does not parse is left claimed rather than
  * acknowledged away, so it stays where a person can see it.
  */
-const entriesOf = (reply: unknown): { id: string; turn: TurnRequest }[] => {
+const entriesOf = (reply: unknown, stream: string): { id: string; turn: TurnRequest }[] => {
   if (reply === null || typeof reply !== 'object') return []
 
-  const forStream = (reply as Record<string, unknown>)[STREAM]
+  const forStream = (reply as Record<string, unknown>)[stream]
   if (!Array.isArray(forStream)) return []
 
   return forStream.flatMap((entry) => {
