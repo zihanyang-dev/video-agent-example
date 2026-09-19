@@ -27,6 +27,15 @@ const EnvSchema = z.object({
   MODEL_CONTEXT_WINDOW: z.coerce.number().int().positive(),
   MODEL_MAX_TOKENS: z.coerce.number().int().positive(),
 
+  DATABASE_URL: z.string().min(1),
+  REDIS_URL: z.string().min(1),
+
+  OBJECTS_BUCKET: z.string().min(1),
+  OBJECTS_ENDPOINT: z.string().min(1),
+  OBJECTS_ACCESS_KEY: z.string().min(1),
+  OBJECTS_SECRET_KEY: z.string().min(1),
+  OBJECTS_REGION: z.string().default('us-east-1'),
+
   SANDBOX_IMAGE: z.string().min(1),
 
   /**
@@ -34,6 +43,13 @@ const EnvSchema = z.object({
    * way they can spend money. The agent is never told it exists (architecture.md §8).
    */
   GATEWAY_URL: z.string().min(1),
+
+  /**
+   * Names this process within the consumer group. Defaults to the hostname, which is what
+   * a container orchestrator already makes unique; two processes sharing one would each see
+   * a fraction of the work with nothing saying so.
+   */
+  AGENT_NAME: z.string().default(Bun.env['HOSTNAME'] ?? 'agent'),
 })
 
 export type Env = z.infer<typeof EnvSchema>
