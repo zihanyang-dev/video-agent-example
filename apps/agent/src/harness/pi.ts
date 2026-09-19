@@ -190,7 +190,10 @@ const sandboxTools =
   (pi: ExtensionAPI): void => {
     const root = sandbox.roots.host
     const read = {
-      readFile: sandbox.readFile,
+      // pi's read tool wants a Buffer. The port deals in Uint8Array like every other
+      // byte-carrying port here, so the Node-ism is put on here rather than pushed back
+      // into an interface that has nothing to do with pi.
+      readFile: async (path: string) => Buffer.from(await sandbox.readFile(path)),
       access: sandbox.access,
       detectImageMimeType: sandbox.mimeType,
     }

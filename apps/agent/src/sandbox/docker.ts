@@ -22,6 +22,13 @@ import {
 } from './sandbox'
 
 const SANDBOX_ROOT = '/work'
+
+/**
+ * Docker's embedded resolver forwards to the host's, which on some VM-backed runtimes are
+ * not reachable from a user-defined network -- measured: the same lookup succeeds on the
+ * default bridge and times out on ours. Named servers rather than inherited ones.
+ */
+const RESOLVERS = (process.env['SANDBOX_DNS'] ?? '223.5.5.5,8.8.8.8').split(',')
 const IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp'])
 
 export const rentDockerSandbox: RentSandbox = async (spec): Promise<Sandbox> => {
@@ -32,7 +39,7 @@ export const rentDockerSandbox: RentSandbox = async (spec): Promise<Sandbox> => 
 
   // Whoever creates something owns cleaning it up, including when the next step is what
   // fails. Nothing returns a handle here, so there is no `destroy` for a caller to call.
-  const container = await startContainer(spec.image).catch(async (error: unknown) => {
+  const container = await startContainer(spec.image, spec.network).catch(async (error: unknown) => {
     await rm(roots.host, { recursive: true, force: true })
     throw error
   })
@@ -83,8 +90,19 @@ export const rentDockerSandbox: RentSandbox = async (spec): Promise<Sandbox> => 
   }
 }
 
-const startContainer = async (image: string): Promise<string> => {
-  const started = await docker(['run', '-d', '-w', SANDBOX_ROOT, image, 'sleep', 'infinity'])
+const startContainer = async (image: string, network: string): Promise<string> => {
+  const started = await docker([
+    'run',
+    '-d',
+    '-w',
+    SANDBOX_ROOT,
+    '--network',
+    network,
+    ...RESOLVERS.flatMap((resolver) => ['--dns', resolver]),
+    image,
+    'sleep',
+    'infinity',
+  ])
   const id = started.output.toString().trim()
   if (started.exitCode !== 0 || id === '') {
     throw new Error(`could not start sandbox: ${started.output.toString().trim()}`)

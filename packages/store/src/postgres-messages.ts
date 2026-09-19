@@ -1,7 +1,7 @@
 /**
  * The durable conversation, on Postgres.
  *
- * Six statements and no query builder. Nothing here is composed at runtime -- every query
+ * Seven statements and no query builder. Nothing here is composed at runtime -- every query
  * is written out, which is what makes the tagged template safe and why the schema needs no
  * description in TypeScript to mirror it.
  *
@@ -21,6 +21,12 @@ export const createPostgresMessages = (sql: SQL): Messages => ({
     if (row === undefined) return null
 
     return { threadID: row.thread_id, userID: row.user_id } satisfies Thread
+  },
+
+  open: async (thread) => {
+    await sql`
+      insert into threads (thread_id, user_id) values (${thread.threadID}, ${thread.userID})
+    `
   },
 
   read: async (threadID) => {

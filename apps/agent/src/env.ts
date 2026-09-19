@@ -37,12 +37,29 @@ const EnvSchema = z.object({
   OBJECTS_REGION: z.string().default('us-east-1'),
 
   SANDBOX_IMAGE: z.string().min(1),
+  /** The network a sandbox joins, and the only one it is on. */
+  SANDBOX_NETWORK: z.string().min(1),
 
   /**
    * Reaches skill scripts as an environment variable inside the sandbox, and is the only
    * way they can spend money. The agent is never told it exists (architecture.md §8).
    */
   GATEWAY_URL: z.string().min(1),
+
+  /**
+   * Which models the generation skills ask for. Configuration rather than something a script
+   * decides: a wrong one is refused by the provider, and a script carrying a stale default
+   * fails in a way that looks like the provider being down.
+   */
+  SEEDANCE_MODEL: z.string().min(1),
+  SEEDREAM_MODEL: z.string().min(1),
+
+  /**
+   * Signs the token a sandbox carries. The same secret the gateway verifies with, and
+   * shared with nothing else: it is the whole of what separates one turn's spending from
+   * another's.
+   */
+  TURN_TOKEN_SECRET: z.string().min(32),
 
   /**
    * Names this process within the consumer group. Defaults to the hostname, which is what

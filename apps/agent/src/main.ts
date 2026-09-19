@@ -17,19 +17,42 @@ import {
   createRedisLiveStream,
   createS3Files,
 } from '@vid/store'
+import { mintTurnToken } from '@vid/turn-token'
 import { SQL } from 'bun'
+import { z } from 'zod'
 import { readEnv } from './env'
 import { startPiHarness } from './harness/pi'
 import { systemPrompt } from './prompt'
 import { rentDockerSandbox } from './sandbox/docker'
 import { createTurn } from './turn'
 
-const env = readEnv()
+/** What `bun run skills` publishes beside the skills themselves. */
+const SkillIndex = z.array(
+  z.object({ name: z.string().min(1), description: z.string().min(1), dir: z.string().min(1) }),
+)
 
-const SKILLS: never[] = []
+const env = readEnv()
 
 const sql = new SQL(env.DATABASE_URL)
 const live = createRedisLiveStream(env.REDIS_URL)
+const files = createS3Files({
+  bucket: env.OBJECTS_BUCKET,
+  endpoint: env.OBJECTS_ENDPOINT,
+  accessKeyId: env.OBJECTS_ACCESS_KEY,
+  secretAccessKey: env.OBJECTS_SECRET_KEY,
+  region: env.OBJECTS_REGION,
+})
+
+/**
+ * Which skills exist, read once at startup.
+ *
+ * Only their names and descriptions -- the bodies stay in the sandbox where the agent reads
+ * them when a task matches (architecture.md §7). Published separately from a deploy, so a
+ * restart is how this process notices a new one.
+ */
+const SKILLS = SkillIndex.parse(
+  JSON.parse(new TextDecoder().decode(await files.get('skills/index.json'))),
+)
 
 const takeTurn = createTurn({
   rentSandbox: rentDockerSandbox,
@@ -37,13 +60,7 @@ const takeTurn = createTurn({
   live,
   messages: createPostgresMessages(sql),
   sessions: createPostgresSessions(sql),
-  files: createS3Files({
-    bucket: env.OBJECTS_BUCKET,
-    endpoint: env.OBJECTS_ENDPOINT,
-    accessKeyId: env.OBJECTS_ACCESS_KEY,
-    secretAccessKey: env.OBJECTS_SECRET_KEY,
-    region: env.OBJECTS_REGION,
-  }),
+  files,
   model: {
     baseUrl: env.MODEL_BASE_URL,
     apiKey: env.MODEL_API_KEY,
@@ -52,14 +69,23 @@ const takeTurn = createTurn({
     maxTokens: env.MODEL_MAX_TOKENS,
   },
   sandboxImage: env.SANDBOX_IMAGE,
-  sandboxEnv: {
+  sandboxNetwork: env.SANDBOX_NETWORK,
+  // Spelled out, never assembled from this process's environment: a harness hands its tools
+  // the host's entire environment, and forwarding that is how a developer's credentials end
+  // up inside a container running commands a model wrote (architecture.md §5).
+  sandboxEnv: async (request) => ({
     PATH: '/usr/local/bin:/usr/bin:/bin',
     HOME: '/work',
     VID_GATEWAY: env.GATEWAY_URL,
-  },
-  // Empty until skills are published to object storage and carried in with the workspace.
-  // The agent finds them by reading the directory, so nothing here changes when they exist.
-  skills: SKILLS,
+    VID_SEEDANCE_MODEL: env.SEEDANCE_MODEL,
+    VID_SEEDREAM_MODEL: env.SEEDREAM_MODEL,
+    VID_TURN_TOKEN: await mintTurnToken(
+      env.TURN_TOKEN_SECRET,
+      { turnID: request.turnID, threadID: request.threadID },
+      Date.now(),
+    ),
+  }),
+  skills: SKILLS.map((skill) => ({ ...skill, dir: `/work/skills/${skill.dir}` })),
   systemPrompt: systemPrompt(SKILLS),
 })
 

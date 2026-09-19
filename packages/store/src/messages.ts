@@ -22,6 +22,12 @@ export type Thread = {
 export type Messages = {
   /** Null when the thread does not exist. Whether the caller may read it is not decided here. */
   thread: (threadID: string) => Promise<Thread | null>
+  /**
+   * Starts an empty conversation. Separate from the first message on purpose: a turn runs
+   * for minutes and the page that will watch it has to exist first, so a person opens a
+   * conversation and then says something into it.
+   */
+  open: (thread: Thread) => Promise<void>
   read: (threadID: string) => Promise<readonly Message[]>
   append: (threadID: string, message: Message) => Promise<void>
   /**

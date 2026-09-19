@@ -42,7 +42,7 @@ export type ExecOptions = {
 export type Sandbox = {
   roots: SandboxRoots
   exec: (command: string, cwd: string, options: ExecOptions) => Promise<{ exitCode: number | null }>
-  readFile: (path: string) => Promise<Buffer>
+  readFile: (path: string) => Promise<Uint8Array>
   /** Throws when the path is not readable. That is how a read tool reports a missing file. */
   access: (path: string) => Promise<void>
   /** Null for anything that is not an image a model can be shown. */
@@ -57,6 +57,14 @@ export type Sandbox = {
 
 export type SandboxSpec = {
   image: string
+  /**
+   * The one network a sandbox is on.
+   *
+   * Not a Docker detail leaking through: "what this machine can reach" is part of what a
+   * sandbox *is*. It runs commands a model wrote, so the set of things it can talk to has to
+   * be something we state rather than something it inherits (architecture.md §5).
+   */
+  network: string
   /**
    * Everything the sandbox is allowed to know, spelled out.
    *

@@ -10,15 +10,9 @@
  * would need updating every time a provider changed one, and would be a place for a bug to
  * decide what a skill is allowed to ask for.
  */
+import type { TurnToken } from '@vid/turn-token'
 import { Hono } from 'hono'
 import type { Providers } from './providers'
-
-export type TurnToken = {
-  /** Which turn is spending. Everything a provider call costs is attributable to one. */
-  turnID: string
-  threadID: string
-  expiresAt: number
-}
 
 export type ForwardParts = {
   providers: Providers
@@ -55,19 +49,38 @@ export const createForwarder = (parts: ForwardParts): Hono => {
     const path = context.req.path.slice(`/${name}`.length)
     parts.onSpend(token, name, path)
 
-    return fetch(`${provider.baseUrl}${path}${searchOf(context.req.url)}`, {
+    const answered = await fetch(`${provider.baseUrl}${path}${searchOf(context.req.url)}`, {
       method: context.req.method,
       headers: { ...passedThrough(context.req.raw.headers), [provider.header]: provider.key },
       body: context.req.raw.body,
       // Node and Bun both require this once a body is a stream.
       ...(context.req.raw.body === null ? {} : { duplex: 'half' }),
     } as RequestInit)
+
+    return new Response(answered.body, {
+      status: answered.status,
+      statusText: answered.statusText,
+      headers: decoded(answered.headers),
+    })
   })
 
   return app
 }
 
 const searchOf = (url: string): string => new URL(url).search
+
+/**
+ * `fetch` decompresses on the way in, so the body leaving here is plain even when the
+ * upstream one was not. Passing the encoding headers along would tell the caller to
+ * decompress something already decompressed -- which is a ZlibError on the first real call,
+ * not a subtle degradation.
+ */
+const decoded = (headers: Headers): Headers => {
+  const copy = new Headers(headers)
+  copy.delete('content-encoding')
+  copy.delete('content-length')
+  return copy
+}
 
 const passedThrough = (headers: Headers): Record<string, string> => {
   const kept: Record<string, string> = {}

@@ -23,8 +23,15 @@ export type TurnParts = {
   files: Files
   model: ModelChoice
   sandboxImage: string
-  /** Injected into the sandbox. The agent is never told these exist (architecture.md §8). */
-  sandboxEnv: Record<string, string>
+  sandboxNetwork: string
+  /**
+   * What this sandbox is allowed to know, decided per turn.
+   *
+   * A function rather than a value because part of it is: a skill script calls the gateway
+   * with a token good only for the turn it is running in, so a token that leaked outlives
+   * nothing (architecture.md §1). The agent is never told any of this exists (§8).
+   */
+  sandboxEnv: (request: TurnRequest) => Promise<Record<string, string>>
   skills: readonly SkillIndex[]
   systemPrompt: string
 }
@@ -33,7 +40,11 @@ export type TakeTurn = (request: TurnRequest) => Promise<void>
 
 export const createTurn = (parts: TurnParts): TakeTurn => {
   return async (request) => {
-    const sandbox = await parts.rentSandbox({ image: parts.sandboxImage, env: parts.sandboxEnv })
+    const sandbox = await parts.rentSandbox({
+      image: parts.sandboxImage,
+      network: parts.sandboxNetwork,
+      env: await parts.sandboxEnv(request),
+    })
 
     try {
       // The question is recorded before any of it is attempted. A turn that fails still
@@ -45,13 +56,35 @@ export const createTurn = (parts: TurnParts): TakeTurn => {
       })
 
       await carryIn(parts.files, sandbox, request.threadID)
+      await carrySkills(parts.files, sandbox)
       await runInside(parts, sandbox, request)
-      await carryOut(parts.files, sandbox, request.threadID)
     } finally {
-      // The sandbox is rented, not owned. It goes back whatever happened, including when
-      // carrying files out is what failed.
+      // Whatever the turn managed to make is kept, including when the turn failed.
+      //
+      // A failed turn is exactly when this matters most. A script that told a provider to
+      // start rendering writes the job id down before it waits; if that file went away with
+      // the sandbox, the money is spent and nothing remembers what it bought -- so the next
+      // attempt pays again. Measured: a turn that gave up seven seconds after submitting
+      // lost the record of a generation that was still running (architecture.md §4).
+      await salvage(parts, sandbox, request)
+
+      // The sandbox is rented, not owned. It goes back whatever happened.
       await sandbox.destroy()
     }
+  }
+}
+
+/**
+ * Carries the workspace out, and says so rather than throwing if it cannot.
+ *
+ * This runs while a turn may already be failing. Throwing here would replace the reason the
+ * turn failed with the reason we could not tidy up after it.
+ */
+const salvage = async (parts: TurnParts, sandbox: Sandbox, request: TurnRequest): Promise<void> => {
+  try {
+    await carryOut(parts.files, sandbox, request.threadID)
+  } catch (error) {
+    console.error(`turn ${request.turnID}: could not carry the workspace out`, error)
   }
 }
 
@@ -175,14 +208,22 @@ const isRunning = (content: Record<string, unknown>): boolean => content['state'
  * turn: the agent's notes, its cut list, what it decided about shot three, are files.
  */
 const carryIn = async (files: Files, sandbox: Sandbox, threadID: string): Promise<void> => {
-  const prefix = workspaceOf(threadID)
+  await copyInto(files, sandbox, workspaceOf(threadID), '')
+}
+
+const copyInto = async (
+  files: Files,
+  sandbox: Sandbox,
+  prefix: string,
+  into: string,
+): Promise<void> => {
   const keys = await files.list(prefix)
 
   // Directories first, and only the ones actually needed. A file written into a directory
   // that is not there fails, and object storage has no directories to tell us about.
   const wanted = new Set(
     keys
-      .map((key) => key.slice(prefix.length))
+      .map((key) => `${into}${key.slice(prefix.length)}`)
       .map((path) => path.slice(0, path.lastIndexOf('/')))
       .filter((directory) => directory !== ''),
   )
@@ -192,17 +233,35 @@ const carryIn = async (files: Files, sandbox: Sandbox, threadID: string): Promis
 
   for (const key of keys) {
     const bytes = await files.get(key)
-    await sandbox.writeFile(`${sandbox.roots.sandbox}/${key.slice(prefix.length)}`, bytes)
+    await sandbox.writeFile(`${sandbox.roots.sandbox}/${into}${key.slice(prefix.length)}`, bytes)
   }
+}
+
+/**
+ * Skills, into the same sandbox, and they never come back out.
+ *
+ * Their truth is a git repository that CI publishes, so a sandbox writing to them would be
+ * writing to a copy (architecture.md §7). Carried in beside the thread's own files because
+ * that is where the agent looks -- it finds them by reading the directory, not by being
+ * handed a list.
+ */
+const carrySkills = async (files: Files, sandbox: Sandbox): Promise<void> => {
+  await copyInto(files, sandbox, SKILLS_PREFIX, `${SKILLS_DIR}/`)
 }
 
 const carryOut = async (files: Files, sandbox: Sandbox, threadID: string): Promise<void> => {
   const prefix = workspaceOf(threadID)
 
   for (const path of await sandbox.list()) {
+    // Skills came from object storage and are read-only here. Writing them back would make
+    // this thread's copy the next turn's source.
+    if (path === SKILLS_DIR || path.startsWith(`${SKILLS_DIR}/`)) continue
     const bytes = await sandbox.readFile(`${sandbox.roots.sandbox}/${path}`)
     await files.put(`${prefix}${path}`, bytes)
   }
 }
 
 const workspaceOf = (threadID: string): string => `threads/${threadID}/`
+
+const SKILLS_PREFIX = 'skills/'
+const SKILLS_DIR = 'skills'

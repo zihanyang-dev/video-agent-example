@@ -1,8 +1,16 @@
 # Everything a developer needs running to work on this, and nothing a deploy uses.
 #
+# The network is named rather than left to compose, because sandboxes join it by name. A
+# sandbox needs to reach exactly one thing -- the gateway -- and putting them on a network of
+# their own is what makes "exactly one thing" enforceable rather than aspirational.
+#
 # The Postgres patch version is pinned rather than floated. `pg_dump` stamps its own version
 # into the schema dump, so an image that moved underneath someone would make `check` fail on
 # a diff nobody wrote.
+networks:
+  sandbox:
+    name: vid-sandbox
+
 services:
   db:
     image: postgres:17.11-alpine
@@ -43,6 +51,26 @@ services:
 
   # Makes the bucket once and exits. `docker compose run --rm objects-ready` is the whole of
   # first-time setup.
+  # The only thing a sandbox is allowed to reach. It is here rather than run by hand so that
+  # sandboxes can find it by name on a network they share with nothing else.
+  gateway:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/gateway.Dockerfile
+    environment:
+      PORT: 8080
+    # In a file rather than `${VAR:?}`: compose interpolates the whole file whatever service
+    # you name, so a required variable here made `docker compose exec db pg_dump` -- which
+    # wants nothing from the gateway -- refuse to run without the provider credentials.
+    # Missing file is still a hard failure, which is the part that was worth keeping.
+    env_file: [gateway.env]
+    ports: ['8080:8080']
+    networks: [sandbox]
+    # Docker's embedded resolver reaches the host's resolvers, which on some VM-backed
+    # runtimes are not reachable from a user-defined network -- measured: the same lookup
+    # succeeds on the default bridge and times out here.
+    dns: ['223.5.5.5', '8.8.8.8']
+
   objects-ready:
     image: quay.io/minio/mc:latest
     depends_on:

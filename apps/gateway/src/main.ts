@@ -7,7 +7,7 @@
  */
 import { readEnv } from './env'
 import { createForwarder } from './forward'
-import { createTokenReader } from './turn-token'
+import { createTokenReader } from '@vid/turn-token'
 
 const env = readEnv()
 

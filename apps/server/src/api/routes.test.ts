@@ -38,6 +38,7 @@ const server = Bun.serve({
       return userID === null || userID === '' ? null : { userID }
     },
     newTurnID: () => 'turn-fixed',
+    newThreadID: () => 'thread-fixed',
   }).fetch,
 })
 
@@ -49,7 +50,7 @@ beforeAll(async () => {
 afterAll(async () => {
   server.stop(true)
   live.close()
-  await sql`delete from threads where thread_id = ${thread}`
+  await sql`delete from threads where thread_id in (${thread}, ${'thread-fixed'})`
   await sql.close()
 })
 
@@ -98,6 +99,23 @@ const frames = async (headers: Record<string, string>, want: number, then?: () =
   await reader.cancel()
   return found
 }
+
+describe('starting a conversation', () => {
+  test('gives back an id the caller did not choose, owned by whoever asked', async () => {
+    const response = await fetch(at('/threads'), { method: 'POST', headers: owner })
+
+    expect(response.status).toBe(201)
+    expect(await response.json()).toEqual({ threadID: 'thread-fixed' })
+    expect(await messages.thread('thread-fixed')).toEqual({
+      threadID: 'thread-fixed',
+      userID: 'owner',
+    })
+  })
+
+  test('is not something a stranger off the street can do', async () => {
+    expect((await fetch(at('/threads'), { method: 'POST' })).status).toBe(401)
+  })
+})
 
 describe('who is asking', () => {
   test('no session gets nothing', async () => {

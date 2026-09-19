@@ -1,6 +1,10 @@
 /**
  * A token good for one turn's spending, and nothing else.
  *
+ * A package rather than part of either app, because both ends need it and neither owns it:
+ * the agent mints one when it rents a sandbox, and the gateway verifies it when a script
+ * inside that sandbox calls a provider.
+ *
  * Signed rather than looked up, so this process needs no database and no shared state with
  * the one that mints them -- a gateway that had to ask something else whether a token was
  * real would be down whenever that something was.
@@ -9,7 +13,18 @@
  * is what a provider call has to be attributable to. Anything about who may spend how much
  * was decided before the token existed.
  */
-import type { TurnToken } from './forward'
+
+/**
+ * What a turn is allowed to spend on, and nothing about who.
+ *
+ * It says which turn is spending, which is what a provider call has to be attributable to.
+ * Anything about who may spend how much was decided before the token existed.
+ */
+export type TurnToken = {
+  turnID: string
+  threadID: string
+  expiresAt: number
+}
 
 const encoder = new TextEncoder()
 

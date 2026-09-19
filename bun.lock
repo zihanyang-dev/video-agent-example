@@ -21,6 +21,7 @@
         "@vid/contract": "workspace:*",
         "@vid/queue": "workspace:*",
         "@vid/store": "workspace:*",
+        "@vid/turn-token": "workspace:*",
         "zod": "^4.0.0",
       },
     },
@@ -28,6 +29,7 @@
       "name": "@vid/gateway",
       "version": "0.0.0",
       "dependencies": {
+        "@vid/turn-token": "workspace:*",
         "hono": "^4.13.8",
         "zod": "^4.0.0",
       },
@@ -67,6 +69,10 @@
         "@vid/contract": "workspace:*",
         "zod": "^4",
       },
+    },
+    "packages/turn-token": {
+      "name": "@vid/turn-token",
+      "version": "0.0.0",
     },
   },
   "packages": {
@@ -315,6 +321,8 @@
     "@vid/server": ["@vid/server@workspace:apps/server"],
 
     "@vid/store": ["@vid/store@workspace:packages/store"],
+
+    "@vid/turn-token": ["@vid/turn-token@workspace:packages/turn-token"],
 
     "agent-base": ["agent-base@7.1.4", "", {}, "sha512-MnA+YT8fwfJPgBx3m60MNqakm30XOkyIoH1y6huTQvC0PwZG7ki8NacLBcrPbNoo8vEZy7Jpuk7+jMO+CUovTQ=="],
 

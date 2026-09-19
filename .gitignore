@@ -4,3 +4,7 @@ dist/
 *.tsbuildinfo
 .env
 .env.local
+
+# Real credentials. The gateway is the only process that holds them (architecture.md §1).
+deploy/docker/gateway.env
+.DS_Store

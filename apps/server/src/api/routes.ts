@@ -24,10 +24,22 @@ export type ApiParts = {
   readerOf: (request: Request) => Promise<Reader | null>
   /** Ids are minted here so a caller cannot choose one and collide with another turn. */
   newTurnID: () => string
+  /** Same reason as `newTurnID`: a caller who picks the id picks which thread to collide with. */
+  newThreadID: () => string
 }
 
 export const createRoutes = (parts: ApiParts): Hono => {
   const app = new Hono()
+
+  app.post('/threads', async (context) => {
+    const reader = await parts.readerOf(context.req.raw)
+    if (reader === null) return context.text('sign in', 401)
+
+    const threadID = parts.newThreadID()
+    await parts.messages.open({ threadID, userID: reader.userID })
+
+    return context.json({ threadID }, 201)
+  })
 
   app.get('/threads/:thread/events', async (context) => {
     const reader = await parts.readerOf(context.req.raw)

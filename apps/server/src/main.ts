@@ -33,6 +33,7 @@ const app = createRoutes({
     return userID === null || userID === '' ? null : { userID }
   },
   newTurnID: () => crypto.randomUUID(),
+  newThreadID: () => crypto.randomUUID(),
 })
 
 const server = Bun.serve({ port: env.PORT, fetch: app.fetch, idleTimeout: 0 })

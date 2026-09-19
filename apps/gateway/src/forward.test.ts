@@ -6,8 +6,8 @@
  * call being counted as spending.
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
-import { createForwarder, type TurnToken } from './forward'
-import { createTokenReader, mintTurnToken } from './turn-token'
+import { createTokenReader, mintTurnToken, type TurnToken } from '@vid/turn-token'
+import { createForwarder } from './forward'
 
 const SECRET = 'a'.repeat(48)
 const REAL_KEY = 'the-real-provider-key'
@@ -20,6 +20,16 @@ const provider = Bun.serve({
   port: 0,
   fetch: async (request) => {
     const url = new URL(request.url)
+
+    // Real providers compress. A gateway that forwards the encoding header along with a
+    // body `fetch` already decompressed hands the caller a ZlibError -- which is how this
+    // was found, on the first call that left the machine.
+    if (url.pathname === '/compressed') {
+      return new Response(Bun.gzipSync(new TextEncoder().encode('{"ok":true}')), {
+        headers: { 'content-encoding': 'gzip', 'content-type': 'application/json' },
+      })
+    }
+
     return Response.json({
       method: request.method,
       path: url.pathname,
@@ -146,6 +156,20 @@ describe('a call that must not spend anything', () => {
     await call('/seedance/v1/x', withToken('nonsense'))
 
     expect(spends).toHaveLength(before)
+  })
+})
+
+describe('a compressed answer', () => {
+  test('is readable by the caller', async () => {
+    const response = await call('/seedance/compressed', withToken())
+
+    expect(await response.json()).toEqual({ ok: true })
+  })
+
+  test('does not claim an encoding it no longer has', async () => {
+    const response = await call('/seedance/compressed', withToken())
+
+    expect(response.headers.get('content-encoding')).toBeNull()
   })
 })
 
