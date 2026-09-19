@@ -10,6 +10,7 @@
  * reader arriving after the window has passed reads that instead.
  */
 import type { Event } from '@ag-ui/core'
+import { EventSchema } from '@ag-ui/core/schemas'
 import { RedisClient } from 'bun'
 import type { LiveStream, StreamCursor } from './live'
 
@@ -92,6 +93,14 @@ const entriesOf = (reply: unknown, key: string): { id: string; event: Event }[] 
   return forKey.flatMap(decode)
 }
 
+const safeJson = (text: string): unknown => {
+  try {
+    return JSON.parse(text)
+  } catch {
+    return null
+  }
+}
+
 const decode = (entry: unknown): { id: string; event: Event }[] => {
   if (!Array.isArray(entry)) return []
 
@@ -101,11 +110,12 @@ const decode = (entry: unknown): { id: string; event: Event }[] => {
   const payload = at === -1 ? undefined : fields[at + 1]
   if (payload === undefined) return []
 
-  // A malformed entry is dropped rather than thrown: one bad write must not end a stream
-  // everything else is still being read from.
-  try {
-    return [{ id, event: JSON.parse(payload) as Event }]
-  } catch {
-    return []
-  }
+  // Parsed rather than asserted. This is a message from another process (code-style §4.1):
+  // an agent a version behind, or anything else that reached this key, would otherwise be
+  // handed to a browser as though we had written it.
+  //
+  // A bad entry is dropped rather than thrown. One of them must not end a stream everything
+  // else is still being read from.
+  const parsed = EventSchema.safeParse(safeJson(payload))
+  return parsed.success ? [{ id, event: parsed.data as Event }] : []
 }

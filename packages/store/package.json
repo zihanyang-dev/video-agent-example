@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "@ag-ui/core": "^1.0.0",
-    "@vid/contract": "workspace:*"
+    "@vid/contract": "workspace:*",
+    "zod": "^4"
   }
 }
