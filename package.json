@@ -8,7 +8,7 @@
     "packages/*"
   ],
   "scripts": {
-    "check": "tsc --build && oxlint . && bun run schema && git diff --exit-code packages/store/schema.txt",
+    "check": "tsc --build && oxlint . && bun run schema && git diff --exit-code packages/store/schema.sql",
     "typecheck": "tsc --build",
     "schema": "bun --cwd packages/store scripts/schema.ts",
     "migrate": "bun --cwd packages/store scripts/migrate.ts",
