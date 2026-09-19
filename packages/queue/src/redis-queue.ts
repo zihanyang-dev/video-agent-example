@@ -1,0 +1,189 @@
+/**
+ * The turn queue, on a Redis stream with a consumer group.
+ *
+ * The same Redis the live stream already needs, so this adds no dependency. A consumer
+ * group is what makes it a queue rather than a broadcast: every agent process reads from one
+ * group, so each turn goes to exactly one of them, and a turn stays claimed until it is
+ * acknowledged.
+ *
+ * Nothing here retries a turn that failed. An unacknowledged entry stays in the group's
+ * pending list, where it is visible and recoverable, and what to do with it is a judgement
+ * about money: a turn that died after telling a provider to render has already spent some,
+ * and replaying it spends it again (architecture.md §4). A person looks and decides, which
+ * is what `unknown` means.
+ */
+import { RedisClient } from 'bun'
+import { TurnRequest, type TurnQueue } from './turn-request'
+
+const STREAM = 'turns'
+const GROUP = 'agents'
+
+/** How long a read waits before looping, so a draining process notices within a second. */
+const BLOCK_MS = 1_000
+
+export type QueueMembership = {
+  url: string
+  /** Names this process within the group. Two processes must not share one. */
+  consumer: string
+  /**
+   * Told about a turn that failed, which stays claimed.
+   *
+   * Not optional. A queue that swallowed these would hide the only signal that work is
+   * piling up in the pending list.
+   */
+  onFailed: (turn: TurnRequest, error: unknown) => void
+}
+
+export const createRedisTurnQueue = (membership: QueueMembership): TurnQueue => {
+  const client = new RedisClient(membership.url)
+  const ready = ensureGroup(client)
+
+  let draining = false
+  let consuming: Promise<void> | null = null
+
+  const put = async (turn: TurnRequest): Promise<void> => {
+    await ready
+    await client.send('XADD', [STREAM, '*', 'turn', JSON.stringify(turn)])
+  }
+
+  /**
+   * Loudly, because two loops on one connection would race for the same entries and each
+   * would see a fraction of the work with nothing saying so.
+   */
+  const take = async (handle: (turn: TurnRequest) => Promise<void>): Promise<void> => {
+    if (consuming !== null) throw new Error(`${membership.consumer} is already taking turns`)
+
+    await ready
+    consuming = consume(client, membership, handle, () => draining)
+    await consuming
+  }
+
+  /**
+   * Stops claiming new turns and waits for the one in flight.
+   *
+   * The client closes only after the loop has left. Closing it under a blocked read raises
+   * an error from a call nobody is waiting on any more.
+   */
+  const close = async (): Promise<void> => {
+    draining = true
+    await consuming
+    client.close()
+  }
+
+  return { put, take, close }
+}
+
+const consume = async (
+  client: RedisClient,
+  membership: QueueMembership,
+  handle: (turn: TurnRequest) => Promise<void>,
+  draining: () => boolean,
+): Promise<void> => {
+  while (!draining()) {
+    for (const claimed of await claimNext(client, membership.consumer)) {
+      await settle(client, membership, handle, claimed)
+    }
+  }
+}
+
+/**
+ * Acknowledged only once the turn is through, so a process killed mid-turn leaves its entry
+ * pending rather than losing it.
+ */
+const settle = async (
+  client: RedisClient,
+  membership: QueueMembership,
+  handle: (turn: TurnRequest) => Promise<void>,
+  claimed: { id: string; turn: TurnRequest },
+): Promise<void> => {
+  const done = await finished(handle, claimed.turn, membership.onFailed)
+  if (!done) return
+
+  await client.send('XACK', [STREAM, GROUP, claimed.id])
+}
+
+/**
+ * False when the turn failed, which leaves it claimed.
+ *
+ * The failure is reported and the loop carries on. One turn that cannot be finished must not
+ * stop this process from taking the next: a sandbox that would not start, or a provider that
+ * was down, says nothing about the turn behind it.
+ */
+const finished = async (
+  handle: (turn: TurnRequest) => Promise<void>,
+  turn: TurnRequest,
+  onFailed: QueueMembership['onFailed'],
+): Promise<boolean> => {
+  try {
+    await handle(turn)
+    return true
+  } catch (error) {
+    onFailed(turn, error)
+    return false
+  }
+}
+
+/** Waits for one turn nobody in the group has been given yet, or for the block to lapse. */
+const claimNext = async (
+  client: RedisClient,
+  consumer: string,
+): Promise<{ id: string; turn: TurnRequest }[]> => {
+  // ">" means entries no one in this group has claimed.
+  const reply = await client.send('XREADGROUP', [
+    'GROUP',
+    GROUP,
+    consumer,
+    'BLOCK',
+    String(BLOCK_MS),
+    'COUNT',
+    '1',
+    'STREAMS',
+    STREAM,
+    '>',
+  ])
+  return entriesOf(reply)
+}
+
+/**
+ * The group has to exist before anyone reads, and creating it twice is not an error worth
+ * propagating -- every process does this at startup and exactly one of them wins.
+ */
+const ensureGroup = async (client: RedisClient): Promise<void> => {
+  try {
+    await client.send('XGROUP', ['CREATE', STREAM, GROUP, '$', 'MKSTREAM'])
+  } catch (error) {
+    if (!String(error).includes('BUSYGROUP')) throw error
+  }
+}
+
+/**
+ * XREADGROUP answers in the same shape XREAD does: a map keyed by stream name, each entry
+ * `[id, [field, value, ...]]`. An entry that does not parse is left claimed rather than
+ * acknowledged away, so it stays where a person can see it.
+ */
+const entriesOf = (reply: unknown): { id: string; turn: TurnRequest }[] => {
+  if (reply === null || typeof reply !== 'object') return []
+
+  const forStream = (reply as Record<string, unknown>)[STREAM]
+  if (!Array.isArray(forStream)) return []
+
+  return forStream.flatMap((entry) => {
+    if (!Array.isArray(entry)) return []
+
+    const fields = (Array.isArray(entry[1]) ? entry[1] : []).map(String)
+    const at = fields.indexOf('turn')
+    const payload = at === -1 ? undefined : fields[at + 1]
+    if (payload === undefined) return []
+
+    const parsed = TurnRequest.safeParse(safeJson(payload))
+    return parsed.success ? [{ id: String(entry[0]), turn: parsed.data }] : []
+  })
+}
+
+const safeJson = (text: string): unknown => {
+  try {
+    return JSON.parse(text)
+  } catch {
+    return null
+  }
+}
