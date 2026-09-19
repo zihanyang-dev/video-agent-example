@@ -49,7 +49,13 @@ export const createRedisLiveStream = (url: string): RedisLiveStream => {
     let position = cursor.after ?? '0'
 
     while (!signal.aborted) {
-      const reply = await client.send('XREAD', ['BLOCK', String(BLOCK_MS), 'STREAMS', key, position])
+      const reply = await client.send('XREAD', [
+        'BLOCK',
+        String(BLOCK_MS),
+        'STREAMS',
+        key,
+        position,
+      ])
 
       for (const entry of entriesOf(reply, key)) {
         position = entry.id

@@ -3,9 +3,12 @@
   "private": true,
   "type": "module",
   "packageManager": "bun@1.4.2",
-  "workspaces": ["apps/*", "packages/*"],
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
   "scripts": {
-    "check": "tsc --build && oxlint . && bun run schema && git diff --exit-code packages/store/schema.sql",
+    "check": "tsc --build && oxlint . && bun run schema && git diff --exit-code packages/store/schema.txt",
     "typecheck": "tsc --build",
     "schema": "bun --cwd packages/store scripts/schema.ts",
     "migrate": "bun --cwd packages/store scripts/migrate.ts",

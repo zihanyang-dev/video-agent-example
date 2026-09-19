@@ -62,10 +62,8 @@ export const createS3Files = (settings: S3Settings): Files => {
       await bucket.write(key, bytes)
     },
 
-    uploadUrl: async (key) =>
-      bucket.presign(key, { method: 'PUT', expiresIn: EXPIRES_SECONDS }),
+    uploadUrl: async (key) => bucket.presign(key, { method: 'PUT', expiresIn: EXPIRES_SECONDS }),
 
-    downloadUrl: async (key) =>
-      bucket.presign(key, { method: 'GET', expiresIn: EXPIRES_SECONDS }),
+    downloadUrl: async (key) => bucket.presign(key, { method: 'GET', expiresIn: EXPIRES_SECONDS }),
   }
 }

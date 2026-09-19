@@ -19,7 +19,7 @@
  * There is no `down`. A migration that was wrong is fixed by a later migration: reversing
  * one on a database that has taken writes since is a guess.
  *
- * What these files add up to is written out by `schema.ts`, so nobody has to replay them in
+ * What these files add up to is written out by `schema.ts` into `schema.txt`, so nobody has to replay them in
  * their head to know what a table looks like.
  */
 import { readdir } from 'node:fs/promises'
