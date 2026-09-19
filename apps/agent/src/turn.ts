@@ -36,6 +36,14 @@ export const createTurn = (parts: TurnParts): TakeTurn => {
     const sandbox = await parts.rentSandbox({ image: parts.sandboxImage, env: parts.sandboxEnv })
 
     try {
+      // The question is recorded before any of it is attempted. A turn that fails still
+      // leaves a conversation where someone can see what they asked for.
+      await parts.messages.append(request.threadID, {
+        id: `${request.turnID}:asked`,
+        role: 'user',
+        content: request.message,
+      })
+
       await carryIn(parts.files, sandbox, request.threadID)
       await runInside(parts, sandbox, request)
       await carryOut(parts.files, sandbox, request.threadID)
@@ -74,7 +82,11 @@ const runInside = async (
     // screen forever; the turn ending is the only evidence that it stopped.
     for (const abandoned of projection.settle()) deliver.take(abandoned)
 
-    await deliver.drain()
+    // Reported rather than thrown. A turn that already failed must not have its reason
+    // replaced by whatever went wrong while writing down that it failed.
+    await deliver.drain().catch((error: unknown) => {
+      console.error(`turn ${request.turnID}: not everything was recorded`, error)
+    })
     await parts.sessions.write(request.threadID, harness.entries())
     harness.dispose()
   }
@@ -90,27 +102,38 @@ const runInside = async (
  * Text is assembled here because AG-UI's TEXT_MESSAGE_END carries no content -- it says a
  * message finished, not what it said.
  */
-const createDelivery = (parts: TurnParts, threadID: string) => {
+type Delivery = {
+  take: (event: Event) => void
+  drain: () => Promise<void>
+}
+
+const createDelivery = (parts: TurnParts, threadID: string): Delivery => {
   const assembling = new Map<string, string>()
   const settled = new Set<string>()
-  const writes: Promise<unknown>[] = []
+
+  // Two chains, because the two stores order differently. The stream is one connection and
+  // keeps the order its commands were issued in; the database is a pool and does not --
+  // measured, and what came back was shuffled, which on a reload is a conversation whose
+  // turns have swapped places. So each write waits for the one before it.
+  let published: Promise<unknown> = Promise.resolve()
+  let stored: Promise<unknown> = Promise.resolve()
 
   const take = (event: Event): void => {
-    writes.push(parts.live.publish(threadID, event))
+    published = published.then(() => parts.live.publish(threadID, event))
 
     const durable = keep(event, assembling)
     if (durable === null) return
 
     const seen = settled.has(durable.id)
     settled.add(durable.id)
-    writes.push(
+    stored = stored.then(() =>
       seen ? parts.messages.replace(threadID, durable) : parts.messages.append(threadID, durable),
     )
   }
 
-  /** Every store write started during the turn has landed before the turn reports done. */
+  /** Every write started during the turn has landed before the turn reports done. */
   const drain = async (): Promise<void> => {
-    await Promise.all(writes)
+    await Promise.all([published, stored])
   }
 
   return { take, drain }

@@ -1,7 +1,11 @@
 /**
- * pi, wired to run against a sandbox.
+ * Assembling a pi session that runs against a sandbox.
  *
- * The only file allowed to name pi. What comes out is AG-UI; `message_update`,
+ * Half of the pi adapter. This half changes when a provider or a setting does; translating
+ * pi's event stream changes when pi's stream does, and lives in `pi-events.ts`. Neither
+ * name leaves this directory.
+ *
+ * Only this directory names pi. What comes out is AG-UI; `message_update`,
  * `tool_execution_update` and every other name in pi's vocabulary stop here
  * (architecture.md §6).
  *
@@ -12,7 +16,7 @@
  * disk. pi's defaults are built for one person at a terminal; we are a server where every
  * turn belongs to a different tenant.
  */
-import { EventType, type Event } from '@ag-ui/core'
+import { EventType } from '@ag-ui/core'
 import {
   createAgentSession,
   createBashTool,
@@ -30,9 +34,9 @@ import {
   type Skill,
 } from '@earendil-works/pi-coding-agent'
 import { InMemoryCredentialStore } from '@earendil-works/pi-ai'
-import { z } from 'zod'
 import type { Sandbox } from '../sandbox/sandbox'
 import type { Harness, HarnessInput, ModelChoice, SkillIndex, StartHarness } from './harness'
+import { relayEvents } from './pi-events'
 
 export const startPiHarness: StartHarness = async (input): Promise<Harness> => {
   const modelRuntime = await configureModel(input.model)
@@ -63,7 +67,7 @@ export const startPiHarness: StartHarness = async (input): Promise<Harness> => {
   })
 
   verifyDelegation(session)
-  const unwatch = watch(session, input)
+  const stopRelay = relayEvents(session, input)
 
   return {
     run: (message) => runOnce(session, input, message),
@@ -74,7 +78,7 @@ export const startPiHarness: StartHarness = async (input): Promise<Harness> => {
       return { tokens: stats.tokens.total, usd: stats.cost }
     },
     dispose: () => {
-      unwatch()
+      stopRelay()
       session.dispose()
     },
   }
@@ -250,104 +254,9 @@ const verifyDelegation = (session: AgentSession): void => {
 }
 
 /**
- * pi carries no stable message id -- an assistant message has a model and a timestamp but no
- * identity -- so one is minted per turn. `contentIndex` separates spans within a message;
- * the counter separates messages within a turn.
- */
-const watch = (session: AgentSession, input: HarnessInput): (() => void) => {
-  let messageIndex = 0
-
-  return session.subscribe((event) => {
-    if (event.type === 'message_start') {
-      messageIndex += 1
-      return
-    }
-    if (event.type === 'message_update') {
-      const id = `${input.turnID}:${messageIndex}`
-      for (const translated of fromAssistant(event.assistantMessageEvent, id))
-        input.onEvent(translated)
-      return
-    }
-    if (event.type === 'tool_execution_update') {
-      for (const announced of input.projection.fromOutput(textOf(event.partialResult))) {
-        input.onEvent(announced)
-      }
-    }
-    // Everything else produces nothing. Not a gap -- that is the rule (architecture.md §6).
-  })
-}
-
-const fromAssistant = (event: AssistantEvent, id: string): readonly Event[] => {
-  const messageId = 'contentIndex' in event ? `${id}:${event.contentIndex}` : id
-
-  if (event.type === 'text_start') {
-    return [{ type: EventType.TEXT_MESSAGE_START, messageId, role: 'assistant' }]
-  }
-  if (event.type === 'text_delta') {
-    return [{ type: EventType.TEXT_MESSAGE_CONTENT, messageId, delta: strip(event.delta) }]
-  }
-  if (event.type === 'text_end') {
-    return [{ type: EventType.TEXT_MESSAGE_END, messageId }]
-  }
-  return fromReasoning(event, messageId)
-}
-
-/**
- * Reasoning has its own channel, and that is the point: it must never arrive as message
- * text. It is shown while a turn runs and never stored -- the model's working notes are not
- * the conversation (architecture.md §3).
- */
-const fromReasoning = (event: AssistantEvent, messageId: string): readonly Event[] => {
-  if (event.type === 'thinking_start') {
-    return [{ type: EventType.REASONING_MESSAGE_START, messageId, role: 'reasoning' }]
-  }
-  if (event.type === 'thinking_delta') {
-    return [{ type: EventType.REASONING_MESSAGE_CONTENT, messageId, delta: event.delta }]
-  }
-  if (event.type === 'thinking_end') {
-    return [{ type: EventType.REASONING_MESSAGE_END, messageId }]
-  }
-  return []
-}
-
-/**
- * Some gateways inline reasoning into message text as a `<thinking>` block instead of
- * sending it on the reasoning channel. Observed once in three real runs against an
- * OpenAI-compatible endpoint. Rare is not good enough: a person seeing the model's private
- * working once is an incident, so it is removed here rather than hoped about.
- */
-const strip = (delta: string): string => delta.replace(/<\/?thinking>/g, '')
-
-/**
- * A tool's partial result is untyped on pi's side, so it is parsed rather than asserted --
- * this is a tool's JSON crossing into our code, which is exactly where §4.1 puts runtime
- * validation. Anything that does not match is simply not output a person could be shown.
- */
-const ToolText = z.object({
-  content: z.array(z.object({ type: z.string(), text: z.string().optional() })),
-})
-
-const textOf = (partial: unknown): string => {
-  const parsed = ToolText.safeParse(partial)
-  if (!parsed.success) return ''
-
-  return parsed.data.content
-    .filter((block) => block.type === 'text')
-    .map((block) => block.text ?? '')
-    .join('')
-}
-
-/**
  * The port treats stored history as opaque, because its shape belongs to whichever harness
  * wrote it. This is the one place that knows the shape is pi's, so this is where it is said
  * -- and it is said with pi's own type rather than a cast that would accept anything.
  */
 const asSessionEntries = (history: readonly unknown[] | undefined): FileEntry[] | undefined =>
   history === undefined ? undefined : (history.slice() as FileEntry[])
-
-type AssistantEvent =
-  Parameters<Parameters<AgentSession['subscribe']>[0]> extends [infer E]
-    ? E extends { type: 'message_update'; assistantMessageEvent: infer A }
-      ? A
-      : never
-    : never
