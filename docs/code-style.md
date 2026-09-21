@@ -266,11 +266,7 @@ const RenderRequestSchema = z.object({ … })
 cast」—— 这句话是错的,验过:`z.string().brand<'ThreadID'>()` 解析出来**就是** branded 类型,一次
 cast 都不用写,把 `TurnID` 传进吃 `ThreadID` 的函数当场编译失败。
 
-不用的真实理由是现在混不起来:id 只在 `turn.ts` 一条链路上流动,`threadID` 和 `turnID` 在同一个
-函数签名里并排出现,传反了在调用处就看得见。
-
-**重新评估的条件**:id 开始跨模块传递、或者出现第三个 id,那时「并排就看得见」不再成立,
-brand 的成本(每个 owner 多一个 schema)就买得到东西了。
+当前 ID 已跨应用传递，不能再以「都在 turn.ts」作为省略边界设计的理由。传参用具名对象区分 `commandID`、`threadID`、`turnID`、`eventID`；共享 wire 的类型从 schema 推导，领域类型由各 owner 持有。是否引入 branded ID，以真实误用风险和模块间传播成本决定，不为每个字符串添加没有消费者的包装。
 
 ### 4.4 非法状态无法表达 `人工`
 
@@ -512,21 +508,18 @@ expect(outcome.video.durationMs).toBeCloseTo(30_000, -2)
 
 ---
 
-## 12. 还没有的规则
+## 12. 持久化与依赖边界
 
-下面这些本文件暂时不收,因为项目里还不存在对应的东西。**加进来的时候再写,不要提前写。**
+- 迁移位于数据 owner 所属应用的 `migrations/`，只前向修正；`scripts/database` 负责部署时重放。生成的 schema 用 `schema:check` 校验，不手改。
+- 产品 SQL 位于 server 模块的持久化/发送适配器，执行 SQL 位于 agent 的持久化/发送适配器；唯一约束与事务保护并发不变量。部署脚本和集成测试可直接访问数据库。
+- domain 不依赖 application、适配器、框架或共享 wire；application 不依赖适配器；跨应用不 import；共享包不依赖应用。模块间只访问公开入口。`bun run boundaries` 同时检查类型导入和循环依赖。
+- 应用配置只在 `src/env.ts` 读取。独立部署 CLI 和测试是各自的进程边界，可以读取自己的配置，不把环境读取带入业务核心。
 
-```
-SQL 与持久化        现在没有数据库。接了之后补:migration 只前向、类型从活 schema 生成、
-                    SQL 只出现在 db/、唯一索引强制幂等
-可访问性            现在没有 web UI
-```
-
-写着"某某会查"而实际没有那个检查,比什么都不写更糟。
+可访问性目前仍需人工检查；没有启用自动规则的部分不宣称由工具保证。
 
 ---
 
 ## 来源
 
 本文件搬自 [zihanyang-dev/handover](https://github.com/zihanyang-dev/handover) 的 `docs/code-style.md`,
-规则文字基本保留,示例换成本项目的领域词,删掉了项目里尚不存在的章节(见 §12)。
+规则按本项目的领域、持久化和分层约束持续修订。

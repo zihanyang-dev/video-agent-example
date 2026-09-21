@@ -1,67 +1,54 @@
 /**
- * A token good for one turn's spending, and nothing else.
- *
- * A package rather than part of either app, because both ends need it and neither owns it:
- * the agent mints one when it rents a sandbox, and the gateway verifies it when a script
- * inside that sandbox calls a provider.
- *
- * Signed rather than looked up, so this process needs no database and no shared state with
- * the one that mints them -- a gateway that had to ask something else whether a token was
- * real would be down whenever that something was.
- *
- * It carries no user, no account and no entitlement. It says which turn is spending, which
- * is what a provider call has to be attributable to. Anything about who may spend how much
- * was decided before the token existed.
+ * Agent and gateway share signature rules without importing either application. Local
+ * verification lets the gateway authorize a sandbox request without calling the agent.
+ * The token attributes requests to a turn; it does not enforce billing or entitlements.
  */
+import { z } from 'zod'
 
-/**
- * What a turn is allowed to spend on, and nothing about who.
- *
- * It says which turn is spending, which is what a provider call has to be attributable to.
- * Anything about who may spend how much was decided before the token existed.
- */
-export type TurnToken = {
-  turnID: string
-  threadID: string
-  expiresAt: number
-}
+const TurnToken = z.object({
+  turnID: z.string().min(1),
+  threadID: z.string().min(1),
+  expiresAt: z.number(),
+})
+
+export type TurnToken = z.infer<typeof TurnToken>
 
 const encoder = new TextEncoder()
 
-/** Long enough for a render to finish, short enough that a leaked one is nearly spent. */
+/** Tokens expire one hour after issuance; expiration does not track whether a run has ended. */
 export const TOKEN_LIFETIME_MS = 60 * 60 * 1000
 
 export const mintTurnToken = async (
   secret: string,
   claims: Omit<TurnToken, 'expiresAt'>,
-  now: number,
+  nowMs: number,
 ): Promise<string> => {
-  const body = JSON.stringify({ ...claims, expiresAt: now + TOKEN_LIFETIME_MS })
-  const payload = base64(encoder.encode(body))
-  return `${payload}.${await sign(secret, payload)}`
+  const body = JSON.stringify({ ...claims, expiresAt: nowMs + TOKEN_LIFETIME_MS })
+  const encodedClaims = encodeBase64Url(encoder.encode(body))
+  return `${encodedClaims}.${await sign(secret, encodedClaims)}`
 }
 
 export const createTokenReader =
-  (secret: string, now: () => number) =>
+  (secret: string, nowMs: () => number) =>
   async (header: string | undefined): Promise<TurnToken | null> => {
     const presented = header?.startsWith('Bearer ') === true ? header.slice(7) : header
     if (presented === undefined || presented === '') return null
 
-    const [payload, signature] = presented.split('.')
-    if (payload === undefined || signature === undefined) return null
+    const [encodedClaims, signature] = presented.split('.')
+    if (encodedClaims === undefined || signature === undefined) return null
 
     // Constant time, because a comparison that returns early tells an attacker how much of
     // a forged signature was right.
-    const expected = await sign(secret, payload)
+    const expected = await sign(secret, encodedClaims)
     if (!timingSafeEqual(signature, expected)) return null
 
-    const claims = read(payload)
-    if (claims === null || claims.expiresAt <= now()) return null
+    const claims = decodeClaims(encodedClaims)
+    if (claims === null || claims.expiresAt <= nowMs()) return null
 
     return claims
   }
 
-const sign = async (secret: string, payload: string): Promise<string> => {
+const sign = async (secret: string, encodedClaims: string): Promise<string> => {
   const key = await crypto.subtle.importKey(
     'raw',
     encoder.encode(secret),
@@ -69,36 +56,37 @@ const sign = async (secret: string, payload: string): Promise<string> => {
     false,
     ['sign'],
   )
-  return base64(new Uint8Array(await crypto.subtle.sign('HMAC', key, encoder.encode(payload))))
+  return encodeBase64Url(
+    new Uint8Array(await crypto.subtle.sign('HMAC', key, encoder.encode(encodedClaims))),
+  )
 }
 
-const read = (payload: string): TurnToken | null => {
+const decodeClaims = (encodedClaims: string): TurnToken | null => {
+  let decoded: unknown
   try {
-    const claims = JSON.parse(atob(unpad(payload))) as Partial<TurnToken>
-    if (typeof claims.turnID !== 'string' || claims.turnID === '') return null
-    if (typeof claims.threadID !== 'string' || claims.threadID === '') return null
-    if (typeof claims.expiresAt !== 'number') return null
-
-    return { turnID: claims.turnID, threadID: claims.threadID, expiresAt: claims.expiresAt }
+    decoded = JSON.parse(atob(encodedClaims.replaceAll('-', '+').replaceAll('_', '/')))
   } catch {
-    // Anything that is not a token we wrote. There is one recovery -- ask for a new one --
-    // so there is no reason to say which way it was malformed.
+    // Invalid encoding and JSON both require a newly issued token; do not expose which failed.
     return null
   }
+
+  const parsed = TurnToken.safeParse(decoded)
+  return parsed.success ? parsed.data : null
 }
 
-const base64 = (bytes: Uint8Array): string =>
+const encodeBase64Url = (bytes: Uint8Array): string =>
   btoa(String.fromCharCode(...bytes))
     .replaceAll('+', '-')
     .replaceAll('/', '_')
     .replaceAll('=', '')
 
-const unpad = (value: string): string => value.replaceAll('-', '+').replaceAll('_', '/')
-
-const timingSafeEqual = (a: string, b: string): boolean => {
-  if (a.length !== b.length) return false
+const timingSafeEqual = (presented: string, expected: string): boolean => {
+  if (presented.length !== expected.length) return false
 
   let differences = 0
-  for (let at = 0; at < a.length; at++) differences |= a.charCodeAt(at) ^ b.charCodeAt(at)
+  for (let index = 0; index < presented.length; index++) {
+    differences |= presented.charCodeAt(index) ^ expected.charCodeAt(index)
+  }
+
   return differences === 0
 }

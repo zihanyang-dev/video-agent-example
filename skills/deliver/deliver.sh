@@ -3,9 +3,8 @@
 # Announces one finished file as something a person may open.
 #
 # What is printed here is a workspace path, not a link. This script holds no storage
-# credential and could not mint one; the path is turned into a short-lived URL outside the
-# sandbox, and a path that cannot be turned into one is dropped rather than shown
-# (architecture.md §6).
+# credential and cannot mint a URL. The agent uploads the file under an immutable object
+# key; the server signs that key when presenting the artifact (architecture.md §6).
 set -euo pipefail
 
 FILE="${1:?usage: deliver.sh <file> [final|preview]}"

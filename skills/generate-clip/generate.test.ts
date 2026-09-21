@@ -1,12 +1,12 @@
 /**
- * The one script in this repository that can spend money twice.
+ * Exercises recovery around a paid, asynchronous submission.
  *
  * Every case here is a way a generation gets paid for and lost, or paid for twice. They run
  * the real script against a stand-in provider, because the thing being tested is what the
  * script does when an answer never arrives -- which is not something reading it can tell you.
  */
-import { afterAll, beforeEach, describe, expect, test } from 'bun:test'
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { afterAll, afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -37,7 +37,7 @@ const provider = Bun.serve({
         duration: 5,
       })
 
-      // The response never arrives. Curl sees the connection close with nothing in it.
+      // The provider accepted the task, but the proxy returns no task ID.
       if (mood === 'accepts-then-goes-quiet') return new Response(null, { status: 502 })
 
       return Response.json({ id })
@@ -82,11 +82,10 @@ const run = async (): Promise<{ code: number; err: string }> => {
 }
 
 const job = async (): Promise<Record<string, unknown> | null> => {
-  try {
-    return JSON.parse(await readFile(join(work, '.jobs/a-lake-at-dawn.json'), 'utf8'))
-  } catch {
-    return null
-  }
+  const record = Bun.file(join(work, '.jobs/a-lake-at-dawn.json'))
+  if (!(await record.exists())) return null
+
+  return record.json()
 }
 
 describe('a submission whose answer never comes back', () => {
@@ -151,7 +150,7 @@ describe('a submission that worked', () => {
     expect(await Bun.file(join(work, 'clips/a-lake-at-dawn.mp4')).exists()).toBe(true)
   })
 
-  test('does not submit a second time when run again', async () => {
+  test('submits a fresh generation after the previous one completed', async () => {
     await run()
     await run()
 
@@ -160,6 +159,6 @@ describe('a submission that worked', () => {
   })
 })
 
-afterAll(async () => {
+afterEach(async () => {
   await rm(work, { recursive: true, force: true })
 })

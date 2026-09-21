@@ -59,8 +59,6 @@ services:
       timeout: 3s
       retries: 20
 
-  # Makes the bucket once and exits. `docker compose run --rm objects-ready` is the whole of
-  # first-time setup.
   # The only thing a sandbox is allowed to reach. It is here rather than run by hand so that
   # sandboxes can find it by name on a network they share with nothing else.
   gateway:
@@ -81,6 +79,7 @@ services:
     # succeeds on the default bridge and times out here.
     dns: ['223.5.5.5', '8.8.8.8']
 
+  # Creates the bucket once; run explicitly during first-time setup.
   objects-ready:
     image: quay.io/minio/mc:latest
     depends_on:

@@ -8,13 +8,12 @@
     "start": "bun src/main.ts"
   },
   "dependencies": {
-    "@ag-ui/core": "^1.0.0",
     "@earendil-works/pi-ai": "^0.85.1",
     "@earendil-works/pi-coding-agent": "^0.85.1",
     "@vid/contract": "workspace:*",
     "@vid/queue": "workspace:*",
-    "@vid/store": "workspace:*",
     "zod": "^4.0.0",
-    "@vid/turn-token": "workspace:*"
+    "@vid/turn-token": "workspace:*",
+    "@vid/object-storage": "workspace:*"
   }
 }

@@ -8,7 +8,7 @@
     "types": ["bun"],
     "jsx": "react-jsx",
     "paths": {
-      "@vid/contract": ["../../packages/contract/src/index.ts"]
+      "@vid/contract/public": ["../../packages/contract/src/public/index.ts"]
     },
 
     "strict": true,

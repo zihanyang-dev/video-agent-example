@@ -1,6 +1,8 @@
 {
   "plugins": ["typescript", "oxc"],
-  "categories": { "correctness": "error" },
+  "categories": {
+    "correctness": "error"
+  },
   "rules": {
     "max-depth": ["error", 2],
     "complexity": ["error", 10],
@@ -11,19 +13,37 @@
     "typescript/no-explicit-any": "error",
     "typescript/no-extraneous-class": "error",
     "typescript/method-signature-style": ["error", "property"],
-
     "typescript/no-floating-promises": "error",
     "typescript/no-misused-promises": "error",
     "typescript/await-thenable": "error",
     "typescript/return-await": ["error", "in-try-catch"],
     "typescript/no-base-to-string": "error",
-    "typescript/no-misused-spread": "error"
+    "typescript/no-misused-spread": "error",
+    "no-restricted-properties": [
+      "error",
+      {
+        "object": "process",
+        "property": "env",
+        "message": "Read application configuration in src/env.ts."
+      },
+      {
+        "object": "Bun",
+        "property": "env",
+        "message": "Read application configuration in src/env.ts."
+      }
+    ]
   },
   "overrides": [
     {
       "files": ["**/*.test.ts"],
       "rules": {
         "typescript/await-thenable": "off"
+      }
+    },
+    {
+      "files": ["**/src/env.ts", "**/*.test.ts", "tests/**", "scripts/**", "apps/*/scripts/**"],
+      "rules": {
+        "no-restricted-properties": "off"
       }
     }
   ],

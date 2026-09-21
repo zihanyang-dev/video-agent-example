@@ -15,68 +15,79 @@
  */
 import { z } from 'zod'
 
-const EnvSchema = z.object({
-  MODEL_BASE_URL: z.string().min(1),
-  MODEL_API_KEY: z.string().min(1),
-  MODEL_ID: z.string().min(1),
-  /**
-   * Model facts rather than deployment knobs, but there is no catalog to read them from
-   * while exactly one model is configured. They move to wherever that catalog lives the day
-   * a second model does.
-   */
-  MODEL_CONTEXT_WINDOW: z.coerce.number().int().positive(),
-  MODEL_MAX_TOKENS: z.coerce.number().int().positive(),
+const EnvSchema = z
+  .object({
+    MODEL_BASE_URL: z.string().min(1),
+    MODEL_API_KEY: z.string().min(1),
+    MODEL_ID: z.string().min(1),
+    /**
+     * Model facts rather than deployment knobs, but there is no catalog to read them from
+     * while exactly one model is configured. They move to wherever that catalog lives the day
+     * a second model does.
+     */
+    MODEL_CONTEXT_WINDOW: z.coerce.number().int().positive(),
+    MODEL_MAX_TOKENS: z.coerce.number().int().positive(),
 
-  DATABASE_URL: z.string().min(1),
-  REDIS_URL: z.string().min(1),
+    DATABASE_URL: z.string().min(1),
+    REDIS_URL: z.string().min(1),
 
-  OBJECTS_BUCKET: z.string().min(1),
-  OBJECTS_ENDPOINT: z.string().min(1),
-  OBJECTS_ACCESS_KEY: z.string().min(1),
-  OBJECTS_SECRET_KEY: z.string().min(1),
-  OBJECTS_REGION: z.string().default('us-east-1'),
+    OBJECTS_BUCKET: z.string().min(1),
+    OBJECTS_ENDPOINT: z.string().min(1),
+    OBJECTS_ACCESS_KEY: z.string().min(1),
+    OBJECTS_SECRET_KEY: z.string().min(1),
+    OBJECTS_REGION: z.string().default('us-east-1'),
 
-  SANDBOX_IMAGE: z.string().min(1),
-  /** The network a sandbox joins, and the only one it is on. */
-  SANDBOX_NETWORK: z.string().min(1),
+    SANDBOX_IMAGE: z.string().min(1),
+    /** The network a sandbox joins, and the only one it is on. */
+    SANDBOX_NETWORK: z.string().min(1),
+    SANDBOX_DNS: z
+      .string()
+      .default('223.5.5.5,8.8.8.8')
+      .transform((servers) => servers.split(',').map((server) => server.trim()))
+      .pipe(z.array(z.ipv4()).min(1)),
 
-  /**
-   * Reaches skill scripts as an environment variable inside the sandbox, and is the only
-   * way they can spend money. The agent is never told it exists (architecture.md §8).
-   */
-  GATEWAY_URL: z.string().min(1),
+    /**
+     * Reaches skill scripts as an environment variable inside the sandbox, and is the only
+     * way they can spend money. The agent is never told it exists (architecture.md §8).
+     */
+    GATEWAY_URL: z.string().min(1),
 
-  /**
-   * Which models the generation skills ask for. Configuration rather than something a script
-   * decides: a wrong one is refused by the provider, and a script carrying a stale default
-   * fails in a way that looks like the provider being down.
-   */
-  SEEDANCE_MODEL: z.string().min(1),
-  SEEDREAM_MODEL: z.string().min(1),
+    /**
+     * Which models the generation skills ask for. Configuration rather than something a script
+     * decides: a wrong one is refused by the provider, and a script carrying a stale default
+     * fails in a way that looks like the provider being down.
+     */
+    SEEDANCE_MODEL: z.string().min(1),
+    SEEDREAM_MODEL: z.string().min(1),
 
-  /**
-   * How many threads this process works on at once.
-   *
-   * Every turn holds a sandbox for its whole life, so the ceiling is how many containers
-   * this machine will carry, not how fast the loop goes. Small by default because the wrong
-   * value here is a machine that stops responding rather than one that is merely slow.
-   */
-  TURN_CONCURRENCY: z.coerce.number().int().positive().default(3),
+    POLL_MS: z.coerce.number().int().positive().default(200),
+    LEASE_MS: z.coerce.number().int().positive().default(30_000),
 
-  /**
-   * Signs the token a sandbox carries. The same secret the gateway verifies with, and
-   * shared with nothing else: it is the whole of what separates one turn's spending from
-   * another's.
-   */
-  TURN_TOKEN_SECRET: z.string().min(32),
+    /**
+     * How many threads this process works on at once.
+     *
+     * Every turn holds a sandbox for its whole life, so the ceiling is how many containers
+     * this machine will carry, not how fast the loop goes. Small by default because the wrong
+     * value here is a machine that stops responding rather than one that is merely slow.
+     */
+    TURN_CONCURRENCY: z.coerce.number().int().positive().default(3),
 
-  /**
-   * Names this process within the consumer group. Defaults to the hostname, which is what
-   * a container orchestrator already makes unique; two processes sharing one would each see
-   * a fraction of the work with nothing saying so.
-   */
-  AGENT_NAME: z.string().default(Bun.env['HOSTNAME'] ?? 'agent'),
-})
+    /**
+     * Signs the token a sandbox carries. The same secret the gateway verifies with, and
+     * shared with nothing else: it is the whole of what separates one turn's spending from
+     * another's.
+     */
+    TURN_TOKEN_SECRET: z.string().min(32),
+
+    /**
+     * Human-readable worker label. Bootstrap appends a UUID for ownership and consumption.
+     */
+    AGENT_NAME: z.string().default('agent'),
+  })
+  .refine((env) => env.LEASE_MS > env.POLL_MS * 3, {
+    message: 'LEASE_MS must exceed three polling intervals',
+    path: ['LEASE_MS'],
+  })
 
 export type Env = z.infer<typeof EnvSchema>
 

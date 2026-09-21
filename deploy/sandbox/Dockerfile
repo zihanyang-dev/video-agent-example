@@ -46,7 +46,7 @@ ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 RUN npm install -g hyperframes@0.8 >/dev/null 2>&1
 
 # GSAP, on disk, because the sandbox reaches exactly one thing and that thing is the gateway
-# (architecture.md §5). HyperFrames drives a composition by seeking a GSAP timeline, and the
+# (architecture.md §8). HyperFrames drives a composition by seeking a GSAP timeline, and the
 # project it scaffolds loads GSAP from a CDN -- which here is a script that never arrives and
 # a composition that renders one still frame for its whole duration. A skill writing a
 # composition points at this copy instead.

@@ -6,14 +6,13 @@
  * (code-style §4.6).
  */
 import { z } from 'zod'
-import { Providers } from './providers'
+import { Providers } from './providers/providers'
 
 const EnvSchema = z.object({
   PORT: z.coerce.number().int().positive().default(8080),
   /**
-   * Signs and verifies the token a sandbox carries. Shared with whoever mints them, and
-   * with nothing else -- it is the whole of what separates a turn's spending from anyone
-   * else's.
+   * Shared with the agent that issues sandbox tokens. This authenticates the request and
+   * attributes it to a turn; it does not enforce a spending limit or billing entitlement.
    */
   TURN_TOKEN_SECRET: z.string().min(32),
   PROVIDERS: z.string().transform((raw, ctx) => {
@@ -50,6 +49,7 @@ const safeJson = (text: string): unknown => {
   try {
     return JSON.parse(text)
   } catch {
+    // Malformed JSON and invalid provider fields share the configuration-error recovery.
     return null
   }
 }

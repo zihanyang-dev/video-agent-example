@@ -9,7 +9,7 @@ pexo 把能力切成 MCP 工具直接调用 —— `concat(clips)`、`trim(clip,
 要证明的只有一句话:**同一份 brief、同一批素材,哪边剪得更好、返工更少。**
 怎么量见 [`docs/comparison.md`](docs/comparison.md) —— 口径写在跑之前,brief 不是我们写的。
 
-架构和每条决定背后的数字在 [`docs/architecture.md`](docs/architecture.md)。
+当前架构、目录边界和数据流在 [`docs/architecture.md`](docs/architecture.md)。
 代码风格在 [`docs/code-style.md`](docs/code-style.md)。
 
 ## 四个进程
@@ -30,7 +30,7 @@ pexo 把能力切成 MCP 工具直接调用 —— `concat(clips)`、`trim(clip,
 ```bash
 bun install
 
-# 厂商 key 和签名密钥。这是这个仓库里唯一放真凭据的地方,它不进 git。
+# 媒体厂商 key 和签名密钥。这份本地配置不进 git。
 cp deploy/docker/gateway.env.example deploy/docker/gateway.env
 $EDITOR deploy/docker/gateway.env
 
@@ -67,10 +67,19 @@ bun run web       # 3000
 ## 改完跑什么
 
 ```bash
-bun run check   # typecheck · lint · schema 对不对得上 · 测试
+bun run check   # typecheck · lint · 单向依赖 · schema · 行为测试
 ```
 
 `check` 里的 `schema` 会起一个临时库把迁移重放一遍再 `pg_dump`,所以它需要 Docker 在跑。
 
-测试要真的 postgres / redis / minio,**不打桩**。理由和整件事是同一个:
-桩过的东西测不出真东西怎么坏。
+数据库结构快照在 [`deploy/database/schema.sql`](deploy/database/schema.sql)。迁移分别由
+[`server`](apps/server/migrations/) 和 [`agent`](apps/agent/migrations/) 持有；
+[`scripts/database`](scripts/database/) 负责执行迁移与生成快照。改表时新增迁移，再运行
+`bun run schema`，不手改生成的 SQL。
+
+`packages/` 只放跨应用协议和共享技术能力：`contract`、`queue`、`object-storage`、`turn-token`。
+会话与执行领域仍归各自应用所有。依赖检查规则在 [`.dependency-cruiser.cjs`](.dependency-cruiser.cjs)。
+
+持久化与传输测试使用真实 PostgreSQL / Redis / MinIO；运行控制使用可控 harness，真实 pi 适配器连接本地模拟模型。测试不调用付费 API。
+
+首次升级到当前架构时，先停止旧 server / agent 并排空旧队列，再执行迁移，最后启动新版本。产品和执行数据分别进入 `product`、`execution` schema，迁移会保留原会话及模型历史。这次变更不支持新旧二进制混跑。

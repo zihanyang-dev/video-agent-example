@@ -39,9 +39,10 @@ clips to compare two looks costs more than generating six stills.
 
 ## What it does about failure
 
-Nothing, on purpose. This is one request that either returns an image or returns an error,
-so there is no half-finished state to record — unlike `generate-clip`, where the money is
-spent minutes before the result exists. If it fails, read the error and try again.
+The script has no job ID to resume: the image arrives in the submission response. Read a
+provider rejection and correct the reported problem. If the connection drops or the response
+is missing, the outcome is unknown; a fresh request may charge again. Tell the person before
+repeating that generation.
 
 ## Keeping the result
 

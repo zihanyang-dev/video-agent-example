@@ -9,7 +9,7 @@
 # The intent is written down *before* the request goes out, not after the reply comes back.
 # A reply that never arrives is not a generation that never happened: the provider may have
 # accepted it and the money may already be gone. Writing afterwards leaves exactly that case
-# with no local record, and the next turn pays for the same clip again (architecture.md §4).
+# with no local record, and the next turn pays for the same clip again (architecture.md §6).
 #
 # When the record says we submitted but never learnt the id, `reconcile.py` asks the provider
 # what it has. Anything it cannot answer confidently is `unknown` and stops here -- that is
@@ -41,8 +41,8 @@ job_file="$JOBS/$slug.json"
 
 here=$(cd "$(dirname "$0")" && pwd)
 
-# The record of one submission. Written before the request and updated after it, so the
-# window where money may be spent and nothing knows about it does not exist.
+# Keep submission intent in the sandbox before calling the provider. It survives retries
+# in this sandbox; surviving a lost sandbox still depends on a saved workspace checkpoint.
 note_job() {
   python3 - "$job_file" "$1" "$2" "$MODEL" "$SECONDS_LONG" "$PROMPT" <<'PY'
 import json, sys, time
@@ -149,7 +149,7 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
 
       # Through the gateway, not straight at the link. There is no route off this
       # network -- the gateway is the only thing reachable from here, and it fetches
-      # only from hosts this deployment named (architecture.md §5).
+      # only from hosts this deployment named (architecture.md §8).
       curl -sS -o "$OUT/$slug.mp4" \
         -H "Authorization: Bearer $VID_TURN_TOKEN" \
         --get --data-urlencode "url=$url" "$VID_GATEWAY/seedance/_result"

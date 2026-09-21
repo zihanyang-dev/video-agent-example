@@ -3,7 +3,7 @@
 # Renders a title card from HTML, using the hyperframes CLI.
 #
 # Two things here are about this sandbox rather than about hyperframes, and both were
-# measured (architecture.md §5):
+# measured (architecture.md §8):
 #
 #   - `init` checks a skills registry on GitHub. This sandbox reaches exactly one thing and
 #     it is not GitHub, so that check is turned off.

@@ -6,9 +6,10 @@
     "moduleResolution": "bundler",
     "types": ["bun"],
     "paths": {
-      "@vid/contract": ["./packages/contract/src/index.ts"],
+      "@vid/contract/public": ["./packages/contract/src/public/index.ts"],
+      "@vid/contract/execution": ["./packages/contract/src/execution/index.ts"],
       "@vid/queue": ["./packages/queue/src/index.ts"],
-      "@vid/store": ["./packages/store/src/index.ts"],
+      "@vid/object-storage": ["./packages/object-storage/src/index.ts"],
       "@vid/turn-token": ["./packages/turn-token/src/index.ts"]
     },
 
@@ -30,7 +31,9 @@
   "include": [
     "apps/*/src/**/*.ts",
     "packages/*/src/**/*.ts",
-    "packages/*/scripts/**/*.ts",
+    "apps/*/scripts/**/*.ts",
+    "scripts/**/*.ts",
+    "tests/**/*.ts",
     "skills/**/*.test.ts"
   ],
 

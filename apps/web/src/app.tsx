@@ -6,11 +6,11 @@
  * one conversation does not need one.
  */
 import { useEffect, useState } from 'react'
-import { Composer } from './components/Composer'
-import { Conversation } from './components/Conversation'
-import { Stage } from './components/Stage'
-import { openConversation } from './conversation/stream'
-import { useConversation } from './conversation/useConversation'
+import { Composer } from './features/conversation/composer'
+import { Conversation } from './features/conversation/conversation'
+import { Stage } from './features/conversation/stage'
+import { openConversation } from './features/conversation/stream'
+import { useConversation } from './features/conversation/use-conversation'
 
 export const App = () => {
   const [threadID, setThreadID] = useState<string | null>(null)

@@ -2,9 +2,9 @@
 #
 # The plan a person watches get worked through.
 #
-# Kept in a file, not in the agent's head. The file is what makes the plan survive a turn
-# that dies half way, and what the next turn reads instead of starting the thinking again
-# (architecture.md §4).
+# Kept in a workspace file so later turns can continue from the saved plan. Recovery after
+# a lost sandbox restores the last committed workspace, not every file write (§6 of
+# architecture.md).
 #
 # Announced in full on every change, because the activity replaces by default: one thing on
 # the screen that updates, never a pile of lines nobody can read as a whole.

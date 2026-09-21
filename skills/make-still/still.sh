@@ -5,9 +5,8 @@
 # Like every skill that spends money, the credential is not here: this carries a token good
 # for one turn and calls the gateway, which attaches the real key (architecture.md §1).
 #
-# There is no job file and no resume, unlike generate.sh. This call returns the image in the
-# same response, so there is no window where the money is spent and the result does not yet
-# exist -- the state that bookkeeping exists to survive simply cannot occur here.
+# This endpoint returns the image in the submission response and exposes no resumable job
+# here. Losing that response leaves the outcome unknown; retrying may charge again.
 set -euo pipefail
 
 PROMPT="${1:?usage: still.sh "<prompt>" [WIDTHxHEIGHT]}"
@@ -57,7 +56,7 @@ if [ -z "$url" ]; then
   exit 1
 fi
 
-# Through the gateway: there is no route off this network (architecture.md §5).
+# Through the gateway: there is no route off this network (architecture.md §8).
 curl -sS -o "$OUT/$slug.png" \
   -H "Authorization: Bearer $VID_TURN_TOKEN" \
   --get --data-urlencode "url=$url" "$VID_GATEWAY/seedream/_result"

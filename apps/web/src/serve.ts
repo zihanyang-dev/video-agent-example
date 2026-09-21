@@ -13,37 +13,29 @@
  * production and hot-reloaded under `--hot`.
  */
 import index from '../index.html'
+import { readEnv } from './env'
 
-const PORT = Number(process.env['PORT'] ?? 3000)
-const API = process.env['API_URL'] ?? 'http://localhost:8787'
-
-/**
- * Who the browser is, decided here.
- *
- * A stand-in, and the only one in this repository. Signing in belongs at this edge -- it is
- * the process the browser talks to -- so when it is real it replaces this line and nothing
- * else moves. Two things become true on that day and are not true now: the API must stop
- * being reachable from anywhere but here, because it believes this header; and this must
- * read a session rather than an environment variable.
- */
-const WHO = process.env['WEB_USER'] ?? 'dev'
+const env = readEnv()
 
 const server = Bun.serve({
-  port: PORT,
+  port: env.PORT,
   // Long-lived by nature: an SSE connection is idle whenever the agent is thinking, which
   // for this work is most of the time.
   idleTimeout: 0,
-  development: process.env['NODE_ENV'] !== 'production',
+  development: env.NODE_ENV !== 'production',
 
   routes: {
     '/api/*': (request) => {
-      const here = new URL(request.url)
-      const there = new URL(here.pathname.slice('/api'.length) + here.search, API)
+      const incomingUrl = new URL(request.url)
+      const upstreamUrl = new URL(
+        incomingUrl.pathname.slice('/api'.length) + incomingUrl.search,
+        env.API_URL,
+      )
 
       const headers = new Headers(request.headers)
-      headers.set('x-user-id', WHO)
+      headers.set('x-user-id', env.WEB_USER)
 
-      return fetch(there, {
+      return fetch(upstreamUrl, {
         method: request.method,
         headers,
         body: request.body,
@@ -57,4 +49,4 @@ const server = Bun.serve({
   },
 })
 
-console.log(`web on ${server.port}, api at ${API}`)
+console.log(`web on ${server.port}, api at ${env.API_URL}`)

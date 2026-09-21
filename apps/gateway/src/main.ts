@@ -6,7 +6,7 @@
  * read a single conversation, which is why this is a process of its own (architecture.md §1).
  */
 import { readEnv } from './env'
-import { createForwarder } from './forward'
+import { createForwarder } from './transport/forward'
 import { createTokenReader } from '@vid/turn-token'
 
 const env = readEnv()
@@ -14,7 +14,7 @@ const env = readEnv()
 const app = createForwarder({
   providers: env.PROVIDERS,
   readToken: createTokenReader(env.TURN_TOKEN_SECRET, () => Date.now()),
-  onSpend: (token, provider, path) => {
+  onForwardRequest: (token, provider, path) => {
     console.log(`turn ${token.turnID} calling ${provider}${path}`)
   },
 })

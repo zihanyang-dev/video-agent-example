@@ -12,8 +12,8 @@
     "@ag-ui/encoder": "^1.0.0",
     "@vid/contract": "workspace:*",
     "@vid/queue": "workspace:*",
-    "@vid/store": "workspace:*",
     "hono": "^4.13.8",
-    "zod": "^4.0.0"
+    "zod": "^4.0.0",
+    "@vid/object-storage": "workspace:*"
   }
 }
