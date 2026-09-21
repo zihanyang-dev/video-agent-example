@@ -10,7 +10,7 @@
  * particular not this process's own environment, which is how a developer's credentials
  * would end up inside a container running commands a model wrote.
  */
-import { createRedisTurnQueue, type TurnRequest } from '@vid/queue'
+import { createRedisInterrupts, createRedisTurnQueue, type TurnRequest } from '@vid/queue'
 import {
   createPostgresMessages,
   createPostgresSessions,
@@ -120,6 +120,17 @@ const dispatch = async (turn: TurnRequest): Promise<void> => {
   })
 }
 
+/**
+ * Stops are broadcast to every agent, and each one answers only for the threads it holds.
+ *
+ * A consumer group cannot do this: it would hand the stop to whichever process Redis picked,
+ * which is almost never the one running that turn (`interrupts.ts`).
+ */
+const interrupts = createRedisInterrupts(env.REDIS_URL)
+await interrupts.listen((threadID) => {
+  if (inFlight.stop(threadID)) console.log(`stopping the turn on thread ${threadID}`)
+})
+
 const queue = createRedisTurnQueue({
   url: env.REDIS_URL,
   consumer: env.AGENT_NAME,
@@ -147,6 +158,7 @@ const queue = createRedisTurnQueue({
  */
 const drain = async (): Promise<void> => {
   await queue.close()
+  interrupts.close()
   live.close()
   await sql.close()
   process.exit(0)

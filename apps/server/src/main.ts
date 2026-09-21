@@ -5,7 +5,7 @@
  * a turn is minutes, and shipping a front-end fix must not kill conversations that are half
  * way through (architecture.md §1).
  */
-import { createRedisTurnQueue } from '@vid/queue'
+import { createRedisInterrupts, createRedisTurnQueue } from '@vid/queue'
 import { createPostgresMessages, createRedisLiveStream, createS3Files } from '@vid/store'
 import { SQL } from 'bun'
 import { createRoutes } from './api/routes'
@@ -15,6 +15,7 @@ const env = readEnv()
 
 const sql = new SQL(env.DATABASE_URL)
 const live = createRedisLiveStream(env.REDIS_URL)
+const interrupts = createRedisInterrupts(env.REDIS_URL)
 const files = createS3Files({
   bucket: env.OBJECTS_BUCKET,
   endpoint: env.OBJECTS_ENDPOINT,
@@ -39,6 +40,7 @@ const app = createRoutes({
     const userID = request.headers.get('x-user-id')
     return userID === null || userID === '' ? null : { userID }
   },
+  stop: (threadID) => interrupts.request(threadID),
   // Only the one function, not the whole store: a page load needs a link, not a file.
   sign: (key) => files.downloadUrl(key),
   newTurnID: () => crypto.randomUUID(),

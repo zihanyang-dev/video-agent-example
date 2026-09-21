@@ -7,12 +7,17 @@
 import { describe, expect, test } from 'bun:test'
 import { createInFlight, type Steerable } from './in-flight'
 
-const recorder = (): Steerable & { heard: string[] } => {
+const recorder = (): Steerable & { heard: string[]; stopped: () => boolean } => {
   const heard: string[] = []
+  let asked = false
   return {
     heard,
+    stopped: () => asked,
     steer: async (message) => {
       heard.push(message)
+    },
+    interrupt: async () => {
+      asked = true
     },
   }
 }
@@ -67,6 +72,7 @@ describe('messages typed one after another', () => {
         if (message === 'first') await Bun.sleep(20)
         heard.push(message)
       },
+      interrupt: async () => {},
     }
     flight.claim('t1', slowFirst)
 
@@ -75,6 +81,31 @@ describe('messages typed one after another', () => {
     await Bun.sleep(60)
 
     expect(heard).toEqual(['first', 'second'])
+  })
+})
+
+describe('stopping a turn', () => {
+  test('reaches the turn that is running', async () => {
+    const flight = createInFlight()
+    const turn = recorder()
+    flight.claim('t1', turn)
+
+    expect(flight.stop('t1')).toBe(true)
+    await Bun.sleep(10)
+    expect(turn.stopped()).toBe(true)
+  })
+
+  test('is refused for a thread this process is not running', () => {
+    // Every agent hears every stop; only one of them owns the thread.
+    expect(createInFlight().stop('t1')).toBe(false)
+  })
+
+  test('stops it taking anything else, so what is typed next is its own turn', () => {
+    const flight = createInFlight()
+    flight.claim('t1', recorder())
+    flight.stop('t1')
+
+    expect(flight.offer('t1', 'and make it shorter')).toBe(false)
   })
 })
 

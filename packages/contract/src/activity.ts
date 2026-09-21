@@ -6,9 +6,15 @@
  * leaves to the producer ("An open string: the set is the producer's"). This file is that
  * set, and nothing else.
  *
- * Three types, because there are three things a person can do something about: watch work
- * happen, look at what came out, answer a question only they can answer. A fourth is added
- * when a fourth kind of user action exists, not when a fourth kind of internal event does.
+ * Four types, because there are four things a person can do something about: see what is
+ * intended before it happens, watch one piece of it run, look at what came out, answer a
+ * question only they can answer. A fifth is added when a fifth kind of user action exists,
+ * not when a fifth kind of internal event does.
+ *
+ * `plan` earned its place rather than being added for tidiness. A ten-minute job made of
+ * seven generations shows as seven steps arriving one at a time, and from the outside that
+ * is indistinguishable from a job that has lost its way: you cannot tell what is left, so
+ * you cannot tell whether to stop it. The plan is what makes interrupting an informed act.
  *
  * Nothing here may carry an internal identifier -- no file paths, no shell commands, no tool
  * names, no model names, no skill names. That is enforced by what this file is allowed to
@@ -20,12 +26,30 @@
  */
 import { z } from 'zod'
 
+/** What the agent means to do, before and while it does it. */
+export const PLAN = 'plan'
 /** Work the agent is doing that a person is waiting on. */
 export const STEP = 'step'
 /** Something the agent produced that a person can open. */
 export const ARTIFACT = 'artifact'
 /** A decision only a person can make. */
 export const ASK = 'ask'
+
+/**
+ * One line of a plan.
+ *
+ * `skipped` is a real outcome and not a failure: a plan written before the work is a guess,
+ * and finding out a shot is unnecessary is the plan doing its job. Saying so is better than
+ * quietly leaving it unfinished, which reads as something that went wrong.
+ */
+export const PlanItem = z.object({
+  label: z.string().min(1),
+  state: z.enum(['todo', 'doing', 'done', 'skipped']),
+})
+
+export const PlanContent = z.object({
+  items: z.array(PlanItem).min(1),
+})
 
 export const StepContent = z.object({
   /** Already written for a person. Authored by whoever wrote the skill script. */
@@ -63,11 +87,14 @@ export const AskContent = z.object({
  * which producer wrote it.
  */
 export const Activity = z.discriminatedUnion('activityType', [
+  z.object({ activityType: z.literal(PLAN), content: PlanContent }),
   z.object({ activityType: z.literal(STEP), content: StepContent }),
   z.object({ activityType: z.literal(ARTIFACT), content: ArtifactContent }),
   z.object({ activityType: z.literal(ASK), content: AskContent }),
 ])
 
+export type PlanItem = z.infer<typeof PlanItem>
+export type PlanContent = z.infer<typeof PlanContent>
 export type StepContent = z.infer<typeof StepContent>
 export type ArtifactContent = z.infer<typeof ArtifactContent>
 export type AskContent = z.infer<typeof AskContent>

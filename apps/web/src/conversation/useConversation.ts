@@ -7,7 +7,7 @@
  */
 import type { Event } from '@ag-ui/core'
 import { useCallback, useEffect, useState } from 'react'
-import { listen, say } from './stream'
+import { listen, say, stopWork } from './stream'
 import { advance, asked, nothingYet, type Transcript } from './transcript'
 
 export type Conversation = {
@@ -17,6 +17,8 @@ export type Conversation = {
   /** False while the connection is down. `EventSource` is already retrying. */
   connected: boolean
   send: (message: string) => Promise<void>
+  /** Asks the running turn to stop. Safe to call when nothing is running. */
+  stop: () => Promise<void>
 }
 
 export const useConversation = (threadID: string | null): Conversation => {
@@ -61,5 +63,14 @@ export const useConversation = (threadID: string | null): Conversation => {
     [threadID],
   )
 
-  return { transcript, working: transcript.working || queued, connected, send }
+  const stop = useCallback(async (): Promise<void> => {
+    if (threadID === null) return
+
+    // Cleared here rather than waiting for RUN_FINISHED: if the turn had not started yet
+    // there is nothing to end, and the button would stay on with nothing behind it.
+    setQueued(false)
+    await stopWork(threadID)
+  }, [threadID])
+
+  return { transcript, working: transcript.working || queued, connected, send, stop }
 }

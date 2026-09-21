@@ -26,6 +26,8 @@
 export type Steerable = {
   /** Handed each message that arrived while this turn was running, in order. */
   steer: (message: string) => Promise<void>
+  /** Told to stop. */
+  interrupt: () => Promise<void>
 }
 
 export type InFlight = {
@@ -43,6 +45,14 @@ export type InFlight = {
    * false means the caller should run it as a turn of its own.
    */
   offer: (threadID: string, message: string) => boolean
+  /**
+   * Asks the turn running on this thread to stop.
+   *
+   * False when there is nothing running, which is the ordinary case for an interrupt that
+   * arrives just after a turn ended, and for every agent that does not own this thread --
+   * a stop is broadcast to all of them.
+   */
+  stop: (threadID: string) => boolean
   /** Which threads are working. What a drain waits on. */
   busy: () => readonly string[]
 }
@@ -88,5 +98,18 @@ export const createInFlight = (): InFlight => {
     return true
   }
 
-  return { claim, offer, busy: () => [...entries.keys()] }
+  const stop = (threadID: string): boolean => {
+    const entry = entries.get(threadID)
+    if (entry === undefined || !entry.accepting) return false
+
+    // Stops accepting immediately, so anything typed between now and the turn actually
+    // ending becomes its own turn rather than joining one that is on its way out.
+    entry.accepting = false
+    void entry.turn.interrupt().catch((error: unknown) => {
+      console.error(`thread ${threadID}: could not be stopped`, error)
+    })
+    return true
+  }
+
+  return { claim, offer, stop, busy: () => [...entries.keys()] }
 }

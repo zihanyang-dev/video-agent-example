@@ -72,6 +72,12 @@ export const startPiHarness: StartHarness = async (input): Promise<Harness> => {
   return {
     run: (message) => runOnce(session, input, message),
     steer: (message) => session.steer(message),
+    // Queued work goes too: messages waiting to be delivered to a session nobody is
+    // waiting on any more would be applied to whatever ran next.
+    interrupt: async () => {
+      session.clearQueue()
+      await session.abort()
+    },
     entries: () => session.sessionManager.getEntries(),
     cost: () => {
       const stats = session.getSessionStats()

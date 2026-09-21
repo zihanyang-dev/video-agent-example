@@ -34,16 +34,15 @@ const Line = ({ item }: { item: Item }) => {
       return <Spoken item={item} />
     case 'thought':
       return <Thought item={item} />
+    case 'plan':
+      return <Plan item={item} />
     case 'step':
       return <Step item={item} />
-    // Delivered things live on the stage. A second copy here would be the same video twice
-    // on one screen, and the one in the column would be the one too small to judge.
+    // Delivered things live on the stage, and only there. A line here saying one arrived
+    // is the same fact in two places: the shelf already shows it, and three of these in a
+    // row is a column of announcements about a shelf the person is looking at.
     case 'artifact':
-      return (
-        <p className="delivered">
-          {item.role === 'final' ? 'Delivered a cut' : 'Delivered something to look at'}
-        </p>
-      )
+      return null
     case 'ask':
       return <Ask item={item} />
   }
@@ -78,6 +77,27 @@ const Thought = ({ item }: { item: Of<'thought'> }) => {
     </details>
   )
 }
+
+/**
+ * What the agent means to do, with what it has finished struck through.
+ *
+ * The whole list is shown from the start, including the parts not begun. A job made of
+ * seven generations that shows one step at a time is indistinguishable from a job that has
+ * lost its way -- you cannot see what is left, so you cannot judge whether to stop it.
+ */
+const Plan = ({ item }: { item: Of<'plan'> }) => (
+  <ol className="plan">
+    {item.items.map((line, at) => (
+      // A plan line has no id of its own; its position in the list is its identity, and the
+      // list is replaced whole on every update.
+      // eslint-disable-next-line react/no-array-index-key
+      <li key={at} className={line.state}>
+        <span className="mark" aria-hidden="true" />
+        {line.label}
+      </li>
+    ))}
+  </ol>
+)
 
 const Step = ({ item }: { item: Of<'step'> }) => (
   <p className={`step ${item.state}`}>

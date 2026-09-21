@@ -59,6 +59,11 @@ export const say = async (threadID: string, message: string): Promise<void> => {
   if (!answered.ok) throw new Error(await answered.text())
 }
 
+export const stopWork = async (threadID: string): Promise<void> => {
+  const answered = await fetch(`/api/threads/${threadID}/stop`, { method: 'POST' })
+  if (!answered.ok) throw new Error(await answered.text())
+}
+
 export const openConversation = async (): Promise<string> => {
   const answered = await fetch('/api/threads', { method: 'POST' })
   if (!answered.ok) throw new Error(await answered.text())

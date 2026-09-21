@@ -9,9 +9,11 @@ import { useState, type FormEvent, type KeyboardEvent } from 'react'
 
 export const Composer = ({
   onSend,
+  onStop,
   working,
 }: {
   onSend: (message: string) => Promise<void>
+  onStop: () => Promise<void>
   working: boolean
 }) => {
   const [text, setText] = useState('')
@@ -51,9 +53,33 @@ export const Composer = ({
         aria-label="What you want made"
       />
       {refused !== null && <p className="refused">{refused}</p>}
-      <button type="submit" disabled={text.trim() === ''}>
-        Send
-      </button>
+
+      <Actions onStop={onStop} working={working} sendable={text.trim() !== ''} />
     </form>
   )
 }
+
+/**
+ * Stop sits beside send rather than replacing it, because both are true while it works: a
+ * person can add a note, and can also decide they have seen enough.
+ */
+const Actions = ({
+  onStop,
+  working,
+  sendable,
+}: {
+  onStop: () => Promise<void>
+  working: boolean
+  sendable: boolean
+}) => (
+  <div className="actions">
+    {working && (
+      <button type="button" className="stop" onClick={() => void onStop()}>
+        Stop
+      </button>
+    )}
+    <button type="submit" disabled={!sendable}>
+      Send
+    </button>
+  </div>
+)

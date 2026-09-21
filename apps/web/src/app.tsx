@@ -15,7 +15,7 @@ import { useConversation } from './conversation/useConversation'
 export const App = () => {
   const [threadID, setThreadID] = useState<string | null>(null)
   const [unreachable, setUnreachable] = useState<string | null>(null)
-  const { transcript, working, connected, send } = useConversation(threadID)
+  const { transcript, working, connected, send, stop } = useConversation(threadID)
 
   useEffect(() => {
     // Also on every hash change, not only on mount: the back button and a pasted link both
@@ -64,7 +64,7 @@ export const App = () => {
           <p className="broke">{unreachable}</p>
         )}
 
-        <Composer onSend={send} working={working} />
+        <Composer onSend={send} onStop={stop} working={working} />
       </aside>
     </main>
   )

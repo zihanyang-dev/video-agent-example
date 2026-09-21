@@ -12,7 +12,7 @@
  */
 import type { TurnQueue } from '@vid/queue'
 import type { LiveStream, Messages } from '@vid/store'
-import { Hono } from 'hono'
+import { Hono, type Context } from 'hono'
 import { mayRead, NOT_READABLE, type Reader } from '../conversation/thread'
 import type { SignLink } from '../conversation/history'
 import { streamConversation } from './sse'
@@ -28,6 +28,8 @@ export type ApiParts = {
   sign: SignLink
   /** Null when the request carries no usable session. */
   readerOf: (request: Request) => Promise<Reader | null>
+  /** Asks whoever is running a thread to stop. Nothing here knows which process that is. */
+  stop: (threadID: string) => Promise<void>
   /** Ids are minted here so a caller cannot choose one and collide with another turn. */
   newTurnID: () => string
   /** Same reason as `newTurnID`: a caller who picks the id picks which thread to collide with. */
@@ -46,6 +48,10 @@ export const createRoutes = (parts: ApiParts): Hono => {
 
     return context.json({ threadID }, 201)
   })
+
+  app.post('/threads/:thread/stop', (context) =>
+    stopThread(parts, context, context.req.param('thread')),
+  )
 
   app.get('/threads/:thread/events', async (context) => {
     const reader = await parts.readerOf(context.req.raw)
@@ -98,4 +104,22 @@ const spoken = async (request: Request): Promise<string | null> => {
     // Not JSON at all. One recovery -- send a message -- so it is one error.
     return null
   }
+}
+
+/**
+ * Asks whoever is running a thread to stop.
+ *
+ * Answers 202 whether or not anything was running. Whether a turn exists is not knowable
+ * from this process, and a person pressing stop twice should not be told the second press
+ * was a mistake.
+ */
+const stopThread = async (parts: ApiParts, context: Context, threadID: string) => {
+  const reader = await parts.readerOf(context.req.raw)
+  if (reader === null) return context.text('sign in', 401)
+
+  const thread = await parts.messages.thread(threadID)
+  if (!mayRead(thread, reader)) return context.text(NOT_READABLE, 404)
+
+  await parts.stop(threadID)
+  return context.body(null, 202)
 }

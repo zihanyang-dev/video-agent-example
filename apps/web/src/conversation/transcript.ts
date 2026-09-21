@@ -15,9 +15,11 @@ import {
   Activity,
   ARTIFACT,
   ASK,
+  PLAN,
   STEP,
   type ArtifactContent,
   type AskContent,
+  type PlanContent,
   type StepContent,
 } from '@vid/contract'
 
@@ -31,6 +33,7 @@ import {
 export type Item =
   | { kind: 'said'; id: string; from: 'person' | 'agent'; text: string; finished: boolean }
   | { kind: 'thought'; id: string; text: string; finished: boolean }
+  | ({ kind: 'plan'; id: string } & PlanContent)
   | ({ kind: 'step'; id: string } & StepContent)
   | ({ kind: 'artifact'; id: string } & ArtifactContent)
   | ({ kind: 'ask'; id: string } & AskContent)
@@ -166,6 +169,8 @@ const fromActivity = (id: string, activityType: string, content: unknown): Item 
   if (!activity.success) return null
 
   switch (activity.data.activityType) {
+    case PLAN:
+      return { kind: 'plan', id, ...activity.data.content }
     case STEP:
       return { kind: 'step', id, ...activity.data.content }
     case ARTIFACT:
@@ -270,6 +275,15 @@ const edit = (transcript: Transcript, id: string, change: (item: Item) => Item):
  */
 export const asked = (transcript: Transcript, id: string, text: string): Transcript =>
   append(transcript, { kind: 'said', id, from: 'person', text, finished: true })
+
+/**
+ * Everything the agent has put in front of this person, in the order it arrived.
+ *
+ * Previews and cuts together, because that is what the shelf is: the pieces a film was made
+ * from, which is what someone judging the cut needs to be able to point at.
+ */
+export const deliveries = (transcript: Transcript): readonly Delivered[] =>
+  transcript.items.filter((item): item is Delivered => item.kind === 'artifact')
 
 /** What the stage shows: the most recent thing the agent said was finished. */
 export const latestFinal = (transcript: Transcript): Delivered | null => {

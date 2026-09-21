@@ -62,6 +62,17 @@ export type Harness = {
    */
   steer: (message: string) => Promise<void>
   /**
+   * Stops the turn now.
+   *
+   * Different from `steer` in what it means, not in how hard it tries. Steering says "keep
+   * going, but differently"; this says "stop". A person who can see a plan with four
+   * generations left on it and no way to stop them is a person watching their money burn.
+   *
+   * The turn ends the way any other failed turn does -- whatever the sandbox made is still
+   * carried out, and a generation already paid for stays recorded (architecture.md §4).
+   */
+  interrupt: () => Promise<void>
+  /**
    * What to persist so the next turn can carry on. Opaque on purpose: the shape belongs to
    * the implementation, and giving it a type of ours would be inventing a second format to
    * keep in sync with the first.

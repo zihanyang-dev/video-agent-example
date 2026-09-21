@@ -111,6 +111,7 @@ const fakeLive = (shown?: Event[]): LiveStream => ({
 const quietHarness = (run?: () => Promise<void>): Harness => ({
   run: run ?? (async () => {}),
   steer: async () => {},
+  interrupt: async () => {},
   entries: () => [],
   cost: () => ({ tokens: 0, usd: 0 }),
   dispose: () => {},
@@ -438,6 +439,7 @@ const patient = () => {
     steer: async (message) => {
       heard.push(message)
     },
+    interrupt: async () => release(),
     entries: () => [],
     cost: () => ({ tokens: 0, usd: 0 }),
     dispose: () => {},

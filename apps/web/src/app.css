@@ -13,6 +13,10 @@
   --edge: #1e242e;
   --ink: #e6e3dd;
   --quiet: #8b93a1;
+  /* One step quieter than `--quiet`: for what is finished and no longer needs reading. */
+  --faint: #5b6270;
+  /* A surface that sits on the panel rather than in it. */
+  --panel-raised: #171c25;
   /* The tally light. The only warm thing on the page, so it means exactly one thing. */
   --live: #d98829;
   --done: #6f9f77;
@@ -83,22 +87,6 @@ main {
 
 .empty .quiet {
   color: var(--quiet);
-}
-
-.strip {
-  display: flex;
-  gap: 0.75rem;
-  width: 100%;
-  margin: 0;
-  padding: 0;
-  overflow-x: auto;
-  list-style: none;
-}
-
-.strip video {
-  width: 13rem;
-  border: 1px solid var(--edge);
-  border-radius: 4px;
 }
 
 /* --- the column ---------------------------------------------------------- */
@@ -255,13 +243,6 @@ aside h1 {
   color: var(--quiet);
 }
 
-.delivered {
-  margin: 0;
-  color: var(--done);
-  font-size: 0.85rem;
-  letter-spacing: 0.04em;
-}
-
 .broke {
   margin: 0;
   padding: 0.6rem 0.75rem;
@@ -291,6 +272,123 @@ aside h1 {
   color: var(--done);
 }
 
+/* --- the shelf of pieces ------------------------------------------------- */
+
+.shelf {
+  display: flex;
+  gap: 0.6rem;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  overflow-x: auto;
+  list-style: none;
+}
+
+.piece {
+  display: grid;
+  gap: 0.3rem;
+  padding: 0;
+  background: none;
+  border: 0;
+  color: var(--quiet);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.piece video {
+  display: block;
+  width: 11rem;
+  border: 1px solid var(--edge);
+  border-radius: 4px;
+}
+
+.piece .label {
+  font-size: 0.75rem;
+  letter-spacing: 0.06em;
+}
+
+.piece.on video {
+  border-color: var(--ink);
+}
+
+.piece.on .label {
+  color: var(--ink);
+}
+
+.piece:focus-visible {
+  outline: 2px solid var(--live);
+  outline-offset: 2px;
+}
+
+/* --- the plan ------------------------------------------------------------ */
+
+.plan {
+  margin: 0;
+  padding: 0.75rem 0.9rem;
+  background: var(--panel-raised);
+  border: 1px solid var(--edge);
+  border-radius: var(--radius);
+  list-style: none;
+  counter-reset: plan;
+}
+
+.plan li {
+  display: flex;
+  gap: 0.6rem;
+  align-items: baseline;
+  padding: 0.22rem 0;
+  color: var(--quiet);
+  font-size: 0.9rem;
+}
+
+/* The mark is the state: an empty ring, a filled one, a tick, a dash. */
+.plan .mark {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  margin-top: 0.15rem;
+  border: 1px solid currentColor;
+  border-radius: 50%;
+}
+
+.plan .doing {
+  color: var(--live);
+}
+
+.plan .doing .mark {
+  background: currentColor;
+  animation: pulse 1.4s ease-in-out infinite;
+}
+
+.plan .done {
+  color: var(--faint);
+  /* Struck through, because a plan is a list of promises and this one is kept. */
+  text-decoration: line-through;
+  text-decoration-color: var(--edge);
+}
+
+.plan .done .mark {
+  background: var(--done);
+  border-color: var(--done);
+}
+
+.plan .skipped {
+  color: var(--faint);
+  text-decoration: line-through;
+  text-decoration-color: var(--edge);
+}
+
+.plan .skipped .mark {
+  border-style: dashed;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .plan .doing .mark {
+    animation: none;
+  }
+}
+
 /* --- the composer -------------------------------------------------------- */
 
 .composer {
@@ -317,8 +415,13 @@ aside h1 {
   outline-offset: 1px;
 }
 
+.composer .actions {
+  display: flex;
+  gap: 0.5rem;
+  justify-content: flex-end;
+}
+
 .composer button {
-  justify-self: end;
   padding: 0.4rem 1.1rem;
   background: var(--ink);
   border: 0;
@@ -327,6 +430,19 @@ aside h1 {
   font: inherit;
   font-weight: 600;
   cursor: pointer;
+}
+
+/* Quiet, not alarming: stopping is an ordinary thing to want, not an error. */
+.composer button.stop {
+  background: transparent;
+  border: 1px solid var(--edge);
+  color: var(--quiet);
+  font-weight: 400;
+}
+
+.composer button.stop:hover {
+  border-color: var(--gone);
+  color: var(--gone);
 }
 
 .composer button:disabled {
