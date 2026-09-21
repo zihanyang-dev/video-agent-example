@@ -30,6 +30,14 @@ Starting one item settles whichever was being worked on before it. It does **not
 items you never started — say what happened to those yourself, with `done` or `skip`. A
 plan that quietly marks things finished because you moved past them is a plan that lies.
 
+## Do not say it again in your reply
+
+Once the plan is announced it is **on their screen**, beside what you are typing. Listing
+the lines again, with ticks and spinners in the text, is the same information twice and the
+copy in your message is the one that goes stale the moment anything changes.
+
+Say what you are doing and why. Not what the list says.
+
 ## Write it for them, not for you
 
 Each line is one thing they would recognise as a piece of the film. **"Generate the
