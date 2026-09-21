@@ -10,7 +10,7 @@ has lost its way. The person cannot see what is left, so they cannot tell whethe
 stop you. **The plan is what makes their waiting informed.**
 
 ```bash
-./plan.sh set \
+skills/plan/plan.sh set \
   "Settle the look on a still" \
   "Generate the establishing shot" \
   "Generate the two cutaways" \
@@ -21,9 +21,9 @@ stop you. **The plan is what makes their waiting informed.**
 Then, as you go:
 
 ```bash
-./plan.sh doing 2
-./plan.sh done 2
-./plan.sh skip 3 "the establishing shot already covers this"
+skills/plan/plan.sh doing 2
+skills/plan/plan.sh done 2
+skills/plan/plan.sh skip 3 "the establishing shot already covers this"
 ```
 
 Starting one item settles whichever was being worked on before it. It does **not** touch
@@ -56,5 +56,5 @@ wrong:
 way leaves the plan where the next one finds it — and the next one can pick up at the first
 line that is not done rather than working out the whole thing again from the conversation.
 
-Run `./plan.sh show` at the start of a turn that is continuing earlier work: it puts the
+Run `skills/plan/plan.sh show` at the start of a turn that is continuing earlier work: it puts the
 plan back on their screen without changing anything.

@@ -10,7 +10,7 @@ machine and have no way to open a path. Until you deliver it, all they have is y
 description of it.
 
 ```bash
-./deliver.sh still_water_opener.mp4 final
+skills/deliver/deliver.sh still_water_opener.mp4 final
 ```
 
 The arguments are the file and what it is:

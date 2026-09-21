@@ -11,7 +11,7 @@ to look at it before you commit. A title card is a design problem, and HTML is t
 has spent thirty years on that problem.
 
 ```bash
-./card.sh "DRY SEASON" 1280x720 3
+skills/title-card/card.sh "DRY SEASON" 1280x720 3
 ```
 
 The arguments are the text, the size, and how long it holds. It prints the path it wrote.

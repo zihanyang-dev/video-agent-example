@@ -11,7 +11,7 @@ A still costs a few cents and comes back in seconds. A clip costs dollars and ta
 ## Making one
 
 ```bash
-./still.sh "a misty lake at dawn, low sun, cold blue light"
+skills/make-still/still.sh "a misty lake at dawn, low sun, cold blue light"
 ```
 
 The argument is the prompt; a size is optional and defaults to 2560x1440. It prints the path
@@ -30,8 +30,8 @@ to be cropped, and the crop takes away the part of the frame you chose it for.
 The usual reason to make a still is to animate it:
 
 ```bash
-./still.sh "a misty lake at dawn, low sun, cold blue light"
-./generate.sh "the camera pushes in slowly across the water" 5 stills/a-misty-lake-at-dawn.png
+skills/make-still/still.sh "a misty lake at dawn, low sun, cold blue light"
+skills/generate-clip/generate.sh "the camera pushes in slowly across the water" 5 stills/a-misty-lake-at-dawn.png
 ```
 
 Doing it in this order means the look is settled before the expensive call. Generating two
