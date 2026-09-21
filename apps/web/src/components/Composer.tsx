@@ -5,7 +5,34 @@
  * land and knows it is wrong should be able to say so immediately rather than wait out the
  * nine minutes it takes to be told about it.
  */
-import { useState, type FormEvent, type KeyboardEvent } from 'react'
+import { useCallback, useState, type FormEvent, type KeyboardEvent } from 'react'
+
+/**
+ * Runs one request and says so when it fails.
+ *
+ * Both buttons go through here because both are requests over a network. Stop did not, and
+ * a failure became an unhandled rejection -- which the dev server puts on screen as a
+ * full-page error and production swallows entirely. Measured, by pressing stop against a
+ * server that did not have the route yet.
+ */
+const useAttempt = () => {
+  const [refused, setRefused] = useState<string | null>(null)
+
+  const attempt = useCallback(
+    async (run: () => Promise<void>, whenItFails: string, undo?: () => void): Promise<void> => {
+      setRefused(null)
+      try {
+        await run()
+      } catch (error) {
+        undo?.()
+        setRefused(error instanceof Error ? error.message : whenItFails)
+      }
+    },
+    [],
+  )
+
+  return { refused, attempt }
+}
 
 export const Composer = ({
   onSend,
@@ -17,7 +44,7 @@ export const Composer = ({
   working: boolean
 }) => {
   const [text, setText] = useState('')
-  const [refused, setRefused] = useState<string | null>(null)
+  const { refused, attempt } = useAttempt()
 
   const submit = async (event: FormEvent) => {
     event.preventDefault()
@@ -27,14 +54,14 @@ export const Composer = ({
     // Cleared first: if the send fails, the message comes back, and a failure that also ate
     // what someone wrote is two problems.
     setText('')
-    setRefused(null)
-    try {
-      await onSend(message)
-    } catch (error) {
-      setText(message)
-      setRefused(error instanceof Error ? error.message : 'that did not send')
-    }
+    await attempt(
+      () => onSend(message),
+      'that did not send',
+      () => setText(message),
+    )
   }
+
+  const halt = () => void attempt(onStop, 'could not stop it')
 
   const maybeSubmit = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     // Enter sends, shift-enter breaks the line. A brief is usually one sentence; when it is
@@ -54,7 +81,7 @@ export const Composer = ({
       />
       {refused !== null && <p className="refused">{refused}</p>}
 
-      <Actions onStop={onStop} working={working} sendable={text.trim() !== ''} />
+      <Actions onStop={halt} working={working} sendable={text.trim() !== ''} />
     </form>
   )
 }
@@ -68,13 +95,13 @@ const Actions = ({
   working,
   sendable,
 }: {
-  onStop: () => Promise<void>
+  onStop: () => void
   working: boolean
   sendable: boolean
 }) => (
   <div className="actions">
     {working && (
-      <button type="button" className="stop" onClick={() => void onStop()}>
+      <button type="button" className="stop" onClick={onStop}>
         Stop
       </button>
     )}
