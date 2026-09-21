@@ -10,7 +10,22 @@
     "max-statements": ["error", 25],
     "typescript/no-explicit-any": "error",
     "typescript/no-extraneous-class": "error",
-    "typescript/method-signature-style": ["error", "property"]
+    "typescript/method-signature-style": ["error", "property"],
+
+    "typescript/no-floating-promises": "error",
+    "typescript/no-misused-promises": "error",
+    "typescript/await-thenable": "error",
+    "typescript/return-await": ["error", "in-try-catch"],
+    "typescript/no-base-to-string": "error",
+    "typescript/no-misused-spread": "error"
   },
+  "overrides": [
+    {
+      "files": ["**/*.test.ts"],
+      "rules": {
+        "typescript/await-thenable": "off"
+      }
+    }
+  ],
   "ignorePatterns": ["dist/**", "node_modules/**"]
 }

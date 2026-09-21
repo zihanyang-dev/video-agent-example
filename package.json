@@ -8,7 +8,7 @@
     "packages/*"
   ],
   "scripts": {
-    "check": "bun run typecheck && oxlint . && bun run schema && git diff --exit-code packages/store/schema.sql && bun test",
+    "check": "bun run typecheck && oxlint --type-aware . && bun run schema && git diff --exit-code packages/store/schema.sql && bun test",
     "typecheck": "tsc --build && tsc -p apps/web",
     "test": "bun test",
     "schema": "bun --cwd packages/store scripts/schema.ts",
@@ -27,6 +27,7 @@
   "devDependencies": {
     "@types/bun": "^1.4.2",
     "oxlint": "^1.83.0",
+    "oxlint-tsgolint": "^7.0.2002",
     "prettier": "^3.9.0",
     "typescript": "^5.9.0"
   }

@@ -262,8 +262,15 @@ const RenderRequestSchema = z.object({ … })
 判据是**换了之后编译过、还给出一个像样的错误答案**:两个都是机器生成的、人读不出对错的 id。
 `slug` 和 `displayName` 这种人写的名字不算 —— 调换在调用处就看得出来。
 
-**不用 branded string。** 这个系统里的 id 全部来自 wire(zod)或 provider 响应,两头都在边界上,
-要 brand 就得在每个边界上 cast,而 cast 正是错 id 混进来的地方 —— 编译器拦住的是写对了的那些人。
+**暂不用 branded string,但理由不是「做不到」。** 这里原本写的是「要 brand 就得在每个边界上
+cast」—— 这句话是错的,验过:`z.string().brand<'ThreadID'>()` 解析出来**就是** branded 类型,一次
+cast 都不用写,把 `TurnID` 传进吃 `ThreadID` 的函数当场编译失败。
+
+不用的真实理由是现在混不起来:id 只在 `turn.ts` 一条链路上流动,`threadID` 和 `turnID` 在同一个
+函数签名里并排出现,传反了在调用处就看得见。
+
+**重新评估的条件**:id 开始跨模块传递、或者出现第三个 id,那时「并排就看得见」不再成立,
+brand 的成本(每个 owner 多一个 schema)就买得到东西了。
 
 ### 4.4 非法状态无法表达 `人工`
 
@@ -438,7 +445,17 @@ interface ProviderAdapter {
 
 ## 8. 异步与生命周期
 
-**浮空 Promise 是最高价值的 lint 类别** `lint` —— `no-floating-promises` `no-misused-promises` `await-thenable` `return-await`。刻意的 fire-and-forget 用 `void foo()` 标注。
+**浮空 Promise 是最高价值的 lint 类别** `lint` —— `no-floating-promises` `no-misused-promises`
+`await-thenable` `return-await`。刻意的 fire-and-forget 用 `void foo()` 标注。
+
+这四条**需要类型信息**,所以 `check` 跑的是 `oxlint --type-aware`(需要 `oxlint-tsgolint`)。
+这一点值得写下来,因为它曾经不成立:文档列着这四条规则,配置里没开 type-aware,于是一条都没生效 ——
+实测写一个浮空 Promise 进去,lint 零输出。**没兑现的规则比没有规则更糟**,它让人以为有人在看。
+
+`await-thenable` 在 `**/*.test.ts` 里关掉,有具体原因:bun 的 `expect(...).rejects.toThrow()`
+运行时返回 `undefined`(验过),所以 `await` 它确实是在 await 一个非 Promise。`await` 仍然保留 ——
+验过断言是同步抛出的,现在删掉 `await` 不会出问题,但哪天 bun 改成返回 Promise,没有 `await`
+的断言会变成静默通过。宁可多一个无害的 `await`。
 
 **注册即可撤销的副作用** `人工` —— 启动子进程、监听器、定时器、沙箱实例的一方同时拥有取消、等待和清理;`register()` 返回它的撤销函数;构造函数不启动无人管理的后台任务;teardown 等待相关工作静止。
 

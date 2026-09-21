@@ -273,6 +273,33 @@ describe('the stage', () => {
   })
 })
 
+describe('an activity whose shape is wrong', () => {
+  const malformed = (content: unknown): Event =>
+    ({
+      type: EventType.ACTIVITY_SNAPSHOT,
+      messageId: 's1',
+      activityType: STEP,
+      content,
+    }) as Event
+
+  test('is dropped rather than stringified onto the screen', () => {
+    // `String({})` is `[object Object]`, and that is what used to reach the label.
+    const transcript = after(malformed({ label: { nested: 'oops' }, state: 'done' }))
+
+    expect(transcript.items).toEqual([])
+  })
+
+  test('is dropped when a required field is missing', () => {
+    expect(after(malformed({ state: 'done' })).items).toEqual([])
+  })
+
+  test('does not take the rest of the conversation with it', () => {
+    const transcript = after(...says('m1', 'still here'), malformed({ label: 42, state: 'done' }))
+
+    expect(transcript.items).toHaveLength(1)
+  })
+})
+
 describe('what a person is never shown', () => {
   test('a tool call is not a thing on the screen', () => {
     const transcript = after({

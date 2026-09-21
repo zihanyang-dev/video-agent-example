@@ -85,9 +85,11 @@ beforeAll(async () => {
   token = await mintTurnToken(SECRET, { turnID: 'turn-1', threadID: 't1' }, clock)
 })
 
-afterAll(() => {
-  provider.stop()
-  gateway.stop()
+afterAll(async () => {
+  // Awaited: `stop()` answers when the sockets are actually closed, and a suite that moved
+  // on without waiting leaves them open for the next one.
+  await provider.stop()
+  await gateway.stop()
 })
 
 const call = (path: string, init: RequestInit = {}): Promise<Response> =>

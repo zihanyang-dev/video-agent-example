@@ -49,7 +49,7 @@ beforeAll(async () => {
 })
 
 afterAll(async () => {
-  server.stop(true)
+  await server.stop(true)
   live.close()
   await sql`delete from threads where thread_id in (${thread}, ${'thread-fixed'})`
   await sql.close()

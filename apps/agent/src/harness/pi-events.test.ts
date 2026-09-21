@@ -53,6 +53,9 @@ describe('reasoning inlined into message text', () => {
   })
 
   test('one character at a time', () => {
+    // Splitting into code points is the point: this feeds the filter the worst possible
+    // chunking, one character per delta.
+    // oxlint-disable-next-line typescript/no-misused-spread
     expect(through([...message])).toBe(visible)
   })
 })

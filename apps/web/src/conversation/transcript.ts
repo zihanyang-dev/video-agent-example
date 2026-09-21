@@ -11,20 +11,29 @@
  * that decision got lost (architecture.md §6).
  */
 import { EventType, type Event, type Message } from '@ag-ui/core'
-import { ARTIFACT, ASK, STEP } from '@vid/contract'
+import {
+  Activity,
+  ARTIFACT,
+  ASK,
+  STEP,
+  type ArtifactContent,
+  type AskContent,
+  type StepContent,
+} from '@vid/contract'
 
+/**
+ * One thing on the screen.
+ *
+ * The three activity kinds take their fields from `@vid/contract` rather than restating
+ * them. Two descriptions of the same thing drift, and the drift shows up as a field
+ * silently missing from a screen.
+ */
 export type Item =
   | { kind: 'said'; id: string; from: 'person' | 'agent'; text: string; finished: boolean }
   | { kind: 'thought'; id: string; text: string; finished: boolean }
-  | {
-      kind: 'step'
-      id: string
-      label: string
-      state: 'running' | 'done' | 'failed'
-      detail?: string
-    }
-  | { kind: 'artifact'; id: string; url: string; role: 'preview' | 'final' }
-  | { kind: 'ask'; id: string; question: string; options: readonly string[]; answer: string | null }
+  | ({ kind: 'step'; id: string } & StepContent)
+  | ({ kind: 'artifact'; id: string } & ArtifactContent)
+  | ({ kind: 'ask'; id: string } & AskContent)
 
 /** Something the agent made, as a link a person can open. */
 export type Delivered = Extract<Item, { kind: 'artifact' }>
@@ -143,40 +152,28 @@ const asItem = (message: Message): Item[] => {
   return []
 }
 
-/** Null for an activity type this build does not know how to show. */
+/**
+ * Null for an activity this build cannot show, which includes one that does not match its
+ * own contract.
+ *
+ * Parsed rather than coerced. The first version read the fields out and called `String()` on
+ * them, which turns an activity whose `label` arrived as an object into the literal text
+ * `[object Object]` on someone's screen -- a shape that is wrong is better dropped than
+ * rendered, and the contract already describes every shape this may be.
+ */
 const fromActivity = (id: string, activityType: string, content: unknown): Item | null => {
-  const shape = content as Record<string, unknown>
+  const activity = Activity.safeParse({ activityType, content })
+  if (!activity.success) return null
 
-  if (activityType === STEP) return asStep(id, shape)
-  if (activityType === ARTIFACT) return asArtifact(id, shape)
-  if (activityType === ASK) return asAsk(id, shape)
-  return null
+  switch (activity.data.activityType) {
+    case STEP:
+      return { kind: 'step', id, ...activity.data.content }
+    case ARTIFACT:
+      return { kind: 'artifact', id, ...activity.data.content }
+    case ASK:
+      return { kind: 'ask', id, ...activity.data.content }
+  }
 }
-
-type Shape = Record<string, unknown>
-
-const asStep = (id: string, shape: Shape): Item => ({
-  kind: 'step',
-  id,
-  label: String(shape['label'] ?? ''),
-  state: shape['state'] as 'running' | 'done' | 'failed',
-  ...(typeof shape['detail'] === 'string' ? { detail: shape['detail'] } : {}),
-})
-
-const asArtifact = (id: string, shape: Shape): Item => ({
-  kind: 'artifact',
-  id,
-  url: String(shape['url'] ?? ''),
-  role: shape['role'] === 'preview' ? 'preview' : 'final',
-})
-
-const asAsk = (id: string, shape: Shape): Item => ({
-  kind: 'ask',
-  id,
-  question: String(shape['question'] ?? ''),
-  options: Array.isArray(shape['options']) ? (shape['options'] as string[]) : [],
-  answer: typeof shape['answer'] === 'string' ? shape['answer'] : null,
-})
 
 const withoutThoughts = (items: readonly Item[]): readonly Item[] =>
   items.filter((item) => item.kind !== 'thought')
