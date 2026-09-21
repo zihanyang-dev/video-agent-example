@@ -37,6 +37,7 @@ const server = Bun.serve({
       const userID = request.headers.get('x-user-id')
       return userID === null || userID === '' ? null : { userID }
     },
+    sign: async (key: string) => `https://objects.example/${key}?signed`,
     newTurnID: () => 'turn-fixed',
     newThreadID: () => 'thread-fixed',
   }).fetch,

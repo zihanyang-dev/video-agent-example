@@ -6,7 +6,7 @@
  * way through (architecture.md §1).
  */
 import { createRedisTurnQueue } from '@vid/queue'
-import { createPostgresMessages, createRedisLiveStream } from '@vid/store'
+import { createPostgresMessages, createRedisLiveStream, createS3Files } from '@vid/store'
 import { SQL } from 'bun'
 import { createRoutes } from './api/routes'
 import { readEnv } from './env'
@@ -15,6 +15,13 @@ const env = readEnv()
 
 const sql = new SQL(env.DATABASE_URL)
 const live = createRedisLiveStream(env.REDIS_URL)
+const files = createS3Files({
+  bucket: env.OBJECTS_BUCKET,
+  endpoint: env.OBJECTS_ENDPOINT,
+  accessKeyId: env.OBJECTS_ACCESS_KEY,
+  secretAccessKey: env.OBJECTS_SECRET_KEY,
+  region: env.OBJECTS_REGION,
+})
 const queue = createRedisTurnQueue({
   url: env.REDIS_URL,
   consumer: 'server',
@@ -32,6 +39,8 @@ const app = createRoutes({
     const userID = request.headers.get('x-user-id')
     return userID === null || userID === '' ? null : { userID }
   },
+  // Only the one function, not the whole store: a page load needs a link, not a file.
+  sign: (key) => files.downloadUrl(key),
   newTurnID: () => crypto.randomUUID(),
   newThreadID: () => crypto.randomUUID(),
 })

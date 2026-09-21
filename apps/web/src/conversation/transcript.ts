@@ -224,10 +224,24 @@ const upsert = (transcript: Transcript, item: Item | null): Transcript => {
   return { ...transcript, items }
 }
 
+/**
+ * Appends to a message that is still being written, and ignores anything else.
+ *
+ * Ignoring a delta for a finished message is what makes a partial replay safe. A reconnect
+ * whose cursor landed mid-reply is sent the snapshot -- where that reply is already whole --
+ * and then replayed the tail of it with no `START` in front. Measured: the tail was appended
+ * to the finished text, and the reply ended "...across the water.across the water."
+ *
+ * A replay that does include the `START` is unaffected: starting a message re-opens it, and
+ * the deltas behind it rebuild exactly what the snapshot already said.
+ */
 const grow = (transcript: Transcript, id: string, delta: string): Transcript =>
-  edit(transcript, id, (item) =>
-    item.kind === 'said' || item.kind === 'thought' ? { ...item, text: item.text + delta } : item,
-  )
+  edit(transcript, id, (item) => {
+    if (item.kind !== 'said' && item.kind !== 'thought') return item
+    if (item.finished) return item
+
+    return { ...item, text: item.text + delta }
+  })
 
 const finish = (transcript: Transcript, id: string): Transcript =>
   edit(transcript, id, (item) =>

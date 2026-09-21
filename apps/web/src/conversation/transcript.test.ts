@@ -138,6 +138,16 @@ describe('a reconnect', () => {
 })
 
 describe('a page load', () => {
+  test('does not append the tail of a reply the snapshot already finished', () => {
+    const transcript = after(
+      snapshotOf('m1', 'A slow drift across the water.'),
+      // What a cursor landing mid-reply replays: the tail, with no START in front of it.
+      { type: EventType.TEXT_MESSAGE_CONTENT, messageId: 'm1', delta: 'across the water.' },
+    )
+
+    expect(transcript.items[0]).toMatchObject({ text: 'A slow drift across the water.' })
+  })
+
   test('brings back what someone asked for, not just what was answered', () => {
     const transcript = after(
       snapshot([

@@ -1,5 +1,6 @@
 export type { LiveStream, StreamCursor } from './live'
 export type { Messages, Thread } from './messages'
+export { StoredArtifact } from './messages'
 export type { Sessions } from './sessions'
 export type { Files } from './files'
 

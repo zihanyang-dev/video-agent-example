@@ -13,6 +13,27 @@
  * conversation, answering two different questions (see `sessions.ts`).
  */
 import type { Message } from '@ag-ui/core'
+import { z } from 'zod'
+
+/**
+ * What an artifact looks like once it is written down, which is not what it looks like on
+ * the wire.
+ *
+ * On the wire an artifact carries a link. A link to object storage is signed and expires in
+ * an hour, so writing that link into the record turns a fact that stays true into one that
+ * stops being true overnight -- a reload the next morning hands the browser a dead URL. The
+ * record keeps the one thing that does stay true, the object's key, and whoever reads it
+ * mints a fresh link then.
+ *
+ * It lives here rather than in `@vid/contract` on purpose: a key is an internal path, and
+ * the contract is the package the browser imports.
+ */
+export const StoredArtifact = z.object({
+  key: z.string().min(1),
+  role: z.enum(['preview', 'final']),
+})
+
+export type StoredArtifact = z.infer<typeof StoredArtifact>
 
 export type Thread = {
   threadID: string

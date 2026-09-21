@@ -14,12 +14,18 @@ import type { TurnQueue } from '@vid/queue'
 import type { LiveStream, Messages } from '@vid/store'
 import { Hono } from 'hono'
 import { mayRead, NOT_READABLE, type Reader } from '../conversation/thread'
+import type { SignLink } from '../conversation/history'
 import { streamConversation } from './sse'
 
 export type ApiParts = {
   queue: TurnQueue
   messages: Messages
   live: LiveStream
+  /**
+   * Mints a link for a stored artifact. `Files.downloadUrl` and nothing more: this process
+   * has no other reason to know about object storage.
+   */
+  sign: SignLink
   /** Null when the request carries no usable session. */
   readerOf: (request: Request) => Promise<Reader | null>
   /** Ids are minted here so a caller cannot choose one and collide with another turn. */
@@ -53,7 +59,7 @@ export const createRoutes = (parts: ApiParts): Hono => {
     const resumeFrom = context.req.header('last-event-id') ?? null
 
     return streamConversation(
-      { live: parts.live, messages: parts.messages },
+      { live: parts.live, messages: parts.messages, sign: parts.sign },
       threadID,
       resumeFrom,
       context.req.raw.signal,

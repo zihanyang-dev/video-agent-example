@@ -10,7 +10,7 @@
 import { EventType, type Event, type Message } from '@ag-ui/core'
 import { ARTIFACT, ArtifactContent } from '@vid/contract'
 import type { TurnRequest } from '@vid/queue'
-import type { Files, LiveStream, Messages, Sessions } from '@vid/store'
+import type { Files, LiveStream, Messages, Sessions, StoredArtifact } from '@vid/store'
 import { createProjection } from './projection'
 import type { ModelChoice, SkillIndex, StartHarness } from './harness/harness'
 import type { RentSandbox, Sandbox } from './sandbox/sandbox'
@@ -109,21 +109,39 @@ const runInside = async (
     threadID: request.threadID,
   })
 
+  // Held rather than thrown, so that whatever went wrong first is what the turn reports.
+  // A turn that failed must not have its reason replaced by what went wrong while writing
+  // down that it failed.
+  let ran: unknown = null
+  let recorded: unknown = null
+
   try {
     await harness.run(request.message)
-  } finally {
-    // A step that announced `running` and then died would otherwise spin on someone's
-    // screen forever; the turn ending is the only evidence that it stopped.
-    for (const abandoned of projection.settle()) deliver.take(abandoned)
-
-    // Reported rather than thrown. A turn that already failed must not have its reason
-    // replaced by whatever went wrong while writing down that it failed.
-    await deliver.drain().catch((error: unknown) => {
-      console.error(`turn ${request.turnID}: not everything was recorded`, error)
-    })
-    await parts.sessions.write(request.threadID, harness.entries())
-    harness.dispose()
+  } catch (error) {
+    ran = error
   }
+
+  // A step that announced `running` and then died would otherwise spin on someone's screen
+  // forever; the turn ending is the only evidence that it stopped.
+  for (const abandoned of projection.settle()) deliver.take(abandoned)
+
+  try {
+    await deliver.drain()
+  } catch (error) {
+    recorded = error
+  }
+
+  await parts.sessions.write(request.threadID, harness.entries())
+  harness.dispose()
+
+  if (ran !== null) throw ran
+
+  // Nothing above threw, so the work happened -- and then failed to be written down. That
+  // is not a turn that succeeded: the person would be told it went well and find nothing
+  // there tomorrow. Measured: a second turn delivering the same artifact hit the primary
+  // key, every write behind it was skipped, and the turn returned as though nothing was
+  // wrong.
+  if (recorded !== null) throw recorded
 }
 
 /**
@@ -143,7 +161,6 @@ type Delivery = {
 
 const createDelivery = (parts: TurnParts, threadID: string, sandbox: Sandbox): Delivery => {
   const assembling = new Map<string, string>()
-  const settled = new Set<string>()
 
   // Two chains, because the two stores order differently. The stream is one connection and
   // keeps the order its commands were issued in; the database is a pool and does not --
@@ -158,20 +175,24 @@ const createDelivery = (parts: TurnParts, threadID: string, sandbox: Sandbox): D
     const ready = deliverable(parts, threadID, sandbox, event)
 
     published = published.then(async () => {
-      const settledEvent = await ready
-      if (settledEvent !== null) await parts.live.publish(threadID, settledEvent)
+      const delivered = await ready
+      if (delivered.event !== null) await parts.live.publish(threadID, delivered.event)
     })
 
     stored = stored.then(async () => {
-      const settledEvent = await ready
-      if (settledEvent === null) return
+      const delivered = await ready
+      if (delivered.event === null) return
 
-      const durable = keep(settledEvent, assembling)
+      const durable = keep(delivered, assembling)
       if (durable === null) return
 
-      const seen = settled.has(durable.id)
-      settled.add(durable.id)
-      await (seen
+      // An activity is written by its id however many times it is sent, and an id is stable
+      // across turns by design -- that is what makes `running` and `done` one row rather
+      // than two. Deciding append-or-replace from what this turn has seen got that wrong
+      // the moment a second turn delivered the same thing: measured, the insert hit the
+      // primary key, the chain behind it stopped, and that turn's reply never reached the
+      // record at all, while the turn itself returned as though nothing had happened.
+      await (durable.role === 'activity'
         ? parts.messages.replace(threadID, durable)
         : parts.messages.append(threadID, durable))
     })
@@ -202,26 +223,44 @@ const deliverable = async (
   threadID: string,
   sandbox: Sandbox,
   event: Event,
-): Promise<Event | null> => {
-  if (event.type !== EventType.ACTIVITY_SNAPSHOT || event.activityType !== ARTIFACT) return event
+): Promise<Delivered> => {
+  if (event.type !== EventType.ACTIVITY_SNAPSHOT || event.activityType !== ARTIFACT) {
+    return { event }
+  }
 
   const announced = ArtifactContent.safeParse(event.content)
-  if (!announced.success) return null
+  if (!announced.success) return { event: null }
 
   const path = announced.data.url.replace(/^\/+/, '')
   const key = `${workspaceOf(threadID)}${path}`
 
   try {
     await parts.files.put(key, await sandbox.readFile(`${sandbox.roots.sandbox}/${path}`))
-    return { ...event, content: { ...announced.data, url: await parts.files.downloadUrl(key) } }
+    return {
+      event: { ...event, content: { ...announced.data, url: await parts.files.downloadUrl(key) } },
+      // Carried separately rather than inside the event: the link is what a person receives
+      // and the key is what gets written down, and they are different on purpose.
+      stored: { key, role: announced.data.role },
+    }
   } catch (error) {
     console.error(`turn on ${threadID}: announced ${path}, which could not be delivered`, error)
-    return null
+    return { event: null }
   }
 }
 
+/**
+ * One event, in the two shapes it leaves in.
+ *
+ * `event` is what a person receives; `stored` is what the record keeps, and only artifacts
+ * have one, because only artifacts carry something that expires.
+ */
+type Delivered = { event: Event | null; stored?: StoredArtifact }
+
 /** Null for anything a page reload should not replay. */
-const keep = (event: Event, assembling: Map<string, string>): Message | null => {
+const keep = (delivered: Delivered, assembling: Map<string, string>): Message | null => {
+  const event = delivered.event
+  if (event === null) return null
+
   if (event.type === EventType.TEXT_MESSAGE_CONTENT) {
     assembling.set(event.messageId, (assembling.get(event.messageId) ?? '') + event.delta)
     return null
@@ -240,7 +279,8 @@ const keep = (event: Event, assembling: Map<string, string>): Message | null => 
       id: event.messageId,
       role: 'activity',
       activityType: event.activityType,
-      content: event.content,
+      // The stored shape when there is one. An artifact's link expires; its key does not.
+      content: delivered.stored ?? event.content,
     }
   }
 

@@ -13,11 +13,13 @@
 import { EventEncoder } from '@ag-ui/encoder'
 import type { Event } from '@ag-ui/core'
 import type { LiveStream, Messages } from '@vid/store'
-import { snapshotOf } from '../conversation/history'
+import { snapshotOf, type SignLink } from '../conversation/history'
 
 export type StreamParts = {
   live: LiveStream
   messages: Messages
+  /** Mints a link for a stored artifact. The record keeps a key; a browser needs a URL. */
+  sign: SignLink
 }
 
 export const streamConversation = (
@@ -39,7 +41,9 @@ export const streamConversation = (
       try {
         // Only on a first connection. A reconnect already has everything up to its cursor,
         // and replaying the snapshot would make the page redraw what it is already showing.
-        if (resumeFrom === null) send(snapshotOf(await parts.messages.read(threadID)))
+        if (resumeFrom === null) {
+          send(await snapshotOf(await parts.messages.read(threadID), parts.sign))
+        }
 
         for await (const { id, event } of parts.live.read(
           { thread: threadID, after: resumeFrom },
