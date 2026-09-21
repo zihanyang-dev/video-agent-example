@@ -6,9 +6,14 @@
 # commands a model wrote, so it carries a token good for one turn and calls the gateway,
 # which attaches the real key on the way out (architecture.md §1).
 #
-# The job id is written down before the first poll. A turn that dies between submitting and
-# finishing has already spent the money, and the file is what lets the next one collect the
-# result instead of paying again (architecture.md §4).
+# The intent is written down *before* the request goes out, not after the reply comes back.
+# A reply that never arrives is not a generation that never happened: the provider may have
+# accepted it and the money may already be gone. Writing afterwards leaves exactly that case
+# with no local record, and the next turn pays for the same clip again (architecture.md §4).
+#
+# When the record says we submitted but never learnt the id, `reconcile.py` asks the provider
+# what it has. Anything it cannot answer confidently is `unknown` and stops here -- that is
+# what the third state is for.
 set -euo pipefail
 
 PROMPT="${1:?usage: generate.sh "<prompt>" <seconds> [reference-image]}"
@@ -20,19 +25,83 @@ JOBS=".jobs"
 OUT="clips"
 mkdir -p "$JOBS" "$OUT"
 
-say() { printf '::vid %s\n' "$1"; }
 activity() {
-  say "{\"id\":\"$1\",\"activityType\":\"step\",\"content\":{\"label\":\"$2\",\"state\":\"$3\"}}"
+  python3 - "$1" "$2" "$3" "${4:-}" <<'PY'
+import json, sys
+message_id, label, state, detail = sys.argv[1:5]
+content = {"label": label, "state": state}
+if detail:
+    content["detail"] = detail
+print('::vid ' + json.dumps({"id": message_id, "activityType": "step", "content": content}))
+PY
 }
 
 slug=$(printf '%s' "$PROMPT" | tr -cd '[:alnum:] ' | tr ' ' '-' | cut -c1-40 | tr '[:upper:]' '[:lower:]')
 job_file="$JOBS/$slug.json"
 
+here=$(cd "$(dirname "$0")" && pwd)
+
+# The record of one submission. Written before the request and updated after it, so the
+# window where money may be spent and nothing knows about it does not exist.
+note_job() {
+  python3 - "$job_file" "$1" "$2" "$MODEL" "$SECONDS_LONG" "$PROMPT" <<'PY'
+import json, sys, time
+path, state, task_id, model, seconds, prompt = sys.argv[1:7]
+try:
+    was = json.load(open(path))
+except Exception:
+    was = {}
+json.dump({
+    "state": state,
+    "id": task_id or was.get("id", ""),
+    "submitted_at": was.get("submitted_at") or int(time.time()),
+    "model": model,
+    "duration": int(seconds),
+    "prompt": prompt,
+}, open(path, "w"))
+PY
+}
+
+read_job() {
+  python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get(sys.argv[2],''))" "$job_file" "$1"
+}
+
+task_id=""
+
 # --- pick the job up again rather than paying twice --------------------------
 if [ -f "$job_file" ]; then
-  task_id=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['id'])" "$job_file")
-  echo "resuming $task_id, already submitted" >&2
-else
+  case "$(read_job state)" in
+    submitted)
+      task_id=$(read_job id)
+      echo "resuming $task_id, already submitted" >&2
+      ;;
+    submitting)
+      # It went out and we never learnt what came of it. Asking is the only honest move:
+      # resubmitting risks paying twice, giving up risks throwing away a finished clip.
+      echo "a previous attempt submitted but never got an id; asking the provider" >&2
+      verdict=$(python3 "$here/reconcile.py" "$job_file")
+      case "$verdict" in
+        "FOUND "*)
+          task_id=${verdict#FOUND }
+          note_job submitted "$task_id"
+          echo "it did land, as $task_id" >&2
+          ;;
+        NONE)
+          echo "it never landed; submitting once more" >&2
+          rm -f "$job_file"
+          ;;
+        *)
+          activity "$slug" "Generating footage" "failed" \
+            "A generation may already be running; someone should look before we pay again."
+          echo "unknown: $verdict" >&2
+          exit 2
+          ;;
+      esac
+      ;;
+  esac
+fi
+
+if [ -z "$task_id" ]; then
   activity "$slug" "Generating footage" "running"
 
   body=$(python3 - "$MODEL" "$PROMPT" "$SECONDS_LONG" "$REFERENCE" <<'PY'
@@ -45,6 +114,10 @@ print(json.dumps({"model": model, "content": content}))
 PY
 )
 
+  # Before the request, never after. This file is the only evidence that money may have been
+  # spent when the reply does not come back.
+  note_job submitting ""
+
   submitted=$(curl -sS -X POST "$VID_GATEWAY/seedance/api/v3/contents/generations/tasks" \
     -H "Authorization: Bearer $VID_TURN_TOKEN" \
     -H 'Content-Type: application/json' \
@@ -52,13 +125,14 @@ PY
 
   task_id=$(printf '%s' "$submitted" | python3 -c "import json,sys;print(json.load(sys.stdin).get('id',''))")
   if [ -z "$task_id" ]; then
+    # Refused outright: the provider answered, and it said no, so nothing was bought.
+    rm -f "$job_file"
     activity "$slug" "Generating footage" "failed"
     echo "submit refused: $submitted" >&2
     exit 1
   fi
 
-  # Written down before the first poll, never after.
-  printf '{"id":"%s","prompt":%s}\n' "$task_id" "$(python3 -c 'import json,sys;print(json.dumps(sys.argv[1]))' "$PROMPT")" > "$job_file"
+  note_job submitted "$task_id"
 fi
 
 # --- wait -------------------------------------------------------------------

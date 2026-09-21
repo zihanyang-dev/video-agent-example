@@ -25,7 +25,14 @@
 
     "noEmit": true
   },
-  "include": ["apps/*/src/**/*.ts", "packages/*/src/**/*.ts", "packages/*/scripts/**/*.ts"],
+  // Skills are content, not code -- but the scripts in them are the only thing here that can
+  // spend money twice, so their tests are typechecked and run like everything else.
+  "include": [
+    "apps/*/src/**/*.ts",
+    "packages/*/src/**/*.ts",
+    "packages/*/scripts/**/*.ts",
+    "skills/**/*.test.ts"
+  ],
 
   // The browser has its own config. Kept out of this one so that server and agent code
   // cannot reach `document` or `window` by accident -- they have no screen, and code that

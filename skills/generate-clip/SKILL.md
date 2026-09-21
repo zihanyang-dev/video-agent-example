@@ -39,13 +39,20 @@ argument and call the script again.
 
 ## What it does about failure
 
-The script writes the job id to `.jobs/` **before** it starts waiting. If something kills
-this turn half way, the next one finds that file and picks the same job back up rather than
-paying for it twice.
+The script writes to `.jobs/` **before it sends the request**, not after the reply comes
+back. A reply that never arrives is not a generation that never happened — the provider may
+have taken the job and the money may already be gone.
 
-If it prints `unknown`, the generation may or may not have run. **Do not call it again for
-the same shot.** Tell the person what happened and let them decide — that is the one case
-where guessing costs real money.
+So when the next run finds a record with no job id, it does not resubmit. It asks the
+provider what it has, matching on when the task was created, which model, and how long:
+
+- found exactly one → picks it up, nothing is paid twice
+- found none, and enough time has passed → it never landed, submits again
+- **found more than one, or the provider would not answer → stops with `unknown`**
+
+If it prints `unknown`, **do not call it again for the same shot.** Tell the person what
+happened and let them decide. That is the one case where guessing costs real money, and it
+is the whole reason there is a third state instead of just success and failure.
 
 ## Keeping the result
 
