@@ -27,11 +27,12 @@ let failures: string[] = []
  */
 const STREAM = `turns-test-${crypto.randomUUID()}`
 
-const join = (consumer: string): TurnQueue => {
+const join = (consumer: string, concurrency = 1): TurnQueue => {
   const queue = createRedisTurnQueue({
     url,
     consumer,
     stream: STREAM,
+    concurrency,
     onFailed: (turn) => failures.push(turn.turnID),
   })
   joined.push(queue)
@@ -154,6 +155,62 @@ describe('the stream disappearing underneath a running agent', () => {
     await Bun.sleep(600)
 
     expect(worked).toEqual(['turn-7'])
+  }, 10_000)
+})
+
+describe('working on several turns at once', () => {
+  test('runs up to the cap and no further', async () => {
+    const queue = join('agent-wide', 3)
+    let running = 0
+    let highest = 0
+
+    void queue.take(async () => {
+      running += 1
+      highest = Math.max(highest, running)
+      await Bun.sleep(120)
+      running -= 1
+    })
+    await Bun.sleep(100)
+    for (let n = 0; n < 9; n++) await queue.put(turn(n))
+    await Bun.sleep(900)
+
+    // The point of a cap is that it is a cap: every turn holds a sandbox for its lifetime.
+    expect(highest).toBe(3)
+  }, 10_000)
+
+  test('does not claim a turn it has no room to start', async () => {
+    const wide = join('agent-hog', 2)
+    const worked: string[] = []
+
+    void wide.take(async (claimed) => {
+      worked.push(claimed.turnID)
+      await Bun.sleep(400)
+    })
+    await Bun.sleep(100)
+    for (let n = 0; n < 6; n++) await wide.put(turn(n))
+    await Bun.sleep(200)
+
+    // A claimed entry is one nobody else in the group is given. Claiming ahead is how work
+    // ends up parked behind a busy consumer while another sits idle.
+    expect(worked.length).toBeLessThanOrEqual(2)
+  }, 10_000)
+
+  test('a drain waits for every turn it started, not just the first', async () => {
+    const queue = join('agent-drain', 3)
+    let finished = 0
+
+    void queue.take(async () => {
+      await Bun.sleep(200)
+      finished += 1
+    })
+    await Bun.sleep(100)
+    for (let n = 0; n < 3; n++) await queue.put(turn(n))
+    await Bun.sleep(150)
+
+    await queue.close()
+
+    // Exiting early leaves sandboxes running and conversations half written.
+    expect(finished).toBe(3)
   }, 10_000)
 })
 

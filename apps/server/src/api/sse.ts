@@ -39,9 +39,17 @@ export const streamConversation = (
       }
 
       try {
-        // Only on a first connection. A reconnect already has everything up to its cursor,
-        // and replaying the snapshot would make the page redraw what it is already showing.
-        if (resumeFrom === null) {
+        // On a first connection, and on a reconnect that fell too far behind.
+        //
+        // A reconnect normally has everything up to its cursor, so replaying the snapshot
+        // would make the page redraw what it is already showing. But fragments are only
+        // kept for a window: a reader behind that window cannot be caught up by resuming,
+        // because what it missed no longer exists. Resuming anyway succeeds quietly and
+        // leaves a hole in the middle of the conversation.
+        const caughtUp = await parts.live.reachable({ thread: threadID, after: resumeFrom })
+        if (!caughtUp) console.warn(`stream for ${threadID} resumed from beyond its window`)
+
+        if (resumeFrom === null || !caughtUp) {
           send(await snapshotOf(await parts.messages.read(threadID), parts.sign))
         }
 

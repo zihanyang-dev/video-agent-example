@@ -103,6 +103,43 @@ describe('a browser that came back', () => {
   })
 })
 
+describe('a browser that fell further behind than the window', () => {
+  test('is told, so it can be sent the conversation again', async () => {
+    await live.publish(thread, delta('what it missed'))
+
+    // What trimming leaves behind: the reader's position is older than anything still held.
+    await admin.send('XTRIM', [`live:${thread}`, 'MINID', String(Date.now())])
+    await live.publish(thread, delta('what came after'))
+
+    const reachable = await live.reachable({ thread, after: '1-0' })
+
+    // Resuming from here would succeed quietly and leave a hole in the page.
+    expect(reachable).toBe(false)
+  })
+
+  test('is left alone when its position is still in the stream', async () => {
+    await live.publish(thread, delta('one'))
+    const seen: { id: string; event: Event }[] = []
+    const stop = new AbortController()
+    await collect(live.read({ thread, after: null }, stop.signal), seen, 1)
+    stop.abort()
+
+    expect(await live.reachable({ thread, after: seen[0]!.id })).toBe(true)
+  })
+
+  test('starting from the beginning is always fine', async () => {
+    await live.publish(thread, delta('one'))
+
+    expect(await live.reachable({ thread, after: null })).toBe(true)
+  })
+
+  test('a position into a stream with nothing left in it is not reachable either', async () => {
+    // Everything this reader saw has been trimmed. We cannot show it is caught up, so it
+    // is not treated as caught up.
+    expect(await live.reachable({ thread, after: '1-0' })).toBe(false)
+  })
+})
+
 describe('something that is not one of our events', () => {
   const rubbish = [
     ['not json at all', 'not json at all'],

@@ -7,17 +7,25 @@
  * It imports the two ports, never an implementation, so which sandbox and which harness are
  * decisions made once in `main.ts` and nowhere else.
  */
-import { EventType, type Event, type Message } from '@ag-ui/core'
-import { ARTIFACT, ArtifactContent } from '@vid/contract'
 import type { TurnRequest } from '@vid/queue'
-import type { Files, LiveStream, Messages, Sessions, StoredArtifact } from '@vid/store'
-import { createProjection } from './projection'
+import type { Files, LiveStream, Messages, Sessions } from '@vid/store'
+import { createDelivery } from './delivery'
 import type { ModelChoice, SkillIndex, StartHarness } from './harness/harness'
+import type { InFlight } from './in-flight'
+import { createProjection } from './projection'
 import type { RentSandbox, Sandbox } from './sandbox/sandbox'
+import { carryIn, carryOut, carrySkills } from './workspace'
 
 export type TurnParts = {
   rentSandbox: RentSandbox
   startHarness: StartHarness
+  /**
+   * Who owns which thread while a turn is running.
+   *
+   * A turn registers here for its whole life, which is what stops a second one starting on
+   * the same thread and what lets a message typed while it works reach it (`in-flight.ts`).
+   */
+  inFlight: InFlight
   live: LiveStream
   messages: Messages
   sessions: Sessions
@@ -109,30 +117,26 @@ const runInside = async (
     threadID: request.threadID,
   })
 
+  // From here until the run is over, this thread is ours and anything else said on it comes
+  // to this harness instead of waiting for a turn of its own.
+  const release = parts.inFlight.claim(request.threadID, harness)
+
   // Held rather than thrown, so that whatever went wrong first is what the turn reports.
   // A turn that failed must not have its reason replaced by what went wrong while writing
   // down that it failed.
   let ran: unknown = null
-  let recorded: unknown = null
 
   try {
     await harness.run(request.message)
   } catch (error) {
     ran = error
+  } finally {
+    // Before anything else is awaited: a steer decided after this point is refused and run
+    // as its own turn, rather than handed to a harness that is about to be disposed.
+    release()
   }
 
-  // A step that announced `running` and then died would otherwise spin on someone's screen
-  // forever; the turn ending is the only evidence that it stopped.
-  for (const abandoned of projection.settle()) deliver.take(abandoned)
-
-  try {
-    await deliver.drain()
-  } catch (error) {
-    recorded = error
-  }
-
-  await parts.sessions.write(request.threadID, harness.entries())
-  harness.dispose()
+  const recorded = await close({ parts, request, projection, deliver, harness })
 
   if (ran !== null) throw ran
 
@@ -145,211 +149,30 @@ const runInside = async (
 }
 
 /**
- * Where a visible event goes.
+ * Closes a turn out, whether or not it went well.
  *
- * Two destinations with different units: the stream carries fragments to whoever is
- * watching, the database carries completed things to whoever arrives tomorrow
- * (architecture.md §3.1).
- *
- * Text is assembled here because AG-UI's TEXT_MESSAGE_END carries no content -- it says a
- * message finished, not what it said.
+ * Returns what went wrong writing the turn down, rather than throwing it: the caller holds
+ * the reason the turn itself failed, and that reason wins.
  */
-type Delivery = {
-  take: (event: Event) => void
-  drain: () => Promise<void>
-}
+const close = async (of: {
+  parts: TurnParts
+  request: TurnRequest
+  projection: ReturnType<typeof createProjection>
+  deliver: ReturnType<typeof createDelivery>
+  harness: Awaited<ReturnType<StartHarness>>
+}): Promise<unknown> => {
+  // A step that announced `running` and then died would otherwise spin on someone's screen
+  // forever; the turn ending is the only evidence that it stopped.
+  for (const abandoned of of.projection.settle()) of.deliver.take(abandoned)
 
-const createDelivery = (parts: TurnParts, threadID: string, sandbox: Sandbox): Delivery => {
-  const assembling = new Map<string, string>()
-
-  // Two chains, because the two stores order differently. The stream is one connection and
-  // keeps the order its commands were issued in; the database is a pool and does not --
-  // measured, and what came back was shuffled, which on a reload is a conversation whose
-  // turns have swapped places. So each write waits for the one before it.
-  let published: Promise<unknown> = Promise.resolve()
-  let stored: Promise<unknown> = Promise.resolve()
-
-  const take = (event: Event): void => {
-    // Resolved once, awaited by both chains, so the two stores never disagree about what an
-    // event said.
-    const ready = deliverable(parts, threadID, sandbox, event)
-
-    published = published.then(async () => {
-      const delivered = await ready
-      if (delivered.event !== null) await parts.live.publish(threadID, delivered.event)
-    })
-
-    stored = stored.then(async () => {
-      const delivered = await ready
-      if (delivered.event === null) return
-
-      const durable = keep(delivered, assembling)
-      if (durable === null) return
-
-      // An activity is written by its id however many times it is sent, and an id is stable
-      // across turns by design -- that is what makes `running` and `done` one row rather
-      // than two. Deciding append-or-replace from what this turn has seen got that wrong
-      // the moment a second turn delivered the same thing: measured, the insert hit the
-      // primary key, the chain behind it stopped, and that turn's reply never reached the
-      // record at all, while the turn itself returned as though nothing had happened.
-      await (durable.role === 'activity'
-        ? parts.messages.replace(threadID, durable)
-        : parts.messages.append(threadID, durable))
-    })
-  }
-
-  /** Every write started during the turn has landed before the turn reports done. */
-  const drain = async (): Promise<void> => {
-    await Promise.all([published, stored])
-  }
-
-  return { take, drain }
-}
-
-/**
- * Turns what a script announced into what a person may receive. Null drops the event.
- *
- * Only artifacts need this. A script announces the workspace path of the thing it made --
- * it has no credential and cannot mint anything -- and the file leaves here as a short-lived
- * URL. The file is carried out now rather than at the end of the turn, because a person
- * watching sees the artifact appear and will click it immediately.
- *
- * A path that cannot be turned into a URL is dropped rather than forwarded. Passing it on
- * would put an internal path on a screen, which is the one thing the contract exists to
- * prevent, and a link to it would be a link to nothing anyway.
- */
-const deliverable = async (
-  parts: TurnParts,
-  threadID: string,
-  sandbox: Sandbox,
-  event: Event,
-): Promise<Delivered> => {
-  if (event.type !== EventType.ACTIVITY_SNAPSHOT || event.activityType !== ARTIFACT) {
-    return { event }
-  }
-
-  const announced = ArtifactContent.safeParse(event.content)
-  if (!announced.success) return { event: null }
-
-  const path = announced.data.url.replace(/^\/+/, '')
-  const key = `${workspaceOf(threadID)}${path}`
-
+  let recorded: unknown = null
   try {
-    await parts.files.put(key, await sandbox.readFile(`${sandbox.roots.sandbox}/${path}`))
-    return {
-      event: { ...event, content: { ...announced.data, url: await parts.files.downloadUrl(key) } },
-      // Carried separately rather than inside the event: the link is what a person receives
-      // and the key is what gets written down, and they are different on purpose.
-      stored: { key, role: announced.data.role },
-    }
+    await of.deliver.drain()
   } catch (error) {
-    console.error(`turn on ${threadID}: announced ${path}, which could not be delivered`, error)
-    return { event: null }
+    recorded = error
   }
+
+  await of.parts.sessions.write(of.request.threadID, of.harness.entries())
+  of.harness.dispose()
+  return recorded
 }
-
-/**
- * One event, in the two shapes it leaves in.
- *
- * `event` is what a person receives; `stored` is what the record keeps, and only artifacts
- * have one, because only artifacts carry something that expires.
- */
-type Delivered = { event: Event | null; stored?: StoredArtifact }
-
-/** Null for anything a page reload should not replay. */
-const keep = (delivered: Delivered, assembling: Map<string, string>): Message | null => {
-  const event = delivered.event
-  if (event === null) return null
-
-  if (event.type === EventType.TEXT_MESSAGE_CONTENT) {
-    assembling.set(event.messageId, (assembling.get(event.messageId) ?? '') + event.delta)
-    return null
-  }
-
-  if (event.type === EventType.TEXT_MESSAGE_END) {
-    const text = assembling.get(event.messageId) ?? ''
-    assembling.delete(event.messageId)
-    return { id: event.messageId, role: 'assistant', content: text }
-  }
-
-  if (event.type === EventType.ACTIVITY_SNAPSHOT) {
-    // A running step is not kept: tomorrow it would be a spinner nobody will ever stop.
-    if (isRunning(event.content)) return null
-    return {
-      id: event.messageId,
-      role: 'activity',
-      activityType: event.activityType,
-      // The stored shape when there is one. An artifact's link expires; its key does not.
-      content: delivered.stored ?? event.content,
-    }
-  }
-
-  return null
-}
-
-const isRunning = (content: Record<string, unknown>): boolean => content['state'] === 'running'
-
-/**
- * The thread's files, into a machine that has none.
- *
- * This is what makes a conversation feel continuous across a sandbox that only lives for one
- * turn: the agent's notes, its cut list, what it decided about shot three, are files.
- */
-const carryIn = async (files: Files, sandbox: Sandbox, threadID: string): Promise<void> => {
-  await copyInto(files, sandbox, workspaceOf(threadID), '')
-}
-
-const copyInto = async (
-  files: Files,
-  sandbox: Sandbox,
-  prefix: string,
-  into: string,
-): Promise<void> => {
-  const keys = await files.list(prefix)
-
-  // Directories first, and only the ones actually needed. A file written into a directory
-  // that is not there fails, and object storage has no directories to tell us about.
-  const wanted = new Set(
-    keys
-      .map((key) => `${into}${key.slice(prefix.length)}`)
-      .map((path) => path.slice(0, path.lastIndexOf('/')))
-      .filter((directory) => directory !== ''),
-  )
-  for (const directory of [...wanted].sort()) {
-    await sandbox.mkdir(`${sandbox.roots.sandbox}/${directory}`)
-  }
-
-  for (const key of keys) {
-    const bytes = await files.get(key)
-    await sandbox.writeFile(`${sandbox.roots.sandbox}/${into}${key.slice(prefix.length)}`, bytes)
-  }
-}
-
-/**
- * Skills, into the same sandbox, and they never come back out.
- *
- * Their truth is a git repository that CI publishes, so a sandbox writing to them would be
- * writing to a copy (architecture.md §7). Carried in beside the thread's own files because
- * that is where the agent looks -- it finds them by reading the directory, not by being
- * handed a list.
- */
-const carrySkills = async (files: Files, sandbox: Sandbox): Promise<void> => {
-  await copyInto(files, sandbox, SKILLS_PREFIX, `${SKILLS_DIR}/`)
-}
-
-const carryOut = async (files: Files, sandbox: Sandbox, threadID: string): Promise<void> => {
-  const prefix = workspaceOf(threadID)
-
-  for (const path of await sandbox.list()) {
-    // Skills came from object storage and are read-only here. Writing them back would make
-    // this thread's copy the next turn's source.
-    if (path === SKILLS_DIR || path.startsWith(`${SKILLS_DIR}/`)) continue
-    const bytes = await sandbox.readFile(`${sandbox.roots.sandbox}/${path}`)
-    await files.put(`${prefix}${path}`, bytes)
-  }
-}
-
-const workspaceOf = (threadID: string): string => `threads/${threadID}/`
-
-const SKILLS_PREFIX = 'skills/'
-const SKILLS_DIR = 'skills'

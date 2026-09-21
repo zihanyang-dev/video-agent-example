@@ -30,6 +30,15 @@ export type StreamCursor = {
 export type LiveStream = {
   publish: (threadID: string, event: Event) => Promise<void>
   /**
+   * Whether a cursor can still be resumed from, or whether the stream has moved past it.
+   *
+   * Fragments are only kept for a window. A reader further behind than that cannot be
+   * caught up by resuming -- everything it missed is gone -- so it has to be told, and sent
+   * the whole conversation again instead. Without this the resume succeeds, quietly, and
+   * delivers a page with a hole in the middle of it.
+   */
+  reachable: (cursor: StreamCursor) => Promise<boolean>
+  /**
    * Yields events published after the cursor, then keeps yielding until `signal` aborts.
    *
    * Laptops close and trains go into tunnels. A stream without positions turns both of

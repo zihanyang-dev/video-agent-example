@@ -55,6 +55,15 @@ const EnvSchema = z.object({
   SEEDREAM_MODEL: z.string().min(1),
 
   /**
+   * How many threads this process works on at once.
+   *
+   * Every turn holds a sandbox for its whole life, so the ceiling is how many containers
+   * this machine will carry, not how fast the loop goes. Small by default because the wrong
+   * value here is a machine that stops responding rather than one that is merely slow.
+   */
+  TURN_CONCURRENCY: z.coerce.number().int().positive().default(3),
+
+  /**
    * Signs the token a sandbox carries. The same secret the gateway verifies with, and
    * shared with nothing else: it is the whole of what separates one turn's spending from
    * another's.

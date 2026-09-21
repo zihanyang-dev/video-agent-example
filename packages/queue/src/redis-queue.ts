@@ -45,6 +45,15 @@ export type QueueMembership = {
    * been eaten. A name per run costs nothing and ends it.
    */
   stream?: string
+  /**
+   * How many turns this process works on at once. One by default.
+   *
+   * The cap belongs to the caller, not here: a turn's cost is whatever the handler holds
+   * for its lifetime -- a sandbox, in this system -- and this module has no idea what that
+   * is. What it does guarantee is that no more than this many handlers are running, and
+   * that a drain waits for all of them.
+   */
+  concurrency?: number
 }
 
 export const createRedisTurnQueue = (membership: QueueMembership): TurnQueue => {
@@ -93,11 +102,28 @@ const consume = async (
   handle: (turn: TurnRequest) => Promise<void>,
   draining: () => boolean,
 ): Promise<void> => {
+  const limit = membership.concurrency ?? 1
+  const working = new Set<Promise<void>>()
+
   while (!draining()) {
+    // At capacity: wait for a slot rather than claiming a turn this process cannot start.
+    // A claimed entry is one nobody else in the group will be given, so claiming ahead is
+    // how work ends up parked behind a busy consumer while another sits idle.
+    if (working.size >= limit) {
+      await Promise.race(working)
+      continue
+    }
+
     for (const claimed of await claimNext(client, membership.consumer, streamOf(membership))) {
-      await settle(client, membership, handle, claimed)
+      const work = settle(client, membership, handle, claimed)
+      working.add(work)
+      void work.finally(() => working.delete(work))
     }
   }
+
+  // A drain is not done until every turn it started has ended. Exiting here would leave
+  // sandboxes running and conversations half written (architecture.md §1).
+  await Promise.all(working)
 }
 
 /**

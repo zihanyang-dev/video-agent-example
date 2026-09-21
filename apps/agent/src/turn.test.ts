@@ -13,6 +13,7 @@ import type { Files, LiveStream, Messages, Sessions, Thread } from '@vid/store'
 import { describe, expect, test } from 'bun:test'
 import type { Harness, HarnessInput, StartHarness } from './harness/harness'
 import type { RentSandbox, Sandbox } from './sandbox/sandbox'
+import { createInFlight } from './in-flight'
 import { createTurn, type TurnParts } from './turn'
 
 const request: TurnRequest = {
@@ -78,19 +79,12 @@ const parts = (
   }
 
   const sessions: Sessions = { read: async () => null, write: async () => {} }
-  const live: LiveStream = {
-    publish: async (_thread, event) => {
-      overrides.shown?.push(event)
-    },
-    read: async function* () {
-      // Nothing reads the stream in these cases.
-    },
-  }
 
   return {
+    inFlight: createInFlight(),
     rentSandbox: overrides.rentSandbox ?? (async () => fakeSandbox(new Map()).sandbox),
     startHarness: overrides.startHarness ?? (async () => quietHarness()),
-    live,
+    live: fakeLive(overrides.shown),
     messages,
     sessions,
     files,
@@ -102,6 +96,17 @@ const parts = (
     systemPrompt: 'be a video editor',
   }
 }
+
+/** Records what a person would have seen, and reads nothing back. */
+const fakeLive = (shown?: Event[]): LiveStream => ({
+  publish: async (_thread, event) => {
+    shown?.push(event)
+  },
+  reachable: async () => true,
+  read: async function* () {
+    // Nothing reads the stream in these cases.
+  },
+})
 
 const quietHarness = (run?: () => Promise<void>): Harness => ({
   run: run ?? (async () => {}),
@@ -418,5 +423,75 @@ describe('what gets written down about something delivered', () => {
     expect(artifact).toMatchObject({
       content: { key: 'threads/t1/opener.mp4', role: 'final' },
     })
+  })
+})
+
+/** A harness that stays running until released, recording what it is told meanwhile. */
+const patient = () => {
+  const heard: string[] = []
+  let release = (): void => {}
+  const finished = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  const harness: Harness = {
+    run: async () => finished,
+    steer: async (message) => {
+      heard.push(message)
+    },
+    entries: () => [],
+    cost: () => ({ tokens: 0, usd: 0 }),
+    dispose: () => {},
+  }
+  return { harness, heard, release: () => release() }
+}
+
+describe('something typed while a turn is running', () => {
+  test('reaches the turn that is running, rather than waiting for one of its own', async () => {
+    const flight = createInFlight()
+    const { harness, heard, release } = patient()
+    const running = createTurn({
+      ...parts({ startHarness: async () => harness }),
+      inFlight: flight,
+    })(request)
+
+    await Bun.sleep(20)
+    const taken = flight.offer('t1', 'tighter, and lose the music')
+    release()
+    await running
+
+    expect(taken).toBe(true)
+    expect(heard).toEqual(['tighter, and lose the music'])
+  })
+
+  test('is refused once that turn is over, so it becomes a turn of its own', async () => {
+    const flight = createInFlight()
+    const { harness, release } = patient()
+    const running = createTurn({
+      ...parts({ startHarness: async () => harness }),
+      inFlight: flight,
+    })(request)
+
+    await Bun.sleep(20)
+    release()
+    await running
+
+    expect(flight.offer('t1', 'too late')).toBe(false)
+  })
+
+  test('is refused after a turn that failed, not left pointing at a dead harness', async () => {
+    const flight = createInFlight()
+    const running = createTurn({
+      ...parts({
+        startHarness: async () =>
+          quietHarness(async () => {
+            throw new Error('the model refused')
+          }),
+      }),
+      inFlight: flight,
+    })(request)
+
+    await expect(running).rejects.toThrow('the model refused')
+
+    expect(flight.offer('t1', 'anything')).toBe(false)
   })
 })

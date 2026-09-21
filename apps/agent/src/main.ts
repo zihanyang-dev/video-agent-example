@@ -10,7 +10,7 @@
  * particular not this process's own environment, which is how a developer's credentials
  * would end up inside a container running commands a model wrote.
  */
-import { createRedisTurnQueue } from '@vid/queue'
+import { createRedisTurnQueue, type TurnRequest } from '@vid/queue'
 import {
   createPostgresMessages,
   createPostgresSessions,
@@ -23,6 +23,7 @@ import { z } from 'zod'
 import { readEnv } from './env'
 import { startPiHarness } from './harness/pi'
 import { systemPrompt } from './prompt'
+import { createInFlight } from './in-flight'
 import { rentDockerSandbox } from './sandbox/docker'
 import { createTurn } from './turn'
 
@@ -54,11 +55,15 @@ const SKILLS = SkillIndex.parse(
   JSON.parse(new TextDecoder().decode(await files.get('skills/index.json'))),
 )
 
+const inFlight = createInFlight()
+const messages = createPostgresMessages(sql)
+
 const takeTurn = createTurn({
   rentSandbox: rentDockerSandbox,
   startHarness: startPiHarness,
+  inFlight,
   live,
-  messages: createPostgresMessages(sql),
+  messages,
   sessions: createPostgresSessions(sql),
   files,
   model: {
@@ -89,9 +94,39 @@ const takeTurn = createTurn({
   systemPrompt: systemPrompt(SKILLS),
 })
 
+/**
+ * What to do with a turn that arrives.
+ *
+ * Two outcomes, and which one happens is not this file's decision -- `in-flight.ts` owns the
+ * rule that a thread has one turn at a time. Here it is only carried out.
+ *
+ * A thread already working takes the message into the turn that is running. That is what a
+ * person means when they type something while watching it work, and waiting out the nine
+ * minutes to tell the agent it is going the wrong way is the behaviour worth removing.
+ *
+ * The message is written down either way, so the conversation reads the same whether it
+ * became a turn or joined one.
+ */
+const dispatch = async (turn: TurnRequest): Promise<void> => {
+  if (!inFlight.offer(turn.threadID, turn.message)) {
+    await takeTurn(turn)
+    return
+  }
+
+  await messages.append(turn.threadID, {
+    id: `${turn.turnID}:asked`,
+    role: 'user',
+    content: turn.message,
+  })
+}
+
 const queue = createRedisTurnQueue({
   url: env.REDIS_URL,
   consumer: env.AGENT_NAME,
+  // How many threads this process works on at once. Each turn holds a sandbox for its whole
+  // life, so this is a statement about containers, not about the loop -- raise it when the
+  // machine has room, and never past what Docker on it will carry (architecture.md §1).
+  concurrency: env.TURN_CONCURRENCY,
   // A turn stays claimed, so this is the only notice anyone gets that it needs a person
   // (architecture.md §4).
   onFailed: (turn, error) => {
@@ -121,4 +156,4 @@ process.on('SIGTERM', () => void drain())
 process.on('SIGINT', () => void drain())
 
 console.log(`${env.AGENT_NAME} taking turns`)
-await queue.take(takeTurn)
+await queue.take(dispatch)
