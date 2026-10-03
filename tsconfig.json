@@ -1,44 +1,45 @@
 {
   "compilerOptions": {
     "target": "ESNext",
-    "lib": ["ESNext"],
     "module": "Preserve",
-    "moduleResolution": "bundler",
+    "moduleResolution": "Bundler",
+    "lib": ["ESNext", "DOM", "DOM.Iterable"],
     "types": ["bun"],
-    "paths": {
-      "@vid/contract/public": ["./packages/contract/src/public/index.ts"],
-      "@vid/contract/execution": ["./packages/contract/src/execution/index.ts"],
-      "@vid/queue": ["./packages/queue/src/index.ts"],
-      "@vid/object-storage": ["./packages/object-storage/src/index.ts"],
-      "@vid/turn-token": ["./packages/turn-token/src/index.ts"]
-    },
-
+    "noEmit": true,
     "strict": true,
     "strictFunctionTypes": true,
     "noUncheckedIndexedAccess": true,
     "exactOptionalPropertyTypes": true,
-    "noImplicitOverride": true,
-    "noFallthroughCasesInSwitch": true,
     "verbatimModuleSyntax": true,
-    "erasableSyntaxOnly": true,
     "isolatedModules": true,
+    "allowImportingTsExtensions": true,
+    "forceConsistentCasingInFileNames": true,
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitOverride": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
     "skipLibCheck": true,
-
-    "noEmit": true
+    "paths": {
+      "@vid/config": ["./packages/config/src/index.ts"],
+      "@vid/config/*": ["./packages/config/src/*"],
+      "@vid/execution-protocol": ["./packages/execution-protocol/src/index.ts"],
+      "@vid/database/types": ["./packages/database/generated/db.ts"],
+      "@vid/messaging": ["./packages/messaging/src/index.ts"]
+    }
   },
-  // Skills are content, not code -- but the scripts in them are the only thing here that can
-  // spend money twice, so their tests are typechecked and run like everything else.
   "include": [
-    "apps/*/src/**/*.ts",
-    "packages/*/src/**/*.ts",
-    "apps/*/scripts/**/*.ts",
-    "scripts/**/*.ts",
+    "apps/**/*.ts",
+    "apps/**/*.tsx",
+    "packages/**/*.ts",
     "tests/**/*.ts",
-    "skills/**/*.test.ts"
+    "scripts/**/*.ts",
+    "deploy/**/*.ts"
   ],
-
-  // The browser has its own config. Kept out of this one so that server and agent code
-  // cannot reach `document` or `window` by accident -- they have no screen, and code that
-  // compiles against one would fail at runtime rather than here.
-  "exclude": ["apps/web"]
+  "exclude": [
+    "node_modules",
+    "dist",
+    "coverage",
+    "**/generated/**",
+    "**/vendor/**"
+  ]
 }

@@ -1,51 +1,55 @@
 {
-  "plugins": ["typescript", "oxc"],
-  "categories": {
-    "correctness": "error"
-  },
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["typescript", "unicorn", "oxc"],
+  "ignorePatterns": [
+    "**/node_modules/**",
+    "**/dist/**",
+    "**/coverage/**",
+    "**/generated/**",
+    "**/vendor/**"
+  ],
   "rules": {
+    "typescript/no-floating-promises": "error",
+    "typescript/no-misused-promises": "error",
+    "typescript/await-thenable": "error",
+    "typescript/return-await": ["error", "always"],
+    "typescript/no-explicit-any": "error",
+    "typescript/no-extraneous-class": "error",
+    "typescript/method-signature-style": ["error", "property"],
+    "typescript/switch-exhaustiveness-check": "error",
     "max-depth": ["error", 2],
     "complexity": ["error", 10],
     "max-params": ["error", 4],
     "max-nested-callbacks": ["error", 3],
     "max-lines-per-function": ["error", 60],
     "max-statements": ["error", 25],
-    "typescript/no-explicit-any": "error",
-    "typescript/no-extraneous-class": "error",
-    "typescript/method-signature-style": ["error", "property"],
-    "typescript/no-floating-promises": "error",
-    "typescript/no-misused-promises": "error",
-    "typescript/await-thenable": "error",
-    "typescript/return-await": ["error", "in-try-catch"],
-    "typescript/no-base-to-string": "error",
-    "typescript/no-misused-spread": "error",
+    "no-else-return": "error",
     "no-restricted-properties": [
       "error",
       {
         "object": "process",
         "property": "env",
-        "message": "Read application configuration in src/env.ts."
+        "message": "Parse environment input only at an approved process boundary."
       },
       {
         "object": "Bun",
         "property": "env",
-        "message": "Read application configuration in src/env.ts."
+        "message": "Parse environment input only at an approved process boundary."
       }
     ]
   },
   "overrides": [
     {
-      "files": ["**/*.test.ts"],
-      "rules": {
-        "typescript/await-thenable": "off"
-      }
-    },
-    {
-      "files": ["**/src/env.ts", "**/*.test.ts", "tests/**", "scripts/**", "apps/*/scripts/**"],
+      "files": [
+        "packages/config/src/env.ts",
+        "**/*.test.ts",
+        "**/*.spec.ts",
+        "tests/**/*.ts",
+        "deploy/**/*.ts"
+      ],
       "rules": {
         "no-restricted-properties": "off"
       }
     }
-  ],
-  "ignorePatterns": ["dist/**", "node_modules/**"]
+  ]
 }

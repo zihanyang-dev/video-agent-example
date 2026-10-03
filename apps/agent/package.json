@@ -1,19 +1,5 @@
 {
   "name": "@vid/agent",
-  "version": "0.0.0",
   "private": true,
-  "type": "module",
-  "scripts": {
-    "dev": "bun --watch src/main.ts",
-    "start": "bun src/main.ts"
-  },
-  "dependencies": {
-    "@earendil-works/pi-ai": "^0.85.1",
-    "@earendil-works/pi-coding-agent": "^0.85.1",
-    "@vid/contract": "workspace:*",
-    "@vid/queue": "workspace:*",
-    "zod": "^4.0.0",
-    "@vid/turn-token": "workspace:*",
-    "@vid/object-storage": "workspace:*"
-  }
+  "type": "module"
 }

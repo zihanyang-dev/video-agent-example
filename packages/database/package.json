@@ -1,0 +1,21 @@
+{
+  "name": "@vid/database",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./types": "./generated/db.ts"
+  },
+  "scripts": {
+    "db:generate": "sh ../../scripts/generate-database.sh",
+    "db:migrate": "dbmate --migrations-dir migrations --no-dump-schema --wait migrate"
+  },
+  "dependencies": {
+    "kysely": "0.29.6",
+    "pg": "8.23.1"
+  },
+  "devDependencies": {
+    "@types/pg": "8.23.1",
+    "dbmate": "2.36.0",
+    "kysely-codegen": "0.20.0"
+  }
+}

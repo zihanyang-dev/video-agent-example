@@ -1,21 +1,5 @@
 {
   "name": "@vid/web",
-  "version": "0.0.0",
   "private": true,
-  "type": "module",
-  "scripts": {
-    "dev": "bun --hot src/serve.ts",
-    "start": "bun src/serve.ts"
-  },
-  "dependencies": {
-    "@ag-ui/core": "^1.0.0",
-    "@vid/contract": "workspace:*",
-    "react": "^19.2.0",
-    "react-dom": "^19.2.0",
-    "zod": "^4.0.0"
-  },
-  "devDependencies": {
-    "@types/react": "^19.2.0",
-    "@types/react-dom": "^19.2.0"
-  }
+  "type": "module"
 }

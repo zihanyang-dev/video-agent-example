@@ -1,13 +1,11 @@
 node_modules/
 dist/
-.turbo/
+coverage/
+.cache/
 *.tsbuildinfo
-.env
-.env.local
-
-# Media-provider credentials belong to the gateway (architecture.md §8).
-deploy/docker/gateway.env
 .DS_Store
-
-# Local run scripts. They hold a model key.
-deploy/local/
+.env
+.env.*
+!.env.example
+config/credentials*.json
+!config/credentials.example.json

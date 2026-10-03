@@ -1,7 +1,12 @@
 .git
 **/node_modules
 **/dist
-**/.DS_Store
-**/*.env
+**/coverage
+**/.cache
+**/*.tsbuildinfo
 **/.env*
-deploy/local
+!**/.env.example
+config/credentials*
+**/logs
+**/*.log
+.DS_Store

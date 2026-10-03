@@ -1,19 +1,10 @@
 {
   "name": "@vid/server",
-  "version": "0.0.0",
   "private": true,
   "type": "module",
-  "scripts": {
-    "dev": "bun --watch src/main.ts",
-    "start": "bun src/main.ts"
-  },
   "dependencies": {
-    "@ag-ui/core": "^1.0.0",
-    "@ag-ui/encoder": "^1.0.0",
-    "@vid/contract": "workspace:*",
-    "@vid/queue": "workspace:*",
-    "hono": "^4.13.8",
-    "zod": "^4.0.0",
-    "@vid/object-storage": "workspace:*"
+    "@vid/database": "workspace:*",
+    "@vid/execution-protocol": "workspace:*",
+    "kysely": "0.29.6"
   }
 }

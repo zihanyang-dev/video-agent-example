@@ -6,6 +6,8 @@
 
 生成代码和 vendored 代码全部排除。
 
+实际交付状态见 [README](../README.md)，架构以 [architecture.md](architecture.md) 为准，目录与依赖约定见 [directory-structure.md](directory-structure.md)。工具只保证实际启用并验证的规则，不把人工规则当作已自动强制。
+
 ## 0. 语言与强制方式
 
 **文档用中文,代码用英文。** 注释、标识符、错误信息、测试名、提交信息一律英文。
@@ -198,10 +200,10 @@ export function validateComposition(composition: Composition): Result { … }
 一件东西在**线上**(路径、schema、生成的客户端)和在**屏幕上**(人读的那句话)可以叫不同的名字,
 但**这个对应必须写下来**,不能每次现翻译。
 
-```
+```text
 线上            我们的             为什么不统一
 messageId       ——                AG-UI 的字段名,协议定的
-runId           turnID            AG-UI 叫一次运行 run,我们叫一轮
+runId           runID             同一轮执行,只有大小写不同
 threadId        threadID          同一个东西,只有大小写不同
 toolCallId      ——                pi 的字段名
 ```
@@ -266,7 +268,7 @@ const RenderRequestSchema = z.object({ … })
 cast」—— 这句话是错的,验过:`z.string().brand<'ThreadID'>()` 解析出来**就是** branded 类型,一次
 cast 都不用写,把 `TurnID` 传进吃 `ThreadID` 的函数当场编译失败。
 
-当前 ID 已跨应用传递，不能再以「都在 turn.ts」作为省略边界设计的理由。传参用具名对象区分 `commandID`、`threadID`、`turnID`、`eventID`；共享 wire 的类型从 schema 推导，领域类型由各 owner 持有。是否引入 branded ID，以真实误用风险和模块间传播成本决定，不为每个字符串添加没有消费者的包装。
+当前 ID 已跨应用传递，不能再以「都在 turn.ts」作为省略边界设计的理由。传参用具名对象区分 `commandID`、`threadID`、`runID`、`eventID`；共享 wire 的类型从 schema 推导，领域类型由各 owner 持有。是否引入 branded ID，以真实误用风险和模块间传播成本决定，不为每个字符串添加没有消费者的包装。
 
 ### 4.4 非法状态无法表达 `人工`
 
@@ -294,14 +296,16 @@ switch (outcome.kind) {
 
 ### 4.6 环境变量只在一处 parse `lint`
 
-`process.env` 只有 `src/env.ts` 能读,别处拿到的是已经 parse 过的 `Env`。
+配置定义、默认值和环境读取集中在 `packages/config/src/env.ts`。每个进程启动时只解析自己的配置投影,其余调用方拿到已解析的类型。独立 CLI 和测试可在自己的进程边界提供配置输入,业务函数不读取 `process.env`。当前 lint 限制环境读取位置，具体例外以实际配置为准。
 
 ```ts
 // 错:每个用到的地方各自猜它存在、猜它的格式
 const key = process.env.PROVIDER_API_KEY!
 
 // 对:一次 parse,之后是类型
-export function parseEnv(source: Readonly<Record<string, string | undefined>>): Env
+export function parseEnv(
+  source: Readonly<Record<string, string | undefined>>,
+): Env
 ```
 
 两个细节不能省:
@@ -320,7 +324,8 @@ if (job === null) return notFound()
 
 // 对:先分辨清楚,再各自处理
 if (response.status === 404) return null
-if (data === undefined) throw new Error(`could not read job (${response.status})`)
+if (data === undefined)
+  throw new Error(`could not read job (${response.status})`)
 ```
 
 判据是一句话:**`??` 右边的东西,是不是在回答一个和左边不同的问题?** 是,就说明这里有两种情况被折成了一种。
@@ -346,7 +351,8 @@ if (!isUUID(c)) return err('invalid')
 if (!validKey(k)) return err('invalid')
 
 // 对:畸形输入只有一种恢复,一个谓词一个错误
-if (!isUUID(a) || !isUUID(b) || !isUUID(c) || !validKey(k)) return err('invalid')
+if (!isUUID(a) || !isUUID(b) || !isUUID(c) || !validKey(k))
+  return err('invalid')
 ```
 
 恢复方式以**收到这份错误并能采取行动的人**为准,不把用户和运维混成一个行动者。
@@ -444,14 +450,9 @@ interface ProviderAdapter {
 **浮空 Promise 是最高价值的 lint 类别** `lint` —— `no-floating-promises` `no-misused-promises`
 `await-thenable` `return-await`。刻意的 fire-and-forget 用 `void foo()` 标注。
 
-这四条**需要类型信息**,所以 `check` 跑的是 `oxlint --type-aware`(需要 `oxlint-tsgolint`)。
-这一点值得写下来,因为它曾经不成立:文档列着这四条规则,配置里没开 type-aware,于是一条都没生效 ——
-实测写一个浮空 Promise 进去,lint 零输出。**没兑现的规则比没有规则更糟**,它让人以为有人在看。
+这四条**需要类型信息**，当前检查入口使用 `oxlint --type-aware` 与 `oxlint-tsgolint`；新增或变更规则仍要验证它会阻断对应错误，不能只声明规则。
 
-`await-thenable` 在 `**/*.test.ts` 里关掉,有具体原因:bun 的 `expect(...).rejects.toThrow()`
-运行时返回 `undefined`(验过),所以 `await` 它确实是在 await 一个非 Promise。`await` 仍然保留 ——
-验过断言是同步抛出的,现在删掉 `await` 不会出问题,但哪天 bun 改成返回 Promise,没有 `await`
-的断言会变成静默通过。宁可多一个无害的 `await`。
+测试断言是否需要 `await`,根据锁定 Bun 版本的实际 API 验证。若与 `await-thenable` 冲突,先证明断言行为,再做窄范围配置,不为消除 lint 提示而丢掉等待异步失败的证据。
 
 **注册即可撤销的副作用** `人工` —— 启动子进程、监听器、定时器、沙箱实例的一方同时拥有取消、等待和清理;`register()` 返回它的撤销函数;构造函数不启动无人管理的后台任务;teardown 等待相关工作静止。
 
@@ -465,7 +466,9 @@ interface ProviderAdapter {
 
 ```ts
 // 错:换个实现就红,产品承诺没被保护
-expect(submitRender).toHaveBeenCalledWith(expect.objectContaining({ compositionID }))
+expect(submitRender).toHaveBeenCalledWith(
+  expect.objectContaining({ compositionID }),
+)
 
 // 对
 const outcome = await runBrief(fixtures.thirtySecondBrief)
@@ -487,7 +490,7 @@ expect(outcome.video.durationMs).toBeCloseTo(30_000, -2)
 
 值得写下来的只有四种:
 
-```
+```text
 为什么不是另一个做法    被否掉的方案和否掉它的理由 —— 这是最常被重新提出的问题
 换了会怎样             调换、省略、提前返回之后会发生什么,尤其是「不报错,只是答错」
 外面逼出来的形状        provider 的怪行为、协议、别人的 bug —— 读代码看不出来的约束
@@ -510,10 +513,12 @@ expect(outcome.video.durationMs).toBeCloseTo(30_000, -2)
 
 ## 12. 持久化与依赖边界
 
-- 迁移位于数据 owner 所属应用的 `migrations/`，只前向修正；`scripts/database` 负责部署时重放。生成的 schema 用 `schema:check` 校验，不手改。
-- 产品 SQL 位于 server 模块的持久化/发送适配器，执行 SQL 位于 agent 的持久化/发送适配器；唯一约束与事务保护并发不变量。部署脚本和集成测试可直接访问数据库。
-- domain 不依赖 application、适配器、框架或共享 wire；application 不依赖适配器；跨应用不 import；共享包不依赖应用。模块间只访问公开入口。`bun run boundaries` 同时检查类型导入和循环依赖。
-- 应用配置只在 `src/env.ts` 读取。独立部署 CLI 和测试是各自的进程边界，可以读取自己的配置，不把环境读取带入业务核心。
+- `packages/database/migrations` 中的手写 SQL 是表结构唯一源码，按事实 owner 组织；共享数据库包不拥有产品或执行规则。
+- dbmate 统一执行迁移，只前向修正，不改写已应用迁移，不自写迁移执行器。kysely-codegen 生成 `packages/database/generated/db.ts`，pg_dump 独立生成 `packages/database/generated/schema.sql`；两者不手改、不作为迁移来源。生成只使用当前 checkout 迁移构建的一次性空库，不使用开发库；开发允许未提交迁移，发布只使用已提交版本。
+- 产品查询与事务位于 server 的持久化/发送适配器，执行查询与事务位于 agent 的持久化/发送适配器。普通查询用 Kysely 类型化 query builder；必要的特殊 SQL 仅限持久化边界，参数化并说明理由，不拼接外部输入。手写迁移 SQL 允许且必须审查。唯一约束与事务保护并发不变量。
+- 业务能力在应用内部聚合,不强制套四层目录。核心规则不依赖具体 SDK、数据库或 transport;最小接口由实际消费方定义,适配器实现,装配入口绑定。
+- 跨应用不 import 源码,共享包不依赖应用,模块间只访问公开入口。当前 dependency-cruiser 检查类型导入、循环和跨应用依赖，使用 SWC parser；工具兼容性边界见技术栈文档。
+- 环境读取、配置 schema 与默认值集中在 `packages/config`,进程启动只解析自己的配置。私有凭据不是代码,不提交 Git、不进入镜像或 sandbox。
 
 可访问性目前仍需人工检查；没有启用自动规则的部分不宣称由工具保证。
 

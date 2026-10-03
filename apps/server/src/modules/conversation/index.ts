@@ -1,2 +1,8 @@
-export { createConversation } from './application/conversation'
-export type { Conversation } from './application/conversation'
+export {
+  submitMessage,
+  type ConversationWrites,
+  type SubmitMessageInput,
+  type MessageIntent,
+  type SubmitIntentOutcome,
+  type SubmitMessageOutcome,
+} from './submit-message'
