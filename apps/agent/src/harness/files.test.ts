@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test'
 import { sha256, type ObjectStore } from '@vid/object-storage'
-import type { ExecutionLease, RunSandbox } from '../execute-run'
+import type { ExecutionLease, SandboxSessionPort } from '../execute-run'
 import { assignFileTools } from './files'
 
 function fixture() {
@@ -28,7 +28,7 @@ function fixture() {
   }
   const guest = new Map<string, Uint8Array>()
   const stored = new Map<string, Uint8Array>([['allocated-input', bytes]])
-  const sandbox: RunSandbox = {
+  const sandbox: SandboxSessionPort = {
     nativeRef: { provider: 'e2b', id: 'native' },
     close: async () => {},
     renewTimeout: async () => {},

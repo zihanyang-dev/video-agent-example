@@ -4,7 +4,7 @@ import type {
   AgentHarness,
   ExecutionLease,
   ExecutionWrites,
-  RunSandbox,
+  SandboxSessionPort,
 } from './execute-run'
 
 function controlledHarness() {
@@ -66,7 +66,7 @@ function queuedClaims() {
   return { accepted, claim }
 }
 
-function unusedTools(): RunSandbox {
+function unusedTools(): SandboxSessionPort {
   return {
     nativeRef: { provider: 'e2b', id: 'fixture-native' },
     renewTimeout: async () => {},

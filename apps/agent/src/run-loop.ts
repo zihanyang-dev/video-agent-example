@@ -18,73 +18,59 @@ type WorkerOptions = Readonly<{
   signal: AbortSignal
 }>
 
-type Worker = Readonly<{
-  deps: WorkerDependencies
-  options: WorkerOptions
-  stop: AbortController
-  signal: AbortSignal
-  active: Map<string, Promise<void>>
-  failures: unknown[]
-}>
-
 /** The process owns claims and every active run; shutdown never detaches cleanup. */
 export async function runWorker(
   deps: WorkerDependencies,
   options: WorkerOptions,
 ): Promise<void> {
   const stop = new AbortController()
-  const worker: Worker = {
-    deps,
-    options,
-    stop,
-    signal: AbortSignal.any([options.signal, stop.signal]),
-    active: new Map(),
-    failures: [],
-  }
-  try {
-    while (!worker.signal.aborted) {
-      await claimAvailable(worker)
-      await waitForPoll(options.pollMs, worker.signal)
-    }
-  } catch (error) {
-    worker.failures.push(error)
-  } finally {
-    stop.abort()
-    await Promise.all(worker.active.values())
-  }
-  if (worker.failures.length === 1) throw worker.failures[0]
-  if (worker.failures.length > 1) {
-    throw new AggregateError(worker.failures, 'Worker execution failed')
-  }
-}
+  const signal = AbortSignal.any([options.signal, stop.signal])
+  const active = new Map<string, Promise<void>>()
+  const failures: unknown[] = []
 
-async function claimAvailable(worker: Worker) {
-  const { deps, options, active, signal } = worker
-  while (active.size < options.concurrency && !signal.aborted) {
-    const lease = await deps.claim({
-      ownerID: options.ownerID,
-      leaseMs: options.leaseMs,
-    })
-    if (lease === null) return
+  async function superviseRun(lease: ExecutionLease) {
+    try {
+      await executeRun(lease, deps, {
+        leaseMs: options.leaseMs,
+        pollMs: options.pollMs,
+        signal,
+      })
+    } catch (error) {
+      failures.push(error)
+      stop.abort()
+    } finally {
+      active.delete(lease.runID)
+    }
+  }
+
+  while (!signal.aborted) {
+    if (active.size >= options.concurrency) {
+      await waitForPoll(options.pollMs, signal)
+      continue
+    }
+    let lease: ExecutionLease | null
+    try {
+      lease = await deps.claim({
+        ownerID: options.ownerID,
+        leaseMs: options.leaseMs,
+      })
+    } catch (error) {
+      failures.push(error)
+      break
+    }
+    if (lease === null) {
+      await waitForPoll(options.pollMs, signal)
+      continue
+    }
     // A claim can finish after shutdown. Supervision still settles that
     // capability as interrupted without starting new inference.
-    active.set(lease.runID, supervise(worker, lease))
+    active.set(lease.runID, superviseRun(lease))
   }
-}
-
-async function supervise(worker: Worker, lease: ExecutionLease) {
-  const { deps, options, signal } = worker
-  try {
-    await executeRun(lease, deps, {
-      leaseMs: options.leaseMs,
-      pollMs: options.pollMs,
-      signal,
-    })
-  } catch (error) {
-    worker.failures.push(error)
-    worker.stop.abort()
-  } finally {
-    worker.active.delete(lease.runID)
+  stop.abort()
+  await Promise.all(active.values())
+  if (failures.length === 1) throw failures[0]
+  if (failures.length > 1) {
+    throw new AggregateError(failures, 'Worker execution failed')
   }
 }
 

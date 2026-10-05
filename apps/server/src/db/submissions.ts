@@ -7,7 +7,8 @@ import {
   decideMessageReplay,
 } from '../conversation/submission'
 import type { DB } from '@vid/database/types'
-import type { StartCommand } from '@vid/contract/execution'
+import { startCommandSchema, type StartCommand } from '@vid/contract/execution'
+import { sameFile } from '../assets/files'
 import type { Kysely, Transaction } from 'kysely'
 import type {
   SubmitMessageOutcome,
@@ -121,6 +122,9 @@ async function acceptedMessage(
       'message.text',
       'command.command_id',
       'command.run_id',
+      'command.thread_id as command_thread_id',
+      'command.message_id as command_message_id',
+      'command.command',
     ])
     .where('message.message_id', '=', intent.messageID)
     .executeTakeFirst()
@@ -128,21 +132,60 @@ async function acceptedMessage(
   // Ownership is immutable; current-thread acceptance remains under its lock.
   if (message !== undefined && message.owner_id !== intent.ownerID)
     return { kind: 'unavailable' }
-  return decideMessageReplay(
-    intent,
-    message === undefined
-      ? null
-      : {
-          threadID: message.thread_id,
-          role: message.role,
-          text: message.text,
-          assetIDs: (await messageAssets(tx, intent.messageID)).map(
-            (row) => row.asset_id,
-          ),
-          commandID: message.command_id,
-          runID: message.run_id,
-        },
+  if (message === undefined) return null
+  const assets = await messageAssets(tx, intent.messageID)
+  // The retained wire command is a separate untyped boundary. Schema parsing
+  // canonicalizes historical UUID case; indexed headers and product input still
+  // have to name the same accepted work. Never repair or replace bad history.
+  const retained = startCommandSchema.safeParse(message.command)
+  if (!retained.success) return { kind: 'conflict' }
+  const command = retained.data
+  const matchingHeaders = [
+    [command.commandID, message.command_id],
+    [command.runID, message.run_id],
+    [command.threadID, message.command_thread_id],
+    [command.threadID, message.thread_id],
+    [command.input.messageID, message.command_message_id],
+  ].every(([wire, indexed]) => wire === indexed)
+  if (!matchingHeaders || command.input.text !== message.text)
+    return { kind: 'conflict' }
+  const references = command.input.assets ?? []
+  if (
+    references.length !== assets.length ||
+    !references.every((reference, position) => {
+      const asset = assets[position]
+      if (!asset || reference.assetID !== asset.asset_id) return false
+      // File content metadata is immutable. Location is not: rehome may move
+      // the current row while an accepted command retains its old physical key.
+      const validLocation =
+        asset.source === 'upload'
+          ? reference.objectKey ===
+              `materials/${asset.thread_id}/${asset.asset_id}` ||
+            reference.objectKey ===
+              `assets/uploads/${asset.thread_id}/${asset.asset_id}`
+          : new RegExp(
+              `^(artifacts|assets/generated)/${asset.thread_id}/${asset.run_id}/[1-9][0-9]*/${asset.asset_id}$`,
+            ).test(reference.objectKey)
+      return (
+        validLocation &&
+        sameFile(reference, {
+          name: asset.name,
+          mimeType: asset.mime_type,
+          byteLength: asset.byte_length,
+          sha256: asset.sha256,
+        })
+      )
+    })
   )
+    return { kind: 'conflict' }
+  return decideMessageReplay(intent, {
+    threadID: message.thread_id,
+    role: message.role,
+    text: message.text,
+    assetIDs: assets.map((row) => row.asset_id),
+    commandID: message.command_id,
+    runID: message.run_id,
+  })
 }
 
 async function enqueueMessage(

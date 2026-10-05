@@ -8,7 +8,8 @@
 apps/server/src/
   main.ts                   读取配置和进程信号
   server.ts                 HTTP/连接/后台任务的启动与关闭
-  http.ts                   HTTP 分发、身份与通用请求边界
+  http.ts                   HTTP 分发、身份与路由合同
+  request-body.ts           有界请求字节收集与 JSON 解析
   identity/                 官方认证库接入、会话和注销
   conversation/             会话、消息、取消、命令投递与公开事件
   assets/                   统一资产的上传、规则和授权读取
@@ -52,12 +53,12 @@ apps/web/src/
 
 ## 共享包
 
-| 包               | 责任                                                             |
-| ---------------- | ---------------------------------------------------------------- |
-| `contract`       | `http.ts` 公开合同、`execution.ts` 内部执行合同；schema 推导类型 |
-| `config`         | 按进程配置 schema 与 defaults                                    |
-| `database`       | 唯一迁移、生成 DB 类型与 schema                                  |
-| `object-storage` | 两个可信进程实际复用的有界对象字节操作                           |
+| 包               | 责任                                                                |
+| ---------------- | ------------------------------------------------------------------- |
+| `contract`       | `http.ts` 公开合同、`execution.ts` 内部执行合同；schema 推导类型    |
+| `config`         | 按进程配置 schema 与 defaults                                       |
+| `database`       | 唯一迁移、生成 DB 类型与 schema，以及实际共用的有界 PostgreSQL 连接 |
+| `object-storage` | 两个可信进程实际复用的有界对象字节操作                              |
 
 合同文件按完整协议聚合，不为每个 schema 或常量建文件。执行合同只是进程 wire 的名称，不能进入 browser 的公开 HTTP 导入图。
 

@@ -1,5 +1,7 @@
 import { once } from 'node:events'
-import { openExecutionDatabase, type ExecutionDatabase } from './db/connection'
+import { openDatabase } from '@vid/database/connection'
+import type { DB } from '@vid/database/types'
+import type { Kysely } from 'kysely'
 import {
   createClient,
   type RedisClientOptions,
@@ -28,8 +30,18 @@ export async function startWorker(
   env: WorkerEnv,
   assignment: WorkerAssignment = {},
 ) {
-  const assigned = await resolveExecutionAssignment(env, assignment)
-  const { objects, fileTools } = assignedStorage(env, assignment)
+  const harness =
+    assignment.harness === undefined
+      ? await loadConfiguredHarness(env)
+      : assignment.harness
+  const openSandbox =
+    assignment.openSandbox === undefined
+      ? bindConfiguredSandbox(env)
+      : assignment.openSandbox
+  // Only a caller supplying both execution capabilities bypasses SDK/storage.
+  const needsStorage =
+    assignment.harness === undefined || assignment.openSandbox === undefined
+  const { objects, fileTools } = connectWorkerStorage(env, needsStorage)
   const connections = {
     DATABASE_URL: env.DATABASE_URL,
     REDIS_URL: env.REDIS_URL,
@@ -52,7 +64,8 @@ export async function startWorker(
       writes: bindExecutionWrites(worker.db),
       claim: (options: Readonly<{ ownerID: string; leaseMs: number }>) =>
         claimExecutionRun(worker.db, options),
-      ...assigned,
+      harness,
+      openSandbox,
       ...(fileTools === undefined ? {} : { fileTools }),
     }
     const scheduling = {
@@ -77,25 +90,7 @@ export async function startWorker(
   }
 }
 
-async function resolveExecutionAssignment(
-  env: WorkerEnv,
-  assignment: WorkerAssignment,
-) {
-  const harness =
-    assignment.harness === undefined
-      ? await assignedHarness(env)
-      : assignment.harness
-  const openSandbox =
-    assignment.openSandbox === undefined
-      ? assignedSandbox(env)
-      : assignment.openSandbox
-  return {
-    harness,
-    openSandbox,
-  }
-}
-
-async function assignedHarness(env: WorkerEnv) {
+async function loadConfiguredHarness(env: WorkerEnv) {
   const systemPrompt = await readFile(env.MODEL_PROMPT_PATH, 'utf8')
   return createPiHarness({
     baseURL: env.MODEL_BASE_URL,
@@ -109,7 +104,7 @@ async function assignedHarness(env: WorkerEnv) {
   })
 }
 
-function assignedSandbox(
+function bindConfiguredSandbox(
   env: WorkerEnv,
 ): ExecuteRunDependencies['openSandbox'] {
   const connection = {
@@ -125,12 +120,9 @@ function assignedSandbox(
   }
 }
 
-function assignedStorage(env: WorkerEnv, assignment: WorkerAssignment) {
-  let objects: ObjectStore | undefined
-  // Both capabilities must be supplied by a trusted library caller to bypass SDK/storage.
-  if (assignment.harness !== undefined && assignment.openSandbox !== undefined)
-    return { objects, fileTools: undefined }
-  objects = connectObjects({
+function connectWorkerStorage(env: WorkerEnv, needsStorage: boolean) {
+  if (!needsStorage) return { objects: undefined, fileTools: undefined }
+  const objects = connectObjects({
     endpoint: env.OBJECT_STORAGE_URL,
     region: env.OBJECT_STORAGE_REGION,
     bucket: env.OBJECT_STORAGE_BUCKET,
@@ -162,7 +154,7 @@ function allocateWorkerProcess(
 
 /** Connections stay available until intake, publication and active SDK cleanup settle. */
 export class WorkerProcess {
-  readonly db: ExecutionDatabase
+  readonly db: Kysely<DB>
   readonly commands: RedisClientType
   readonly blockingReader: RedisClientType
   readonly done: Promise<void>
@@ -179,7 +171,7 @@ export class WorkerProcess {
     private readonly externalSignal?: AbortSignal,
     private readonly objects?: ObjectStore,
   ) {
-    this.db = openExecutionDatabase(connections, this.fail)
+    this.db = openDatabase(connections, this.fail)
     const redisOptions = {
       url: connections.REDIS_URL,
       disableOfflineQueue: true,

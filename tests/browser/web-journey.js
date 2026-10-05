@@ -46,6 +46,37 @@ export default async (page) => {
   await page.reload()
   await page.getByRole('button', { name: 'Retry same message' }).click()
   await page.getByRole('button', { name: 'Cancel run', exact: true }).waitFor()
+  const running = await state()
+  const created = running.attempts.find(
+    (attempt) => attempt.operation === 'create',
+  )
+  const cancelKey = `frame:intent:alice:cancel:${created.body.threadID}:${running.activeRuns[0].runID}`
+  const corruptCancel = '{unreadable cancellation'
+  await page.evaluate(({ key, bytes }) => localStorage.setItem(key, bytes), {
+    key: cancelKey,
+    bytes: corruptCancel,
+  })
+  for (let attempt = 0; attempt < 2; attempt++) {
+    await page.getByRole('button', { name: 'Cancel run', exact: true }).click()
+    await page
+      .getByText(
+        'Saved pending request could not be decoded. Check Chat history before clearing browser data.',
+        { exact: true },
+      )
+      .waitFor()
+    check(
+      (await state()).attempts.every((entry) => entry.operation !== 'cancel'),
+      'corrupt cancellation dispatched HTTP',
+    )
+    check(
+      (await page.evaluate((key) => localStorage.getItem(key), cancelKey)) ===
+        corruptCancel,
+      'corrupt cancellation bytes or identity were replaced',
+    )
+    if (attempt === 0) await page.reload()
+  }
+  // Test-only operator action after asserting evidence was preserved twice.
+  await page.evaluate((key) => localStorage.removeItem(key), cancelKey)
   await page.getByRole('button', { name: 'Cancel run', exact: true }).click()
   await page.getByRole('button', { name: 'Retry cancellation' }).waitFor()
   await page.reload()
@@ -147,6 +178,7 @@ export default async (page) => {
     archiveReadOnly: true,
     logoutPrivateViewCleared: true,
     durableFailureAfterReload: true,
+    corruptCancellationBlocksHTTPAfterReload: true,
     proof:
       'Controlled HTTP fixture, real generated SDK and React DOM. No database, S3, OAuth provider, model, or sandbox.',
   }

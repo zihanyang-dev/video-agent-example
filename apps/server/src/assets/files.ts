@@ -80,29 +80,34 @@ export function validGeneratedAssets(
   assets: readonly AssetReference[],
   limits: AssetLimits,
 ) {
-  // Legacy GET-only keys retain the old SQL per-file limit. This is metadata
-  // acceptance, not a relaxation of configured upload or download IO budgets.
+  if (assets.length > ASSET_MAX_OUTPUT_FILES) return false
+  if (new Set(assets.map((file) => file.assetID)).size !== assets.length)
+    return false
+  const runKey = new RegExp(
+    `^(artifacts|assets/generated)/${query.threadID}/${query.runID}/[1-9][0-9]*/([^/]+)$`,
+  )
+  const validFiles = assets.every((file) => {
+    if (!assetReferenceSchema.safeParse(file).success) return false
+    if (!publicFileNameSchema.safeParse(file.name).success) return false
+    const key = runKey.exec(file.objectKey)
+    if (!key || key[2] !== file.assetID) return false
+    // Legacy GET-only keys retain the old SQL per-file limit. This is metadata
+    // acceptance, not a relaxation of configured upload or download IO budgets.
+    return (
+      file.byteLength <=
+      (key[1] === 'artifacts' ? 16 * 1024 * 1024 : limits.maxBytes)
+    )
+  })
+  if (!validFiles) return false
+
   const legacyPrefix = `artifacts/${query.threadID}/${query.runID}/`
   const currentAssets = assets.filter(
-    (asset) => !asset.objectKey.startsWith(legacyPrefix),
+    (file) => !file.objectKey.startsWith(legacyPrefix),
   )
-  return (
-    assets.length <= ASSET_MAX_OUTPUT_FILES &&
-    currentAssets.length <= limits.maxFiles &&
-    currentAssets.reduce((sum, asset) => sum + asset.byteLength, 0) <=
-      limits.maxBytes &&
-    new Set(assets.map((file) => file.assetID)).size === assets.length &&
-    assets.every(
-      (file) =>
-        assetReferenceSchema.safeParse(file).success &&
-        publicFileNameSchema.safeParse(file.name).success &&
-        file.byteLength <=
-          (file.objectKey.startsWith(legacyPrefix)
-            ? 16 * 1024 * 1024
-            : limits.maxBytes) &&
-        new RegExp(
-          `^(artifacts|assets/generated)/${query.threadID}/${query.runID}/[1-9][0-9]*/${file.assetID}$`,
-        ).test(file.objectKey),
-    )
+  if (currentAssets.length > limits.maxFiles) return false
+  const currentBytes = currentAssets.reduce(
+    (sum, file) => sum + file.byteLength,
+    0,
   )
+  return currentBytes <= limits.maxBytes
 }

@@ -3,7 +3,11 @@ import {
   assetReferenceSchema,
   type AssetReference,
 } from '@vid/contract/execution'
-import type { ExecutionLease, FileTools, RunSandbox } from '../execute-run'
+import type {
+  ExecutionLease,
+  FileTools,
+  SandboxSessionPort,
+} from '../execute-run'
 
 const exportMetadataSchema = assetReferenceSchema
   .unwrap()
@@ -21,7 +25,7 @@ type FileLimits = Readonly<{
 export function assignFileTools(objects: ObjectStore, limits: FileLimits) {
   return (
     lease: ExecutionLease,
-    sandbox: RunSandbox,
+    sandbox: SandboxSessionPort,
     stopSpending: () => void,
   ): FileTools => {
     const assigned = lease.assets ?? []

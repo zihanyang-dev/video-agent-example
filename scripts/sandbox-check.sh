@@ -37,7 +37,27 @@ cleanup() {
     ssh_vm sh -s -- "$runner" <<'CANCEL' || failed=1
 set -eu
 control="$HOME/e2b/.$1"
-if [ -f "$control/pid" ]; then kill -TERM "$(cat "$control/pid")"; fi
+if [ -d "$control" ]; then
+  unknown_identity() {
+    echo "Remote process identity unconfirmed for $1; operator cleanup required" >&2
+    exit 1
+  }
+  runner=$1
+  pid=$(cat "$control/pid") || unknown_identity "$runner"
+  case "$pid" in ''|*[!0-9]*) unknown_identity "$runner" ;; esac
+  boot=$(cat "$control/boot-id") || unknown_identity "$runner"
+  start=$(cat "$control/start-ticks") || unknown_identity "$runner"
+  [ -n "$boot" ] && [ -n "$start" ] || unknown_identity "$runner"
+  current_boot=$(cat /proc/sys/kernel/random/boot_id) || unknown_identity "$runner"
+  stat=$(cat "/proc/$pid/stat") || unknown_identity "$runner"
+  # comm may contain spaces and ')'; fields after its last ') ' start at state.
+  fields=${stat##*) }
+  [ "$fields" != "$stat" ] || unknown_identity "$runner"
+  current_start=$(printf '%s\n' "$fields" | cut -d ' ' -f 20)
+  [ "$boot" = "$current_boot" ] && [ "$start" = "$current_start" ] || unknown_identity "$runner"
+  kill -TERM "$pid"
+  set -- "$runner"
+fi
 attempt=0
 while [ -d "$control" ]; do
   attempt=$((attempt + 1))
@@ -126,6 +146,15 @@ trap cleanup EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
+# Publish the PID only after recording its Linux boot/start identity.
+cat /proc/sys/kernel/random/boot_id > "$control/boot-id"
+stat=$(cat "/proc/$$/stat")
+fields=${stat##*) }
+[ "$fields" != "$stat" ]
+# Kernel stat fields use single spaces; leave the test arguments intact.
+start=$(printf '%s\n' "$fields" | cut -d ' ' -f 20)
+case "$start" in ''|*[!0-9]*) exit 1 ;; esac
+printf '%s\n' "$start" > "$control/start-ticks"
 echo $$ > "$control/pid"
 # Serialize the shared TEST-NET alias; never delete a preexisting alias.
 exec 9> "$HOME/e2b/.check-probe.lock"

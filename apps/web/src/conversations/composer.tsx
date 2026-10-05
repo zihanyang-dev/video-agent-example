@@ -1,25 +1,21 @@
-import {
-  useState,
-  useEffect,
-  useRef,
-  type FormEvent,
-  type ChangeEvent,
-} from 'react'
-import { errorMessage } from '../http'
+import { useState, useEffect, useRef, type FormEvent } from 'react'
+import { ChatAssets } from '../assets/chat-assets'
+import type { ThreadScope } from './queries'
+import { useMessageSubmission } from './use-message-submission'
 
 export type ComposerProps = {
+  scope: ThreadScope
   canSend: boolean
-  hasAssets?: boolean
-  isBusy: boolean
-  hasPending: boolean
-  send: (text: string) => Promise<void>
-  retry: () => Promise<void>
 }
 
-export function Composer(props: ComposerProps) {
-  const { canSend, isBusy, hasPending, send, retry } = props
-  const [prompt, setPrompt] = useState('')
-  const [error, setError] = useState('')
+// This interaction owns both editable parts of a draft and its single recovery
+// surface. The submission hook owns only durable intent and server acceptance.
+export function Composer({ scope, canSend: hasNoActiveRuns }: ComposerProps) {
+  const submission = useMessageSubmission(scope)
+  const initialDraft = submission.pending ?? { text: '', assetIDs: [] }
+  const [prompt, setPrompt] = useState(initialDraft.text)
+  const [selected, setSelected] = useState(initialDraft.assetIDs)
+  const [error, setError] = useState(submission.error)
   const isMounted = useRef(true)
   useEffect(() => {
     isMounted.current = true
@@ -27,83 +23,71 @@ export function Composer(props: ComposerProps) {
       isMounted.current = false
     }
   }, [])
-  const clearAcceptedPrompt = () => {
-    if (isMounted.current) {
-      setPrompt('')
-      setError('')
-    }
-  }
-  const reportFailure = (failure: unknown) => {
-    if (isMounted.current) setError(errorMessage(failure))
+  const canSend =
+    hasNoActiveRuns && !submission.hasPending && !submission.isBusy
+  const finish = (recovery: string) => {
+    if (!isMounted.current) return
+    setError(recovery)
+    if (recovery) return
+    setPrompt('')
+    setSelected([])
   }
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
-    if (!canSend || (!prompt.trim() && !props.hasAssets)) return
+    if (!canSend || (!prompt.trim() && selected.length === 0)) return
     setError('')
-    void send(prompt).then(clearAcceptedPrompt, reportFailure)
+    void submission.send(prompt, selected).then(finish)
   }
   const retryMessage = () => {
     setError('')
-    void retry().then(clearAcceptedPrompt, reportFailure)
+    void submission.retry().then(finish)
   }
-  const editPrompt = (event: ChangeEvent<HTMLTextAreaElement>) =>
-    setPrompt(event.target.value)
 
   return (
-    <form onSubmit={submit}>
-      <label htmlFor="prompt">Describe your video</label>
-      <textarea
-        id="prompt"
-        rows={3}
-        value={prompt}
-        onChange={editPrompt}
-        disabled={!canSend}
-        required={!props.hasAssets}
-        maxLength={32768}
-        placeholder="A quiet sunrise over the ocean, warm light, slow camera movement…"
+    <>
+      <ChatAssets
+        scope={scope}
+        canSelect={canSend}
+        selected={selected}
+        select={setSelected}
+        archived={false}
       />
-      <ComposerActions
-        canSend={canSend}
-        isBusy={isBusy}
-        hasPending={hasPending}
-        retryMessage={retryMessage}
-      />
-      {error && <p role="alert">{error}</p>}
-    </form>
-  )
-}
-
-function ComposerActions({
-  canSend,
-  isBusy,
-  hasPending,
-  retryMessage,
-}: {
-  canSend: boolean
-  isBusy: boolean
-  hasPending: boolean
-  retryMessage: () => void
-}) {
-  return (
-    <div className="composer-footer">
-      <span>
-        Attach completed Chat files. Retries preserve the original message and
-        attachments.
-      </span>
-      {hasPending ? (
-        <button
-          className="primary"
-          type="button"
-          disabled={isBusy}
-          onClick={retryMessage}
-        >
-          Retry same message
-        </button>
-      ) : (
-        <button className="primary" type="submit" disabled={!canSend}>
-          Send message ↗
-        </button>
-      )}
-    </div>
+      <form onSubmit={submit}>
+        <label htmlFor="prompt">Describe your video</label>
+        <textarea
+          id="prompt"
+          rows={3}
+          value={prompt}
+          onChange={(event) => setPrompt(event.target.value)}
+          disabled={!canSend}
+          required={selected.length === 0}
+          maxLength={32768}
+          placeholder="A quiet sunrise over the ocean, warm light, slow camera movement…"
+        />
+        <div className="composer-footer">
+          <span>
+            Attach completed Chat files. Retries preserve the original message
+            and attachments.
+          </span>
+          {submission.hasPending ? (
+            <button
+              className="primary"
+              type="button"
+              // A lost receipt may already have created an active run. Frozen
+              // replay recovers that receipt; only a new message is gated above.
+              disabled={submission.isBusy || !!submission.error}
+              onClick={retryMessage}
+            >
+              Retry same message
+            </button>
+          ) : (
+            <button className="primary" type="submit" disabled={!canSend}>
+              Send message ↗
+            </button>
+          )}
+        </div>
+        {error && <p role="alert">{error}</p>}
+      </form>
+    </>
   )
 }

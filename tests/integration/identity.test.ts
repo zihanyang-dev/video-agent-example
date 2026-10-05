@@ -1,6 +1,13 @@
+import { connect } from 'node:net'
+import { startServer } from '../../apps/server/src/server'
+import {
+  signedTestIdentity,
+  serverTestEnv,
+  authenticationSettings,
+  officialTestPlugin,
+} from './authentication-fixture'
 import { afterAll, expect, test } from 'bun:test'
 import { betterAuth } from 'better-auth'
-import { officialTestPlugin } from './authentication-fixture'
 import { Kysely, PostgresDialect, sql } from 'kysely'
 import { Pool } from 'pg'
 import type { DB } from '@vid/database/types'
@@ -20,6 +27,7 @@ const settings = {
   githubClientID: 'fixture-only',
   githubClientSecret: 'fixture-only',
 }
+const bodyCollection = { signal: new AbortController().signal, timeoutMs: 1000 }
 const auth = createAuthentication(db, settings)
 const fixtures = betterAuth({
   ...authenticationOptions(db, settings),
@@ -93,6 +101,7 @@ test('a foreign-origin logout does not revoke the authenticated session', async 
     auth,
     db,
     logoutRequest(login.headers, 'https://attacker.example'),
+    bodyCollection,
   )
   expect(response.status).toBe(403)
   expect((await readIdentity(auth, login.headers))?.id).toBe(login.user.id)
@@ -100,7 +109,12 @@ test('a foreign-origin logout does not revoke the authenticated session', async 
 
 test('logout revokes the server session before acknowledging and expiring the cookie', async () => {
   const login = await signedIdentity()
-  const response = await signOut(auth, db, logoutRequest(login.headers))
+  const response = await signOut(
+    auth,
+    db,
+    logoutRequest(login.headers),
+    bodyCollection,
+  )
   expect(response.status).toBe(200)
   expect(response.headers.get('set-cookie')).toContain('Max-Age=0')
   expect(await readIdentity(auth, login.headers)).toBeNull()
@@ -138,6 +152,7 @@ test('failed session deletion is not a successful logout or an expired retry coo
       boundedAuth,
       boundedDB,
       logoutRequest(login.headers),
+      bodyCollection,
     ).then(
       () => null,
       (cause: unknown) => cause,
@@ -201,8 +216,136 @@ test('logout rejects oversized JSON without revoking the durable retry session',
     headers: logoutRequest(login.headers).headers,
     body: JSON.stringify({ padding: 'x'.repeat(65536) }),
   })
-  const response = await signOut(auth, db, request)
+  const response = await signOut(auth, db, request, bodyCollection)
   expect(response.status).toBe(400)
   expect(response.headers.get('set-cookie')).toBeNull()
   expect((await readIdentity(auth, login.headers))?.id).toBe(login.user.id)
 })
+
+test('native server releases its request budget after trickling product and logout JSON deadlines without revoking sessions', async () => {
+  const login = await signedTestIdentity(db)
+  users.push(login.user.id)
+  const server = await startServer(
+    { ...serverTestEnv(), FILE_IO_TIMEOUT_MS: 400 },
+    { port: 0 },
+  )
+  const clients: ReturnType<typeof tricklingJSON>[] = []
+  try {
+    for (let index = 0; index < 16; index++)
+      clients.push(
+        tricklingJSON(
+          server.url,
+          login.headers,
+          index < 8 ? '/api/logout' : '/api/threads',
+        ),
+      )
+    await Promise.all(clients.map((client) => client.connected))
+    const saturated = await fetch(`${server.url}/api/session`)
+    expect(saturated.status).toBe(429)
+    const statuses = await Promise.race([
+      Promise.all(clients.map((client) => client.status)),
+      Bun.sleep(1500).then(() => [] as number[]),
+    ])
+    expect(statuses).toContain(400)
+    expect(statuses.every((status) => status === 400 || status === 429)).toBe(
+      true,
+    )
+    expect(clients.some((client) => client.chunks() > 1)).toBe(true)
+    const released = await fetch(`${server.url}/api/session`, {
+      headers: login.headers,
+    })
+    expect(released.status).toBe(200)
+    expect(
+      ((await released.json()) as { user: { userID: string } }).user.userID,
+    ).toBe(login.user.id)
+    expect((await readIdentity(login.authentication, login.headers))?.id).toBe(
+      login.user.id,
+    )
+  } finally {
+    for (const client of clients) client.close()
+    await server.stop()
+  }
+})
+
+test('native server shutdown settles an unfinished JSON body before closing resources', async () => {
+  const login = await signedTestIdentity(db)
+  users.push(login.user.id)
+  const server = await startServer(
+    { ...serverTestEnv(), FILE_IO_TIMEOUT_MS: 5000 },
+    { port: 0 },
+  )
+  const client = tricklingJSON(server.url, login.headers, '/api/logout')
+  try {
+    await client.connected
+    await Bun.sleep(30)
+    const stopped = server.stop()
+    expect(
+      await Promise.race([
+        stopped.then(() => true),
+        Bun.sleep(1000).then(() => false),
+      ]),
+    ).toBe(true)
+    await stopped
+    expect((await readIdentity(login.authentication, login.headers))?.id).toBe(
+      login.user.id,
+    )
+  } finally {
+    client.close()
+    await server.stop()
+  }
+})
+
+function tricklingJSON(url: string, headers: Headers, path: string) {
+  const address = new URL(url)
+  let count = 0
+  let timer: ReturnType<typeof setInterval> | undefined
+  let connected!: () => void
+  let finish!: (status: number) => void
+  const ready = new Promise<void>((resolve) => {
+    connected = resolve
+  })
+  const status = new Promise<number>((resolve) => {
+    finish = resolve
+  })
+  const socket = connect(
+    { host: address.hostname, port: Number(address.port) },
+    () => {
+      socket.write(
+        `POST ${path} HTTP/1.1\r\nHost: ${address.host}\r\nOrigin: ${authenticationSettings.baseURL}\r\nCookie: ${headers.get('cookie')}\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n`,
+      )
+      socket.write('1\r\n \r\n')
+      timer = setInterval(() => {
+        count++
+        socket.write('1\r\n \r\n')
+      }, 10)
+      connected()
+    },
+  )
+  let response = ''
+  socket.on('data', (bytes) => {
+    response += bytes.toString()
+    const match = /^HTTP\/1\.1 (\d+)/.exec(response)
+    if (match) {
+      clearInterval(timer)
+      finish(Number(match[1]))
+    }
+  })
+  socket.on('error', () => {
+    clearInterval(timer)
+    finish(0)
+    connected()
+  })
+  socket.on('close', () => {
+    clearInterval(timer)
+    finish(0)
+  })
+  return {
+    connected: ready,
+    status,
+    chunks: () => count,
+    close: () => {
+      clearInterval(timer)
+      socket.destroy()
+    },
+  }
+}

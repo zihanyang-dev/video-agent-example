@@ -2,7 +2,10 @@ import { readActiveRuns, publicThread } from './conversations'
 import { lockThread, threadUnavailable } from './thread-access'
 import { authorizeCancellation } from '../conversation/submission'
 import type { DB } from '@vid/database/types'
-import type { CancelCommand } from '@vid/contract/execution'
+import {
+  cancelCommandSchema,
+  type CancelCommand,
+} from '@vid/contract/execution'
 import { sql, type Kysely, type Transaction } from 'kysely'
 import type { OwnedThread } from '../conversation/submission'
 
@@ -25,8 +28,15 @@ export async function hasAcceptedRun(
     .where('product.command_outbox.thread_id', '=', threadID)
     .where('run_id', '=', runID)
     .where(sql<string>`command ->> 'kind'`, '=', 'start')
-    .where(sql<string>`command ->> 'threadID'`, '=', threadID)
-    .where(sql<string>`command ->> 'runID'`, '=', runID)
+    .where(
+      sql<boolean>`lower(command ->> 'threadID') = product.command_outbox.thread_id::text`,
+    )
+    .where(sql<boolean>`lower(command ->> 'runID') = run_id::text`)
+    .where(sql<boolean>`lower(command ->> 'commandID') = command_id::text`)
+    .where(
+      sql<boolean>`lower(command #>> '{input,messageID}') = message_id::text`,
+    )
+    .where(sql<boolean>`command -> 'version' = '1'::jsonb`)
     .executeTakeFirst()
   return row !== undefined
 }
@@ -35,21 +45,20 @@ export async function cancelRun(
   db: Kysely<DB>,
   request: CancelRun,
 ): Promise<'accepted' | 'unavailable' | 'conflict'> {
-  const { threadID, runID, commandID } = request
-  const command: CancelCommand = {
-    version: 1,
-    kind: 'cancel',
-    threadID,
-    runID,
-    commandID,
-  }
   // Lock the thread before deciding ownership and accepted-start authority,
   // then write/replay the cancel command under that same lock. A preflight HTTP
   // lookup could authorize against stale ownership. Cancellation is an accepted
   // request, not an execution terminal; it must never create assistant messages.
   try {
     return await db.transaction().execute(async (tx) => {
-      await lockThread(tx, request, 'cancel')
+      const thread = await lockThread(tx, request, 'cancel')
+      const command = cancelCommandSchema.parse({
+        version: 1,
+        kind: 'cancel',
+        threadID: thread.thread_id,
+        runID: request.runID,
+        commandID: request.commandID,
+      })
       if (
         authorizeCancellation(await hasAcceptedRun(tx, request)) ===
         'unavailable'
@@ -96,13 +105,17 @@ async function replayCancellation(
   if (scope && scope.owner_id !== request.ownerID) return 'unavailable'
   const replay = await tx
     .selectFrom('product.command_outbox')
-    .select('command_id')
+    .select('command')
     .where('command_id', '=', command.commandID)
     .where('thread_id', '=', command.threadID)
     .where('run_id', '=', command.runID)
-    .where(sql<boolean>`command = ${JSON.stringify(command)}::jsonb`)
+    .where('message_id', 'is', null)
     .executeTakeFirst()
-  return replay ? 'accepted' : 'conflict'
+  const retained = cancelCommandSchema.safeParse(replay?.command)
+  return retained.success &&
+    JSON.stringify(retained.data) === JSON.stringify(command)
+    ? 'accepted'
+    : 'conflict'
 }
 
 /** Archive and send serialize on the existing thread lock. Stops are requests,

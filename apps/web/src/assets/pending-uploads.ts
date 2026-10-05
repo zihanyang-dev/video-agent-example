@@ -69,7 +69,21 @@ export async function sendUpload(scope: ThreadScope, upload: PendingUpload) {
     },
     throwOnError: true,
   })
+  try {
+    await discardUpload(scope, upload)
+    return { receipt, storageError: '' }
+  } catch {
+    return {
+      receipt,
+      storageError:
+        'File accepted, but its saved upload could not be removed. Check Chat history before retrying.',
+    }
+  }
+}
+
+// Local evidence only: this never deletes an asset from the server. A false
+// Cache.delete result means the key is already absent, which is success.
+export async function discardUpload(scope: ThreadScope, upload: PendingUpload) {
   const cache = await uploadCache(scope)
   await cache.delete(uploadKey(upload.assetID))
-  return receipt
 }

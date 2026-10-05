@@ -64,7 +64,9 @@ sh scripts/database-check.sh verify
 
 两个进程读取 uploads/generated 和历史 materials/artifacts；server 只写 uploads，worker 只写 generated。历史键只读，旧 workspaces 不作为应用工作区复用。不授予建桶、列举、管理或删除权限；未知 PUT/SQL 回执的对象保留供运维对账，不做自动扫描回收。
 
-`ASSET_MAX_BYTES` 默认 8 MiB、最高 16 MiB，`ASSET_MAX_FILES` 默认 16、最高 32；新输入和新生成资产按当前预算检查，下载也受单文件读取预算约束。升级保留的 `artifacts` 完成回执按历史 SQL 上限（每文件 16 MiB、最多 32 文件）接受元数据，不因后来降低的预算阻塞收件箱；混合回执中的新生成资产仍受当前总字节与数量预算限制。历史文件若超过当前下载预算，可在上述范围内提高配置后重建应用再下载，不删除或改写旧对象。`FILE_IO_TIMEOUT_MS` 默认 30000，允许 1000–120000。
+`ASSET_MAX_BYTES` 默认 8 MiB、最高 16 MiB，`ASSET_MAX_FILES` 默认 16、最高 32；新输入和新生成资产按当前预算检查，下载也受单文件读取预算约束。升级保留的 `artifacts` 完成回执按历史 SQL 上限（每文件 16 MiB、最多 32 文件）接受元数据，不因后来降低的预算阻塞收件箱；混合回执中的新生成资产仍受当前总字节与数量预算限制。历史文件若超过当前下载预算，可在上述范围内提高配置后重建应用再下载，不删除或改写旧对象。`FILE_IO_TIMEOUT_MS` 默认 30000，允许 1000–120000；它同时约束文件 I/O 和公开应用 JSON 请求的字节收集。JSON 最多 64 KiB，截止时间从开始收集时计算，超时或中止返回 400 且不执行对应变化；进程停止会中止并等待收集结束。该截止时间不限制 SSE 响应寿命，也不覆盖 Better Auth 自己解析的原生认证路由。
+
+`IO_TIMEOUT_MS` 约束 PostgreSQL 连接、服务器端语句／锁及事务空闲预算；客户端响应截止时间为其两倍。响应超时会等待实际关闭并淘汰该物理连接，而不是仅由外部超时 Promise 提前返回。数据库连接可重建，但丢失 COMMIT 回执仍是未知结果，不据此重放写入或推理；关闭客户端也不证明后端立即停止或没有提交。
 
 已有外部 S3 部署填写明确的 endpoint/region/bucket，并事先创建 bucket 和两个独立应用 key。使用 `deploy/storage/*-policy.json` 时替换 `vid-assets` 为真实 bucket；迁移任务不替外部供应商管理 IAM。`storage-init` 遇到非本地 endpoint 直接退出，不向外部发送本地 root；本地 Silo 仍会启动但应用不使用它。这不是通用供应商部署框架，外部 bucket/IAM 就绪由运维负责，HTTP 健康不能证明它。
 

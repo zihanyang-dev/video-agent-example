@@ -1,11 +1,12 @@
 import { setTimeout } from 'node:timers/promises'
-import type { ExecutionDatabase } from './db/connection'
+import type { Kysely } from 'kysely'
+import type { DB } from '@vid/database/types'
 import { executionStreams } from '@vid/contract/execution'
 import type { RedisClientType } from 'redis'
 import { publishEvent, pendingEventIDs } from './db/event-publication'
 
 export async function relayEvents(
-  db: ExecutionDatabase,
+  db: Kysely<DB>,
   commands: RedisClientType,
   polling: Readonly<{ signal: AbortSignal; pollMs: number }>,
 ) {
@@ -16,7 +17,7 @@ export async function relayEvents(
 }
 
 async function publishPendingEvents(
-  db: ExecutionDatabase,
+  db: Kysely<DB>,
   commands: RedisClientType,
   signal: AbortSignal,
 ) {

@@ -52,15 +52,18 @@ afterAll(async () => {
 async function fixture() {
   const login = await signedTestIdentity(db)
   const threadID = crypto.randomUUID()
+  const shutdown = new AbortController()
   const route = createHTTP(db, {
     authentication: login.authentication,
-    signal: new AbortController().signal,
+    signal: shutdown.signal,
+    bodyCollection: { signal: shutdown.signal, timeoutMs: 5000 },
+    maxAssetBytes: 1024,
     pollIntervalMs: 10,
     files: {
       objects,
       maxAssetBytes: 1024,
       timeoutMs: 5000,
-      signal: new AbortController().signal,
+      signal: shutdown.signal,
     },
   })
   async function request(

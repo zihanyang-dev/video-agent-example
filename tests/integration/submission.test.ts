@@ -1,4 +1,5 @@
 import { afterAll, expect, test } from 'bun:test'
+import { sql } from 'kysely'
 import { startCommandSchema } from '@vid/contract/execution'
 import { acceptMessageIntent } from '../../apps/server/src/db/submissions'
 import { publishCommand } from '../../apps/server/src/db/command-publication'
@@ -24,6 +25,14 @@ afterAll(async () => {
     if (threadIDs.length === 0) return
     await db
       .deleteFrom('product.command_outbox')
+      .where('thread_id', 'in', threadIDs)
+      .execute()
+    await db
+      .deleteFrom('product.message_assets')
+      .where('thread_id', 'in', threadIDs)
+      .execute()
+    await db
+      .deleteFrom('product.assets')
       .where('thread_id', 'in', threadIDs)
       .execute()
     await db
@@ -277,3 +286,234 @@ test('a foreign message identity returns unavailable rather than revealing a con
     commands: [],
   })
 })
+
+for (const [name, patch] of Object.entries({
+  'string version': { version: '1' },
+  kind: { kind: 'cancel' },
+  'JSON command ID': { commandID: 'not-a-uuid' },
+  'JSON run ID': { runID: crypto.randomUUID() },
+  'JSON thread ID': { threadID: crypto.randomUUID() },
+  'JSON input ID': { input: { messageID: crypto.randomUUID(), text: 'Hello' } },
+  'wire text': { input: { text: 'different work' } },
+})) {
+  test(`exact replay rejects retained ${name} corruption without repairing history`, async () => {
+    const input = await inputForThread()
+    const accepted = await submitMessage(db, input)
+    if (accepted.kind !== 'accepted') throw new Error('Expected acceptance')
+    const saved = await savedAcceptance(input.threadID)
+    const command = startCommandSchema.parse(saved.commands[0]?.command)
+    const corrupt = {
+      ...command,
+      ...patch,
+      input: { ...command.input, ...('input' in patch ? patch.input : {}) },
+    }
+    await db
+      .updateTable('product.command_outbox')
+      .set({ command: sql`${JSON.stringify(corrupt)}::jsonb` })
+      .where('command_id', '=', accepted.commandID)
+      .execute()
+    const before = await savedAcceptance(input.threadID)
+    expect(await submitMessage(db, input)).toEqual({ kind: 'conflict' })
+    expect(await savedAcceptance(input.threadID)).toEqual(before)
+  })
+}
+
+for (const header of [
+  'command_id',
+  'run_id',
+  'thread_id',
+  'message_id',
+] as const) {
+  test(`exact replay rejects inconsistent indexed ${header}`, async () => {
+    const input = await inputForThread()
+    const accepted = await submitMessage(db, input)
+    if (accepted.kind !== 'accepted') throw new Error('Expected acceptance')
+    const other = await inputForThread()
+    await submitMessage(db, other)
+    const value =
+      header === 'thread_id'
+        ? other.threadID
+        : header === 'message_id'
+          ? other.messageID
+          : crypto.randomUUID()
+    // message_id is globally unique; remove the other command first.
+    if (header === 'message_id')
+      await db
+        .deleteFrom('product.command_outbox')
+        .where('message_id', '=', other.messageID)
+        .execute()
+    await db
+      .updateTable('product.command_outbox')
+      .set({ [header]: value })
+      .where('command_id', '=', accepted.commandID)
+      .execute()
+    const before = await savedAcceptance(input.threadID)
+    const otherBefore = await savedAcceptance(other.threadID)
+    expect(await submitMessage(db, input)).toEqual({ kind: 'conflict' })
+    expect(await savedAcceptance(input.threadID)).toEqual(before)
+    expect(await savedAcceptance(other.threadID)).toEqual(otherBefore)
+  })
+}
+
+test('uppercase historical wire identities replay original IDs without rewriting JSON', async () => {
+  const input = await inputForThread()
+  const first = await submitMessage(db, input)
+  if (first.kind !== 'accepted') throw new Error('Expected acceptance')
+  const saved = await savedAcceptance(input.threadID)
+  const command = startCommandSchema.parse(saved.commands[0]?.command)
+  const historical = {
+    ...command,
+    commandID: command.commandID.toUpperCase(),
+    runID: command.runID.toUpperCase(),
+    threadID: command.threadID.toUpperCase(),
+    input: {
+      ...command.input,
+      messageID: command.input.messageID.toUpperCase(),
+    },
+  }
+  await db
+    .updateTable('product.command_outbox')
+    .set({ command: sql`${JSON.stringify(historical)}::jsonb` })
+    .where('command_id', '=', first.commandID)
+    .execute()
+  expect(await submitMessage(db, input)).toEqual(first)
+  expect((await savedAcceptance(input.threadID)).commands[0]?.command).toEqual(
+    JSON.parse(JSON.stringify(historical)),
+  )
+})
+
+async function inputWithAssets() {
+  const input = await inputForThread()
+  const assets = Array.from({ length: 2 }, (_, index) => {
+    const assetID = crypto.randomUUID()
+    return {
+      assetID,
+      name: `input-${index}.txt`,
+      mimeType: 'text/plain',
+      byteLength: 2,
+      sha256: 'a'.repeat(64),
+      objectKey: `materials/${input.threadID}/${assetID}`,
+    }
+  })
+  for (const asset of assets)
+    await db
+      .insertInto('product.assets')
+      .values({
+        asset_id: asset.assetID,
+        thread_id: input.threadID,
+        source: 'upload',
+        name: asset.name,
+        mime_type: asset.mimeType,
+        byte_length: asset.byteLength,
+        sha256: asset.sha256,
+        object_key: asset.objectKey,
+        ready_at: new Date(),
+      })
+      .execute()
+  return {
+    input: { ...input, assetIDs: assets.map((asset) => asset.assetID) },
+    assets,
+  }
+}
+
+const assetMutations = {
+  order: (assets: Awaited<ReturnType<typeof inputWithAssets>>['assets']) =>
+    assets.reverse(),
+  missing: (assets: Awaited<ReturnType<typeof inputWithAssets>>['assets']) =>
+    assets.pop(),
+  extra: (assets: Awaited<ReturnType<typeof inputWithAssets>>['assets']) =>
+    assets.push({ ...assets[0]!, assetID: crypto.randomUUID() }),
+  ID: (assets: Awaited<ReturnType<typeof inputWithAssets>>['assets']) => {
+    assets[0]!.assetID = crypto.randomUUID()
+  },
+  name: (assets: Awaited<ReturnType<typeof inputWithAssets>>['assets']) => {
+    assets[0]!.name = 'different.txt'
+  },
+  hash: (assets: Awaited<ReturnType<typeof inputWithAssets>>['assets']) => {
+    assets[0]!.sha256 = 'b'.repeat(64)
+  },
+  bytes: (assets: Awaited<ReturnType<typeof inputWithAssets>>['assets']) => {
+    assets[0]!.byteLength = 3
+  },
+  key: (assets: Awaited<ReturnType<typeof inputWithAssets>>['assets']) => {
+    assets[0]!.objectKey = `materials/${crypto.randomUUID()}/${assets[0]!.assetID}`
+  },
+}
+for (const [mutation, mutate] of Object.entries(assetMutations)) {
+  test(`exact replay rejects retained asset ${mutation} corruption`, async () => {
+    const { input, assets } = await inputWithAssets()
+    const first = await submitMessage(db, input)
+    if (first.kind !== 'accepted') throw new Error('Expected acceptance')
+    const command = startCommandSchema.parse(
+      (await savedAcceptance(input.threadID)).commands[0]?.command,
+    )
+    const changed = assets.map((asset) => ({ ...asset }))
+    mutate(changed)
+    await db
+      .updateTable('product.command_outbox')
+      .set({
+        command: { ...command, input: { ...command.input, assets: changed } },
+      })
+      .where('command_id', '=', first.commandID)
+      .execute()
+    const before = await savedAcceptance(input.threadID)
+    expect(await submitMessage(db, input)).toEqual({ kind: 'conflict' })
+    expect(await savedAcceptance(input.threadID)).toEqual(before)
+  })
+}
+
+test('historical asset command keys remain replayable after current asset rehome', async () => {
+  const { input, assets } = await inputWithAssets()
+  const first = await submitMessage(db, input)
+  const before = await savedAcceptance(input.threadID)
+  for (const asset of assets)
+    await db
+      .updateTable('product.assets')
+      .set({ object_key: `assets/uploads/${input.threadID}/${asset.assetID}` })
+      .where('asset_id', '=', asset.assetID)
+      .execute()
+  expect(await submitMessage(db, input)).toEqual(first)
+  expect(await savedAcceptance(input.threadID)).toEqual(before)
+})
+
+for (const foreignScope of [false, true]) {
+  test(`replay rejects coherent wire/indexed ${foreignScope ? 'foreign' : 'other owned'} thread headers attached to the original message`, async () => {
+    const input = await inputForThread()
+    const first = await submitMessage(db, input)
+    if (first.kind !== 'accepted') throw new Error('Expected acceptance')
+    const other = await inputForThread()
+    if (foreignScope) {
+      await seedTestUser(db, 'foreign-ledger-owner')
+      await db
+        .updateTable('product.threads')
+        .set({ owner_id: 'foreign-ledger-owner' })
+        .where('thread_id', '=', other.threadID)
+        .execute()
+    }
+    const command = startCommandSchema.parse(
+      (await savedAcceptance(input.threadID)).commands[0]?.command,
+    )
+    await db
+      .updateTable('product.command_outbox')
+      .set({
+        thread_id: other.threadID,
+        command: sql`${JSON.stringify({ ...command, threadID: other.threadID })}::jsonb`,
+      })
+      .where('command_id', '=', first.commandID)
+      .execute()
+    const before = await savedAcceptance(input.threadID)
+    const otherBefore = await savedAcceptance(other.threadID)
+    expect(await submitMessage(db, input)).toEqual({ kind: 'conflict' })
+    expect(await savedAcceptance(input.threadID)).toEqual(before)
+    expect(await savedAcceptance(other.threadID)).toEqual(otherBefore)
+    // Authorization of the original product message precedes parsing bad ledger data.
+    if (foreignScope)
+      expect(
+        await submitMessage(db, {
+          ...other,
+          ownerID: 'foreign-ledger-owner',
+          messageID: input.messageID,
+        }),
+      ).toEqual({ kind: 'unavailable' })
+  })
+}

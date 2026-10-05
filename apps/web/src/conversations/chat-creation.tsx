@@ -4,6 +4,17 @@ import { threadCreationSchema } from '@vid/contract/http'
 import { errorMessage } from '../http'
 import { pendingIntents, pendingIntentRecoveryMessage } from './pending-intents'
 
+export function acceptChatCreation(
+  intents: ReturnType<typeof pendingIntents>,
+): string {
+  try {
+    intents.acceptCreation()
+    return ''
+  } catch {
+    return 'Chat accepted, saved request could not be removed. Check Chat history before retrying.'
+  }
+}
+
 export type ChatCreationIntent = ReturnType<typeof threadCreationSchema.parse>
 export function ChatCreation({
   create,
@@ -23,6 +34,7 @@ export function ChatCreation({
   const [pending, setPending] = useState(restored.pending)
   const [title, setTitle] = useState(pending?.title ?? '')
   const [storageError, setStorageError] = useState(restored.error)
+  const [accepted, setAccepted] = useState(false)
   const mutation = useMutation({
     meta: { userID },
     mutationFn: create,
@@ -37,7 +49,13 @@ export function ChatCreation({
       setPending(intent)
       mutation.mutate(intent, {
         onSuccess: () => {
-          intents.acceptCreation()
+          const recovery = acceptChatCreation(intents)
+          setAccepted(!!recovery)
+          if (recovery) {
+            setStorageError(recovery)
+            return
+          }
+          setStorageError('')
           setPending(undefined)
           setTitle('')
         },
@@ -63,7 +81,11 @@ export function ChatCreation({
         />
       </label>
       <button disabled={mutation.isPending || !!restored.error} type="submit">
-        {mutation.isError ? 'Retry create Chat' : 'Create Chat'}
+        {accepted
+          ? 'Retry same accepted Chat'
+          : mutation.isError
+            ? 'Retry create Chat'
+            : 'Create Chat'}
       </button>
       {storageError && <p role="alert">{storageError}</p>}
       {mutation.isPending && <p role="status">Saving…</p>}

@@ -109,7 +109,7 @@ async function authorizedRun(
     .where(
       sql<boolean>`lower(command #>> '{input,messageID}') = message_id::text`,
     )
-    .where(sql<string>`command ->> 'version'`, '=', '1')
+    .where(sql<boolean>`command -> 'version' = '1'::jsonb`)
     .executeTakeFirst()
   return start !== undefined
 }

@@ -36,40 +36,64 @@ export function useMessageSubmission(scope: ThreadScope) {
         throwOnError: true,
       })
     },
-    onSuccess: async () => {
-      if (!isMounted.current) return
-      // Do not synthesize persisted messages from a receipt. In particular, exact
-      // replay can return older business IDs. Only the server snapshot owns facts.
-      intents.acceptMessage(scope.threadID)
-      setPending(undefined)
-      await client.invalidateQueries(messagesQuery(scope))
-    },
   })
+  const freezeMessage = (input?: {
+    text: string
+    assetIDs: string[]
+  }): PendingMessage | string => {
+    if (restored.error) return restored.error
+    try {
+      const frozen = input
+        ? intents.message(scope.threadID, input)
+        : intents.readMessage(scope.threadID)
+      return (
+        frozen ?? 'No saved message is available to retry. Check Chat history.'
+      )
+    } catch (error) {
+      // Recognize only the owned storage recovery fact, never HTTP diagnostics.
+      return error instanceof Error &&
+        error.message === pendingIntentRecoveryMessage
+        ? pendingIntentRecoveryMessage
+        : 'Message could not be saved in this browser. Free browser storage before sending.'
+    }
+  }
   const submit = async (input?: { text: string; assetIDs: string[] }) => {
-    if (mutation.isPending) return
-    if (restored.error) throw new Error(restored.error)
-    const frozen = input
-      ? intents.message(scope.threadID, input)
-      : intents.readMessage(scope.threadID)
-    if (!frozen) return
+    if (mutation.isPending || !isMounted.current)
+      return 'Message request is still pending.'
+    const frozen = freezeMessage(input)
+    if (typeof frozen === 'string') return frozen
     setPending(frozen)
-    await mutation.mutateAsync(frozen)
+    try {
+      await mutation.mutateAsync(frozen)
+    } catch (error) {
+      return submissionError(error)
+    }
+    if (!isMounted.current) return ''
+    // A receipt is not a persisted message. Clear the accepted draft without
+    // waiting for snapshot refresh; exact replay can refer to older business IDs.
+    try {
+      intents.acceptMessage(scope.threadID)
+    } catch {
+      return 'Message accepted, but its saved request could not be removed. Check Chat history before retrying.'
+    }
+    setPending(undefined)
+    void client.invalidateQueries(messagesQuery(scope))
+    return ''
   }
   const send = (text: string, assetIDs: string[] = []) =>
     submit({ text, assetIDs })
   const retry = () => submit()
-  const error =
-    restored.error || (mutation.isError ? submissionError(mutation.error) : '')
   return {
     send,
     retry,
+    pending,
     hasPending: !!pending || !!restored.error,
     isBusy: mutation.isPending,
-    error,
+    error: restored.error,
   }
 }
 
-function submissionError(error: Error) {
+function submissionError(error: unknown) {
   if (error instanceof HTTPError && [401, 403, 404, 409].includes(error.status))
     return errorMessage(error)
   return 'Message acceptance is unknown. Retry the same message; do not send a replacement.'

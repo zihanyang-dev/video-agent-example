@@ -1,68 +1,18 @@
 import { useEffect, useRef, useState } from 'react'
 import { createAuthClient } from 'better-auth/react'
-import {
-  queryOptions,
-  useMutation,
-  useQuery,
-  useQueryClient,
-  QueryClient,
-  QueryCache,
-  MutationCache,
-} from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { sessionResponseSchema } from '@vid/contract/http'
-import {
-  errorMessage,
-  HTTPError,
-  apiForUser,
-  abortHTTP,
-  retryRead,
-} from '../http'
-import { getSession, logout as revokeSession } from '@vid/contract/client'
+import { errorMessage } from '../http'
 import { Chats } from '../conversations/chats'
 
-const auth = createAuthClient({ basePath: '/api/auth' })
-export const sessionQuery = queryOptions({
-  queryKey: ['session'],
-  queryFn: async ({ signal }) =>
-    (await getSession({ client: apiForUser(), signal, throwOnError: true }))
-      .data,
-  retry: retryRead,
-  refetchInterval: 30_000,
-})
+import {
+  sessionQuery,
+  forgetAccountFacts,
+  revokeAccountSession,
+} from './session-cache'
+export { sessionQuery, createWebQueryClient } from './session-cache'
 
-export function createWebQueryClient() {
-  const expireSession = (error: Error, requestedUserID?: unknown) => {
-    if (!(error instanceof HTTPError) || error.status !== 401) return
-    const currentUserID = client.getQueryData(sessionQuery.queryKey)?.user
-      ?.userID
-    // A late refusal from a previous account must not sign out the new one.
-    if (requestedUserID !== undefined && requestedUserID !== currentUserID)
-      return
-    if (currentUserID) abortHTTP(currentUserID)
-    void client.cancelQueries({ queryKey: ['user'] })
-    client.getMutationCache().clear()
-    client.setQueryData(sessionQuery.queryKey, { user: null })
-    client.removeQueries({ queryKey: ['user'] })
-  }
-  const client = new QueryClient({
-    defaultOptions: {
-      queries: { retry: retryRead },
-      mutations: { retry: false },
-    },
-    queryCache: new QueryCache({
-      onError: (error, query) =>
-        expireSession(
-          error,
-          query.queryKey[0] === 'user' ? query.queryKey[1] : undefined,
-        ),
-    }),
-    mutationCache: new MutationCache({
-      onError: (error, _variables, _context, mutation) =>
-        expireSession(error, mutation.meta?.userID),
-    }),
-  })
-  return client
-}
+const auth = createAuthClient({ basePath: '/api/auth' })
 
 export function Identity() {
   const session = useQuery(sessionQuery)
@@ -98,10 +48,7 @@ function SignedOut() {
   const isMounted = useRef(true)
   useEffect(() => {
     isMounted.current = true
-    client.removeQueries({
-      predicate: (query) => query.queryKey[0] !== 'session',
-    })
-    client.getMutationCache().clear()
+    forgetAccountFacts(client)
     return () => {
       isMounted.current = false
     }
@@ -142,13 +89,7 @@ function SignedIn({ user }: { user: User }) {
   const client = useQueryClient()
   const logout = useMutation({
     meta: { userID: user.userID },
-    mutationFn: async () => {
-      await revokeSession({
-        client: apiForUser(user.userID),
-        body: {},
-        throwOnError: true,
-      })
-    },
+    mutationFn: () => revokeAccountSession(client, user.userID),
   })
   useEffect(() => {
     client.removeQueries({
@@ -156,29 +97,10 @@ function SignedIn({ user }: { user: User }) {
         query.queryKey[0] === 'user' && query.queryKey[1] !== user.userID,
     })
     return () => {
-      abortHTTP(user.userID)
-      // Stop stale reads before removing their facts on account changes.
-      void client.cancelQueries({ queryKey: ['user', user.userID] })
-      client.removeQueries({ queryKey: ['user', user.userID] })
-      client.getMutationCache().clear()
+      forgetAccountFacts(client, user.userID)
     }
   }, [client, user.userID])
-  const signOut = () =>
-    logout.mutate(undefined, {
-      onSuccess: () => {
-        // Public logout strongly revokes server access. Better Auth signOut is not
-        // substituted here: its best-effort receipt is not the product guarantee.
-        abortHTTP(user.userID)
-        void client.cancelQueries()
-        // Keep the session observer attached: clearing its query first leaves
-        // mounted identity observers holding the old signed-in result.
-        client.setQueryData(sessionQuery.queryKey, { user: null })
-        client.removeQueries({
-          predicate: (query) => query.queryKey[0] !== 'session',
-        })
-        client.getMutationCache().clear()
-      },
-    })
+  const signOut = () => logout.mutate(undefined)
   return (
     <>
       <header className="identity">

@@ -4,7 +4,8 @@ import {
   executionStreams,
   type ExecutionCommand,
 } from '@vid/contract/execution'
-import type { ExecutionDatabase } from './db/connection'
+import type { Kysely } from 'kysely'
+import type { DB } from '@vid/database/types'
 import { acceptExecutionCommand } from './db/command-acceptance'
 
 type CommandConsumer = {
@@ -34,7 +35,7 @@ export async function initializeCommands(commands: RedisClientType) {
 /** Commit each command before ACK. Poison and missing payloads remain pending;
  * the process owner stops intake rather than guessing what was delivered. */
 export async function acceptCommandMessages(
-  db: ExecutionDatabase,
+  db: Kysely<DB>,
   commands: RedisClientType,
   messages: PendingCommands,
 ) {
@@ -68,7 +69,7 @@ export async function acceptCommandMessages(
 }
 
 export async function acceptCommands(
-  db: ExecutionDatabase,
+  db: Kysely<DB>,
   consumer: CommandConsumer,
   signal: AbortSignal,
 ) {

@@ -125,19 +125,20 @@ export async function allocatedAssets(
   threadID: string,
   ids: readonly string[],
 ) {
-  const result: AssetReference[] = []
-  for (const id of ids) {
-    const row = await tx
-      .selectFrom('product.assets')
-      .selectAll()
-      .where('thread_id', '=', threadID)
-      .where('asset_id', '=', id)
-      .where('ready_at', 'is not', null)
-      .executeTakeFirst()
+  if (!ids.length) return []
+  const rows = await tx
+    .selectFrom('product.assets')
+    .selectAll()
+    .where('thread_id', '=', threadID)
+    .where('asset_id', 'in', ids)
+    .where('ready_at', 'is not', null)
+    .execute()
+  const byID = new Map(rows.map((row) => [row.asset_id, row]))
+  return ids.map((id) => {
+    const row = byID.get(id.toLowerCase())
     if (!row) throw threadUnavailable
-    result.push(allocatedAsset(row))
-  }
-  return result
+    return allocatedAsset(row)
+  })
 }
 export async function messageAssets(tx: Transaction<DB>, messageID: string) {
   return await tx

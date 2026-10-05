@@ -1,4 +1,3 @@
-import { collectRequestBody, type FileHTTP } from '../assets/http'
 import { RunAgentInputSchema } from '@ag-ui/core/schemas'
 import {
   messageSubmissionSchema,
@@ -18,14 +17,10 @@ const cursorSchema = z
   .string()
   .regex(/^(0|[1-9][0-9]*)$/)
   .pipe(z.string().refine((value) => BigInt(value) <= 9223372036854775807n))
-export const unavailable = () =>
-  Response.json({ error: 'Not found' }, { status: 404 })
-export const invalid = () =>
-  Response.json({ error: 'Invalid input' }, { status: 400 })
-export const conflict = () =>
-  Response.json({ error: 'Conflict' }, { status: 409 })
+const unavailable = () => Response.json({ error: 'Not found' }, { status: 404 })
+const invalid = () => Response.json({ error: 'Invalid input' }, { status: 400 })
+const conflict = () => Response.json({ error: 'Conflict' }, { status: 409 })
 export type ConversationOptions = Readonly<{
-  files?: FileHTTP
   signal: AbortSignal
   pollIntervalMs: number
   registerSubscription?: RegisterSubscription
@@ -34,10 +29,10 @@ export type ConversationOptions = Readonly<{
 export async function submitMessage(
   db: Kysely<DB>,
   query: OwnedThread,
-  request: Request,
-  files: FileHTTP | undefined,
+  body: unknown,
+  maxAssetBytes: number,
 ) {
-  const input = messageSubmissionSchema.safeParse(await readBody(request))
+  const input = messageSubmissionSchema.safeParse(body)
   if (!input.success) return invalid()
   const outcome = await acceptMessageIntent(
     db,
@@ -49,7 +44,7 @@ export async function submitMessage(
       commandID: crypto.randomUUID(),
       runID: crypto.randomUUID(),
     },
-    files?.maxAssetBytes,
+    maxAssetBytes,
   )
   if (outcome.kind === 'unavailable') return unavailable()
   if (outcome.kind === 'invalid-input') return invalid()
@@ -67,9 +62,9 @@ export async function submitMessage(
 export async function cancelObservation(
   db: Kysely<DB>,
   query: OwnedThread & { runID: string },
-  request: Request,
+  body: unknown,
 ) {
-  const input = runCancellationSchema.safeParse(await readBody(request))
+  const input = runCancellationSchema.safeParse(body)
   if (!input.success) return invalid()
   const outcome = await cancelRun(db, { ...query, ...input.data })
   if (outcome === 'unavailable') return unavailable()
@@ -86,10 +81,10 @@ export async function cancelObservation(
 export async function openObservation(
   db: Kysely<DB>,
   query: OwnedThread & { runID: string },
-  request: Request,
+  request: Readonly<{ body: unknown; headers: Headers; signal: AbortSignal }>,
   options: ConversationOptions & { authorize: () => Promise<boolean> },
 ) {
-  const input = RunAgentInputSchema.safeParse(await readBody(request))
+  const input = RunAgentInputSchema.safeParse(request.body)
   if (!input.success) return invalid()
   const runID = z.uuid().toLowerCase().safeParse(input.data.runId)
   const inputThread = z.uuid().toLowerCase().safeParse(input.data.threadId)
@@ -119,16 +114,6 @@ export async function openObservation(
       ? { registerSubscription: options.registerSubscription }
       : {}),
   })
-}
-
-export async function readBody(request: Request): Promise<unknown> {
-  try {
-    if (!request.body) return undefined
-    const bytes = await collectRequestBody(request.body, 65536, request.signal)
-    return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes))
-  } catch {
-    return undefined
-  }
 }
 
 function observationCursor(

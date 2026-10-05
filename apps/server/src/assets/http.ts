@@ -1,18 +1,13 @@
+import { collectRequestBody } from '../request-body'
 import { publicUUIDSchema, type AssetResponse } from '@vid/contract/http'
-import type { AssetReference } from '@vid/contract/execution'
-import { sha256, type ObjectStore } from '@vid/object-storage'
+import { sha256 } from '@vid/object-storage'
 import type { Kysely } from 'kysely'
 import type { DB } from '@vid/database/types'
 import type { OwnedThread } from '../conversation/submission'
-import { reserveAsset, completeAsset, ownedAsset } from '../db/assets'
+import { ownedAsset } from '../db/assets'
 import { validateFile } from './files'
+import { publishUpload, type FileHTTP } from './uploads'
 
-export type FileHTTP = Readonly<{
-  objects: ObjectStore
-  maxAssetBytes: number
-  timeoutMs: number
-  signal: AbortSignal
-}>
 const notFound = () => Response.json({ error: 'Not found' }, { status: 404 })
 
 /** One raw binary per request. No multipart parser or caller storage authority.
@@ -43,47 +38,20 @@ export async function uploadAsset(
   }
   if (!validateFile(metadata.name, metadata.mimeType, bytes))
     return Response.json({ error: 'Invalid file' }, { status: 415 })
-  const asset = {
-    ...metadata,
-    byteLength: bytes.length,
-    sha256: sha256(bytes),
-    objectKey: `assets/uploads/${query.threadID}/${metadata.assetID}`,
-  }
-  const reservation = await reserveAsset(db, query, asset)
-  const objectKey = await storeUpload(
-    io,
-    { ...asset, bytes },
-    reservation,
-    signal,
+  const completion = await publishUpload(
+    db,
+    query,
+    { ...metadata, bytes },
+    { ...io, signal },
   )
-  if (objectKey === null)
+  if (completion === null)
     return Response.json(
       { error: 'Upload not confirmed. Retry the same asset ID and file.' },
       { status: 503 },
     )
-  const completion = await completeAsset(db, query, metadata.assetID, objectKey)
   return Response.json({ asset: completion.asset } satisfies AssetResponse, {
     status: completion.created ? 201 : 200,
   })
-}
-
-export async function collectRequestBody(
-  body: ReadableStream<Uint8Array>,
-  max: number,
-  signal: AbortSignal,
-) {
-  const reader = body.getReader()
-  const abort = () => {
-    void reader.cancel(signal.reason).catch(() => {})
-  }
-  signal.addEventListener('abort', abort, { once: true })
-  try {
-    return await collectUpload(reader, max, signal)
-  } finally {
-    signal.removeEventListener('abort', abort)
-    await reader.cancel().catch(() => {})
-    reader.releaseLock()
-  }
 }
 
 /** Bounded buffering trades memory for simple, fully-owned shutdown. Downloads
@@ -153,72 +121,4 @@ function uploadMetadata(request: Request) {
   } catch {
     return null
   }
-}
-/** Reconcile storage before publishing SQL visibility, without legacy writes. */
-async function storeUpload(
-  io: FileHTTP,
-  asset: AssetReference & Readonly<{ bytes: Uint8Array }>,
-  reservation: Readonly<{ object_key: string; ready_at: Date | null }>,
-  signal: AbortSignal,
-) {
-  // Legacy storage is read-only. First reconcile an uncertain historical PUT;
-  // otherwise stage identical bytes at the deterministic writable location.
-  // A failed GET is not proof of absence: never delete or overwrite old bytes.
-  const legacyPending =
-    reservation.ready_at === null && reservation.object_key !== asset.objectKey
-  const confirmedLegacy =
-    legacyPending &&
-    (await confirmStored(
-      io,
-      { ...asset, objectKey: reservation.object_key },
-      signal,
-    ))
-  const objectKey =
-    legacyPending && !confirmedLegacy ? asset.objectKey : reservation.object_key
-  if (reservation.ready_at === null && !confirmedLegacy) {
-    try {
-      await io.objects.put(objectKey, asset.bytes, asset.mimeType, signal)
-    } catch {
-      // PUT may have committed despite a lost receipt (or an exact concurrent
-      // retry won). Read the assigned key below; never blindly delete it.
-    }
-  }
-  const confirmed =
-    confirmedLegacy ||
-    (await confirmStored(io, { ...asset, objectKey }, signal))
-  return confirmed ? objectKey : null
-}
-async function confirmStored(
-  io: FileHTTP,
-  asset: Readonly<{ objectKey: string; byteLength: number; sha256: string }>,
-  signal: AbortSignal,
-) {
-  try {
-    const stored = await io.objects.read(
-      asset.objectKey,
-      io.maxAssetBytes,
-      signal,
-    )
-    return stored.length === asset.byteLength && sha256(stored) === asset.sha256
-  } catch {
-    return false
-  }
-}
-async function collectUpload(
-  reader: ReadableStreamDefaultReader<Uint8Array>,
-  max: number,
-  signal: AbortSignal,
-) {
-  const chunks: Uint8Array[] = []
-  let length = 0
-  signal.throwIfAborted()
-  while (true) {
-    const chunk = await reader.read()
-    signal.throwIfAborted()
-    if (chunk.done) break
-    length += chunk.value.length
-    if (length > max) throw new Error('Upload too large')
-    chunks.push(chunk.value)
-  }
-  return Buffer.concat(chunks, length)
 }

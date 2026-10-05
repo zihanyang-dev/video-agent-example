@@ -350,6 +350,167 @@ esac
             (self.path / "ssh-invoked").exists(), "Failed source context was transferred"
         )
 
+    def test_remote_cancellation_requires_registered_linux_process_identity(self):
+        image = os.environ.get("VID_CHECK_IMAGE", "")
+        self.assertRegex(image, r"^sha256:[0-9a-f]{64}$")
+        controller = (self.root / "scripts/sandbox-check.sh").read_text()
+        remote = controller.split("<<'REMOTE'\n", 1)[1].rsplit("\nREMOTE", 1)[0]
+        cancel = controller.split("<<'CANCEL' || failed=1\n", 1)[1].split(
+            "\nCANCEL", 1
+        )[0]
+        # These are the actual remote bodies, executed on Linux with only native
+        # work replaced. No VM, SDK, network, or unrelated process is involved.
+        harness = (
+            """set -eu
+export HOME=/tmp/identity-test FIXTURE=/tmp/identity-test
+mkdir -p "$HOME/e2b" "$HOME/bin"
+export PATH="$HOME/bin:$PATH"
+cat > "$HOME/remote.sh" <<'REMOTE_BODY'
+"""
+            + remote
+            + "\nREMOTE_BODY\ncat > \"$HOME/cancel.sh\" <<'CANCEL_BODY'\n"
+            + cancel
+            + """
+CANCEL_BODY
+cat > "$HOME/bin/sudo" <<'CLI'
+#!/bin/sh
+exec "$@"
+CLI
+cat > "$HOME/bin/timeout" <<'CLI'
+#!/bin/sh
+while [ "${1#--}" != "$1" ]; do shift; done
+shift
+exec "$@"
+CLI
+cat > "$HOME/bin/flock" <<'CLI'
+#!/bin/sh
+# Stop the registered shell before any native resource work.
+kill -STOP "$PPID"
+CLI
+cat > "$HOME/bin/docker" <<'CLI'
+#!/bin/sh
+case "$1" in
+cp) echo fixture-key > "$3" ;;
+inspect) echo owned-id owned-runner ;;
+start) echo attached > "$HOME/attached"; exec sleep 60 ;;
+rm) echo removed > "$HOME/removed" ;;
+esac
+CLI
+cat > "$HOME/bin/ip" <<'CLI'
+#!/bin/sh
+exit 0
+CLI
+cp "$HOME/bin/ip" "$HOME/bin/iptables"
+chmod +x "$HOME/bin/"*
+# A comm containing both spaces and parentheses defeats field-22 awk parsing.
+cp /bin/sleep "$HOME/owned ) test("
+"$HOME/owned ) test(" 60 &
+other=$!
+trap 'kill -KILL "$other" 2>/dev/null || :; wait "$other" 2>/dev/null || :' EXIT
+boot=$(cat /proc/sys/kernel/random/boot_id)
+stat=$(cat "/proc/$other/stat")
+fields=${stat##*) }
+set -f
+set -- $fields
+shift 19
+start=$1
+for mismatch in boot start missing; do
+  control="$HOME/e2b/.owned-runner"
+  mkdir "$control"
+  echo "$other" > "$control/pid"
+  if [ "$mismatch" != missing ]; then
+    echo "$boot" > "$control/boot-id"
+    echo "$start" > "$control/start-ticks"
+    if [ "$mismatch" = boot ]; then echo wrong-boot > "$control/boot-id"; fi
+    if [ "$mismatch" = start ]; then echo 0 > "$control/start-ticks"; fi
+  fi
+  rc=0
+  sh "$HOME/cancel.sh" owned-runner || rc=$?
+  [ "$rc" -ne 0 ] || { echo "accepted $mismatch identity" >&2; exit 1; }
+  kill -0 "$other" || { echo "signalled unrelated owned process ($mismatch)" >&2; exit 1; }
+  [ -d "$control" ]
+  [ ! -f "$HOME/removed" ]
+  rm -rf "$control"
+done
+# Capture real registration with an arbitrary comm, then force-kill its shell.
+# Ensure its start tick differs from the unrelated process even on fast hosts.
+sleep 0.1
+cp /bin/sh "$HOME/remote ) sh("
+"$HOME/remote ) sh(" "$HOME/remote.sh" image owned-runner &
+remote=$!
+control="$HOME/e2b/.owned-runner"
+i=0
+while ! grep -q '^State:.*T' "/proc/$remote/status"; do
+  i=$((i + 1)); [ "$i" -lt 100 ]; sleep 0.05
+done
+[ "$(cat "$control/pid")" = "$remote" ]
+[ "$(cat "$control/boot-id")" = "$boot" ]
+stat=$(cat "/proc/$remote/stat")
+fields=${stat##*) }
+set -- $fields
+shift 19
+[ "$(cat "$control/start-ticks")" = "$1" ]
+kill -KILL "$remote"
+wait "$remote" 2>/dev/null || :
+echo "$other" > "$control/pid"
+rc=0
+sh "$HOME/cancel.sh" owned-runner || rc=$?
+[ "$rc" -ne 0 ]
+kill -0 "$other"
+rm -rf "$control"
+# A matching registration must still cancel and settle the real remote shell.
+echo '#!/bin/sh' > "$HOME/bin/flock"
+"$HOME/remote ) sh(" "$HOME/remote.sh" image owned-runner &
+remote=$!
+i=0
+while [ ! -f "$HOME/attached" ]; do
+  i=$((i + 1)); [ "$i" -lt 100 ]; sleep 0.05
+done
+sh "$HOME/cancel.sh" owned-runner
+rc=0
+wait "$remote" || rc=$?
+[ "$rc" -eq 143 ]
+[ ! -d "$control" ]
+[ -f "$HOME/removed" ]
+kill -0 "$other"
+"""
+        )
+        cidfile = self.path / "identity-container-id"
+
+        def remove_fixture_container():
+            if cidfile.exists():
+                owned_id = cidfile.read_text().strip()
+                self.assertRegex(owned_id, r"^[0-9a-f]{64}$")
+                subprocess.run(
+                    ["docker", "rm", "-fv", owned_id],
+                    check=False,
+                    capture_output=True,
+                    timeout=10,
+                )
+
+        self.addCleanup(remove_fixture_container)
+        result = subprocess.run(
+            [
+                "docker",
+                "run",
+                "--rm",
+                "--cidfile",
+                str(cidfile),
+                "--network",
+                "none",
+                "-i",
+                image,
+                "sh",
+                "-s",
+            ],
+            input=harness,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def remote_fixture(self):
         # Run only the remote shell lifecycle with CLI fault fixtures, never a VM.
         remote = (
@@ -362,6 +523,18 @@ esac
         script.write_text(remote)
         (self.path / "e2b").mkdir()
         self.env["HOME"] = str(self.path)
+        if not Path("/proc/self/stat").exists():
+            # These older CLI-fault tests run on macOS too. Supply proc input
+            # only here; the identity regression above uses real Linux procfs.
+            self.cli(
+                "cat",
+                """case "$1" in
+/proc/sys/kernel/random/boot_id) echo fixture-boot ;;
+/proc/*/stat) echo '1 (fixture) S 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1' ;;
+*) exec /bin/cat "$@" ;;
+esac
+""",
+            )
         self.cli("sudo", 'exec "$@"\n')
         self.cli(
             "timeout", 'while [ "${1#--}" != "$1" ]; do shift; done; shift; exec "$@"\n'

@@ -6,7 +6,7 @@ import { sql } from 'kysely'
 import {
   executeRun,
   type ExecutionLease,
-  type RunSandbox,
+  type SandboxSessionPort,
 } from '../../apps/agent/src/execute-run'
 import { assignFileTools } from '../../apps/agent/src/harness/files'
 import { createPiHarness } from '../../apps/agent/src/harness/pi'
@@ -19,6 +19,7 @@ import {
   storageSettings,
 } from './authentication-fixture'
 import { openTestDatabase } from './database-fixture'
+import { postgresProxy, eventually } from './postgres-proxy-fixture'
 
 function workerEnv(baseURL = 'http://unused/v1') {
   return readWorkerEnv({
@@ -355,6 +356,198 @@ test('worker process waits for SQL cancellation before disconnecting and reports
   )
 })
 
+test('established PostgreSQL response blackhole settles owned SQL and worker shutdown, closing the physical socket', async () => {
+  const env = workerEnv()
+  const proxy = await postgresProxy(env.DATABASE_URL)
+  let storageClosed = false
+  const objects = {
+    read: async () => new Uint8Array(),
+    put: async () => ({ byteLength: 0, sha256: '0'.repeat(64) }),
+    remove: async () => {},
+    list: async () => ({ objects: [], continuationToken: undefined }),
+    close: () => {
+      storageClosed = true
+    },
+  }
+  const worker = new WorkerProcess(
+    { ...env, DATABASE_URL: proxy.databaseURL, IO_TIMEOUT_MS: 300 },
+    undefined,
+    objects,
+  )
+  let failure: unknown
+  let settled = false
+  let stopping: Promise<void> | undefined
+  try {
+    await worker.connect()
+    await sql`select 1`.execute(worker.db)
+    expect(proxy.connections).toBe(1)
+    proxy.blackhole()
+    const before = proxy.requests
+    const querying = sql`select 2`.execute(worker.db).then(() => {})
+    worker.own(querying)
+    await eventually(() => proxy.requests > before)
+    expect(proxy.requests).toBeGreaterThan(before)
+    const started = Date.now()
+    stopping = worker
+      .stop()
+      .catch((error: unknown) => {
+        failure = error
+      })
+      .finally(() => {
+        settled = true
+      })
+    await eventually(() => settled, 1500)
+    expect(settled).toBe(true)
+    expect(Date.now() - started).toBeLessThan(1500)
+    expect(failure).toBeInstanceOf(AggregateError)
+    expect(storageClosed).toBe(true)
+    expect(worker.commands.isOpen).toBe(false)
+    expect(worker.blockingReader.isOpen).toBe(false)
+    await eventually(() => proxy.closedClients === 1)
+    expect(proxy.closedClients).toBe(1)
+  } finally {
+    // RED cleanup closes only this fixture's sockets, then awaits the real owner.
+    await proxy.close()
+    await stopping
+    await worker.stop().catch(() => {})
+  }
+}, 10000)
+
+test('server process settles HTTP and background SQL after an established PostgreSQL response blackhole', async () => {
+  const env = serverTestEnv()
+  const proxy = await postgresProxy(env.DATABASE_URL)
+  const identity = openTestDatabase()
+  const login = await signedTestIdentity(identity.db)
+  await identity.close()
+  const server = await startServer(
+    { ...env, DATABASE_URL: proxy.databaseURL, IO_TIMEOUT_MS: 300 },
+    { port: 0 },
+  )
+  let settled = false
+  let failure: unknown
+  let stopping: Promise<void> | undefined
+  let request: Promise<Response | undefined> | undefined
+  try {
+    const warm = await fetch(`${server.url}/api/session`, {
+      headers: login.headers,
+    })
+    expect(warm.status).toBe(200)
+    expect(proxy.connections).toBeGreaterThan(0)
+    proxy.blackhole()
+    const before = proxy.requests
+    request = fetch(`${server.url}/api/session`, {
+      headers: login.headers,
+    }).catch(() => undefined)
+    await eventually(() => proxy.requests > before)
+    expect(proxy.requests).toBeGreaterThan(before)
+    const started = Date.now()
+    stopping = server
+      .stop()
+      .catch((error: unknown) => {
+        failure = error
+      })
+      .finally(() => {
+        settled = true
+      })
+    await eventually(() => settled, 1500)
+    expect(settled).toBe(true)
+    expect(Date.now() - started).toBeLessThan(1500)
+    expect(failure).toBeInstanceOf(AggregateError)
+    await eventually(() => proxy.closedClients === proxy.connections)
+    expect(proxy.closedClients).toBe(proxy.connections)
+  } finally {
+    await proxy.close()
+    await stopping
+    await request
+    await server.stop().catch(() => {})
+  }
+}, 10000)
+
+test('blackholed worker database stops an active turn and settles pause without allocation or inference replay', async () => {
+  const env = workerEnv()
+  const proxy = await postgresProxy(env.DATABASE_URL)
+  const server = await startServer(serverTestEnv(), { port: 0 })
+  const turning = gate()
+  let turns = 0
+  let allocations = 0
+  let pauses = 0
+  let aborted = false
+  const worker = await startWorker(
+    {
+      ...env,
+      DATABASE_URL: proxy.databaseURL,
+      IO_TIMEOUT_MS: 300,
+      CONCURRENCY: 1,
+    },
+    {
+      harness: {
+        async turn({ signal }) {
+          turns++
+          proxy.blackhole()
+          turning.release()
+          await new Promise<void>((resolve) => {
+            signal.addEventListener('abort', () => resolve(), { once: true })
+            if (signal.aborted) resolve()
+          })
+          aborted = true
+          signal.throwIfAborted()
+          throw new Error('Expected abort')
+        },
+      },
+      openSandbox: async () => {
+        allocations++
+        return sandbox(async () => {
+          pauses++
+        })
+      },
+    },
+  )
+  let settled = false
+  let failure: unknown
+  const done = worker.done
+    .catch((error: unknown) => {
+      failure = error
+    })
+    .finally(() => {
+      settled = true
+    })
+  try {
+    const threadID = await submit(server.url)
+    await turning.promise
+    const started = Date.now()
+    await eventually(() => settled, 3000)
+    expect(settled).toBe(true)
+    expect(Date.now() - started).toBeLessThan(3000)
+    expect(failure).toBeInstanceOf(AggregateError)
+    expect(aborted).toBe(true)
+    expect(pauses).toBe(1)
+    expect(turns).toBe(1)
+    expect(allocations).toBe(1)
+    await eventually(() => proxy.closedClients === proxy.connections)
+    expect(proxy.closedClients).toBe(proxy.connections)
+    proxy.restore()
+    await Bun.sleep(50)
+    expect(turns).toBe(1)
+    const observer = openTestDatabase()
+    try {
+      const run = await observer.db
+        .selectFrom('execution.runs')
+        .select('status')
+        .where('thread_id', '=', threadID)
+        .executeTakeFirstOrThrow()
+      expect(run.status).not.toBe('completed')
+    } finally {
+      await observer.close()
+    }
+    await worker.stop().catch(() => {})
+  } finally {
+    await proxy.close()
+    await worker.stop().catch(() => {})
+    await done
+    await server.stop()
+  }
+}, 15000)
+
 test('worker storage closes only after an owned slow tool/pause task settles, including startup failure', async () => {
   const env = workerEnv()
   let released!: () => void
@@ -420,7 +613,7 @@ test('process S3 closes after actual slow file export and native pause settlemen
     fence: 1,
     ownerID: 'test',
   }
-  const assigned: RunSandbox = {
+  const assigned: SandboxSessionPort = {
     nativeRef: { provider: 'e2b', id: 'known-native' },
     renewTimeout: async () => {},
     files: {

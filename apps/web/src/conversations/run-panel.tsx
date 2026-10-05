@@ -1,8 +1,12 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import type { ActiveRun, PublicMessage } from '@vid/contract/http'
+import type {
+  ActiveRun,
+  PublicMessage,
+  runCancellationSchema,
+} from '@vid/contract/http'
 import { errorMessage, apiForUser } from '../http'
 import { cancelRun } from '@vid/contract/client'
-import { pendingIntents } from './pending-intents'
+import { pendingIntents, pendingIntentRecoveryMessage } from './pending-intents'
 import { messagesQuery, type ThreadScope } from './queries'
 import { useObservation } from './use-observation'
 import { Transcript } from './transcript'
@@ -54,38 +58,31 @@ export function RunPanel({
 
 function CancelRun({ scope, run }: { scope: ThreadScope; run: ActiveRun }) {
   const client = useQueryClient()
-  const intents = pendingIntents(scope.userID)
   const cancel = useMutation({
     meta: { userID: scope.userID },
-    mutationFn: async () => {
-      await cancelRun({
-        client: apiForUser(scope.userID),
-        path: { threadID: scope.threadID, runID: run.runID },
-        body: intents.cancellation({
-          threadID: scope.threadID,
-          runID: run.runID,
-        }),
-        throwOnError: true,
-      })
-    },
+    mutationFn: () => requestRunCancellation(scope, run.runID),
   })
   const requestCancellation = () =>
     cancel.mutate(undefined, {
-      onSuccess: () => {
+      onSuccess: (receipt) => {
+        if (receipt.storageError) return
         void client.invalidateQueries(messagesQuery(scope))
       },
     })
+  const storageError = cancel.data?.storageError ?? ''
+  const isAccepted = cancel.isSuccess && !storageError
   if (run.status === 'stopping')
     return <p role="status">Waiting for actual stop…</p>
   return (
     <div>
       <button
-        disabled={cancel.isPending || cancel.isSuccess}
+        disabled={cancel.isPending || isAccepted}
         onClick={requestCancellation}
       >
         {cancel.isError ? 'Retry cancellation' : 'Cancel run'}
       </button>
-      {cancel.isSuccess && (
+      {storageError && <p role="alert">{storageError}</p>}
+      {isAccepted && (
         <p role="status">Cancellation accepted. Waiting for actual stop…</p>
       )}
       {cancel.isError && (
@@ -95,4 +92,33 @@ function CancelRun({ scope, run }: { scope: ThreadScope; run: ActiveRun }) {
       )}
     </div>
   )
+}
+
+export async function requestRunCancellation(
+  scope: ThreadScope,
+  runID: string,
+) {
+  let frozen: ReturnType<typeof runCancellationSchema.parse>
+  try {
+    frozen = pendingIntents(scope.userID).cancellation({
+      threadID: scope.threadID,
+      runID,
+    })
+  } catch (error) {
+    // Only this local persistence boundary may recognize its owned recovery
+    // message. HTTP and arbitrary errors still use private-safe formatting.
+    return {
+      storageError:
+        error instanceof Error && error.message === pendingIntentRecoveryMessage
+          ? pendingIntentRecoveryMessage
+          : 'Cancellation could not be saved in this browser. Free browser storage before retrying.',
+    }
+  }
+  await cancelRun({
+    client: apiForUser(scope.userID),
+    path: { threadID: scope.threadID, runID },
+    body: frozen,
+    throwOnError: true,
+  })
+  return { storageError: '' }
 }

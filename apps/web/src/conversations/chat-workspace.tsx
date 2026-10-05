@@ -1,4 +1,3 @@
-import { useState } from 'react'
 import { ChatAssets } from '../assets/chat-assets'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import type { PublicThread } from '@vid/contract/http'
@@ -8,7 +7,6 @@ import { Transcript } from './transcript'
 import { Composer } from './composer'
 import { ChatSettings } from './chat-settings'
 import { RunPanel } from './run-panel'
-import { useMessageSubmission } from './use-message-submission'
 
 export function ChatWorkspace({ scope }: { scope: ThreadScope }) {
   const client = useQueryClient()
@@ -53,26 +51,23 @@ function ChatMessages({
   thread: PublicThread
 }) {
   const snapshot = useQuery(messagesQuery(scope))
-  const submission = useMessageSubmission(scope)
-  const [selected, setSelected] = useState<string[]>([])
   if (snapshot.isPending)
     return <p role="status">Loading messages and active runs…</p>
   if (snapshot.isError)
     return <p role="alert">{errorMessage(snapshot.error)}</p>
   const { messages, activeRuns, failedRuns } = snapshot.data
-  const canSend =
-    activeRuns.length === 0 && !submission.hasPending && !submission.isBusy
   return (
     <>
       <Transcript messages={messages} failedRuns={failedRuns} />
-      <ChatAssets
-        key={thread.archivedAt ?? 'active'}
-        scope={scope}
-        canSelect={canSend}
-        selected={selected}
-        select={setSelected}
-        archived={thread.archivedAt !== null}
-      />
+      {thread.archivedAt !== null && (
+        <ChatAssets
+          scope={scope}
+          canSelect={false}
+          selected={[]}
+          select={() => {}}
+          archived
+        />
+      )}
       {activeRuns.map((run) => (
         <RunPanel
           key={run.runID}
@@ -83,19 +78,8 @@ function ChatMessages({
         />
       ))}
       {thread.archivedAt === null && (
-        <Composer
-          canSend={canSend}
-          isBusy={submission.isBusy}
-          hasPending={submission.hasPending}
-          hasAssets={selected.length > 0}
-          send={async (text) => {
-            await submission.send(text, selected)
-            setSelected([])
-          }}
-          retry={submission.retry}
-        />
+        <Composer scope={scope} canSend={activeRuns.length === 0} />
       )}
-      {submission.error && <p role="alert">{submission.error}</p>}
     </>
   )
 }

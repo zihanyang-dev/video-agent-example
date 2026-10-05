@@ -1,10 +1,11 @@
-import { messageAssets, publicAsset } from './assets'
+import { publicAsset } from './assets'
 import type { DB } from '@vid/database/types'
 import { executionEventSchema } from '@vid/contract/execution'
 import type {
   PublicThread,
   ActiveRun,
   MessagesResponse,
+  PublicAsset,
 } from '@vid/contract/http'
 import { sql, type Kysely } from 'kysely'
 import type { OwnedThread } from '../conversation/submission'
@@ -117,17 +118,32 @@ export async function snapshotOwnedMessages(
         .orderBy('created_at')
         .orderBy('message_id')
         .execute()
-      const messages = await Promise.all(
-        rows.map(async (message) => ({
-          messageID: message.message_id,
-          role: message.role,
-          text: message.text,
-          createdAt: message.created_at.toISOString(),
-          assets: (await messageAssets(tx, message.message_id)).map(
-            publicAsset,
-          ),
-        })),
-      )
+      const links = await tx
+        .selectFrom('product.message_assets as link')
+        .innerJoin('product.assets as asset', (join) =>
+          join
+            .onRef('asset.asset_id', '=', 'link.asset_id')
+            .onRef('asset.thread_id', '=', 'link.thread_id'),
+        )
+        .selectAll('asset')
+        .select('link.message_id as linked_message_id')
+        .where('link.thread_id', '=', query.threadID)
+        .orderBy('link.message_id')
+        .orderBy('link.position')
+        .execute()
+      const assetsByMessage = new Map<string, PublicAsset[]>()
+      for (const link of links) {
+        const assets = assetsByMessage.get(link.linked_message_id) ?? []
+        assets.push(publicAsset(link))
+        assetsByMessage.set(link.linked_message_id, assets)
+      }
+      const messages = rows.map((message) => ({
+        messageID: message.message_id,
+        role: message.role,
+        text: message.text,
+        createdAt: message.created_at.toISOString(),
+        assets: assetsByMessage.get(message.message_id) ?? [],
+      }))
       // Terminals are canonical on receipt, even before ordinal gaps permit SSE
       // publication. Read the existing ledger, not observer or worker state.
       const failures = await tx
@@ -146,7 +162,7 @@ export async function snapshotOwnedMessages(
         .where('start.thread_id', '=', query.threadID)
         .where('input.role', '=', 'user')
         .where(sql<string>`start.command ->> 'kind'`, '=', 'start')
-        .where(sql<string>`start.command ->> 'version'`, '=', '1')
+        .where(sql<boolean>`start.command -> 'version' = '1'::jsonb`)
         .where(
           sql<boolean>`lower(start.command ->> 'threadID') = start.thread_id::text`,
         )
@@ -194,9 +210,16 @@ export async function readActiveRuns(
     .selectFrom('product.command_outbox as start')
     .select(['start.run_id', 'start.message_id'])
     .select(
-      sql<boolean>`exists (select 1 from product.command_outbox c where c.run_id = start.run_id and c.thread_id = start.thread_id and c.command ->> 'kind' = 'cancel')`.as(
-        'is_stopping',
-      ),
+      sql<boolean>`exists (
+        select 1 from product.command_outbox c
+        where c.run_id = start.run_id and c.thread_id = start.thread_id
+          and c.message_id is null
+          and c.command ->> 'kind' = 'cancel'
+          and c.command -> 'version' = '1'::jsonb
+          and lower(c.command ->> 'threadID') = c.thread_id::text
+          and lower(c.command ->> 'runID') = c.run_id::text
+          and lower(c.command ->> 'commandID') = c.command_id::text
+      )`.as('is_stopping'),
     )
     .select(
       sql<boolean>`exists (select 1 from product.execution_events e where e.run_id = start.run_id and e.thread_id = start.thread_id and e.payload ->> 'kind' = 'run-started')`.as(
@@ -205,6 +228,17 @@ export async function readActiveRuns(
     )
     .where('start.thread_id', '=', threadID)
     .where(sql<string>`start.command ->> 'kind'`, '=', 'start')
+    .where(sql<boolean>`start.command -> 'version' = '1'::jsonb`)
+    .where(
+      sql<boolean>`lower(start.command ->> 'threadID') = start.thread_id::text`,
+    )
+    .where(sql<boolean>`lower(start.command ->> 'runID') = start.run_id::text`)
+    .where(
+      sql<boolean>`lower(start.command ->> 'commandID') = start.command_id::text`,
+    )
+    .where(
+      sql<boolean>`lower(start.command #>> '{input,messageID}') = start.message_id::text`,
+    )
     .where(
       sql<boolean>`not exists (select 1 from product.execution_events e where e.run_id = start.run_id and e.thread_id = start.thread_id and e.payload ->> 'kind' in ('run-completed','run-cancelled','run-failed'))`,
     )

@@ -3,6 +3,7 @@ import { HttpAgent } from '@ag-ui/client'
 import { useQueryClient } from '@tanstack/react-query'
 import { HTTPError, errorMessage } from '../http'
 import { messagesQuery, type ThreadScope } from './queries'
+import { publishRevokedSession } from '../identity/session-cache'
 import { runEventsURL } from './run-endpoint'
 import { emptyRunView, reduceRunEvent } from './run-view'
 
@@ -65,7 +66,7 @@ export function useObservation(
         if (!isCurrent) return
         setStatus(errorMessage(error))
         if (error instanceof HTTPError && error.status === 401)
-          client.setQueryData(['session'], { user: null })
+          publishRevokedSession(client, scope.userID)
       }
     }
     void observe()

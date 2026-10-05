@@ -250,46 +250,60 @@ class PublicEventSubscription {
   }
 }
 
+type ReplayState = Readonly<{
+  state: PublicRunState
+  cursor: string
+  terminalFact: Fact | undefined
+}>
+
 async function reconstruct(
   db: Kysely<DB>,
   query: Observation,
   state: PublicRunState,
 ) {
-  let cursor = '0'
-  let terminalFact: Fact | undefined
-  while (BigInt(cursor) < BigInt(query.after)) {
+  let replay: ReplayState = { state, cursor: '0', terminalFact: undefined }
+  const boundary = BigInt(query.after)
+  while (BigInt(replay.cursor) < boundary) {
     if (query.requestSignal.aborted || query.processSignal.aborted)
-      return { state, terminalFact }
-    if (!(await query.authorize())) return { state, terminalFact }
+      return replay
+    if (!(await query.authorize())) return replay
     const facts = await readPublicEvents(db, {
-      ...query,
-      after: cursor,
+      ownerID: query.ownerID,
+      threadID: query.threadID,
+      after: replay.cursor,
       limit: 100,
     })
-    if (!facts?.length) return { state, terminalFact }
-    terminalFact = priorTerminal(facts, query) ?? terminalFact
-    const prior = applyPriorFacts(facts, query, state, cursor)
-    cursor = prior.cursor
-    state = prior.state
-    if (crossedObservationCursor(facts, query.after))
-      return { state, terminalFact }
+    if (query.requestSignal.aborted || query.processSignal.aborted)
+      return replay
+    if (!(await query.authorize())) return replay
+    if (!facts?.length) return replay
+    replay = foldReplayBatch(facts, query.runID, boundary, replay)
   }
-  return { state, terminalFact }
+  return replay
 }
 
-function applyPriorFacts(
-  facts: Fact[],
-  query: Observation,
-  state: PublicRunState,
-  cursor: string,
-) {
+function foldReplayBatch(
+  facts: readonly Fact[],
+  runID: string,
+  boundary: bigint,
+  prior: ReplayState,
+): ReplayState {
+  let { state, cursor, terminalFact } = prior
   for (const fact of facts) {
-    if (BigInt(fact.cursor) > BigInt(query.after)) break
+    // Scanning can cross the requested cursor, but later facts cannot change
+    // reconstructed state. The outer reader stops at this scanned boundary.
     cursor = fact.cursor
-    if (fact.event.runID === query.runID)
-      state = mapPublicRunEvent(state, fact.event).state
+    if (BigInt(cursor) > boundary) break
+    if (fact.event.runID !== runID) continue
+    state = mapPublicRunEvent(state, fact.event).state
+    if (
+      fact.event.kind === 'run-completed' ||
+      fact.event.kind === 'run-cancelled' ||
+      fact.event.kind === 'run-failed'
+    )
+      terminalFact ??= fact
   }
-  return { cursor, state }
+  return { state, cursor, terminalFact }
 }
 
 function encodeFact(cursor: string, frames: Event[], encoder: EventEncoder) {
@@ -317,19 +331,4 @@ function waitForPoll(ms: number, signal: AbortSignal): Promise<void> {
     const timer = setTimeout(finish, ms)
     signal.addEventListener('abort', finish, { once: true })
   })
-}
-
-function priorTerminal(facts: Fact[], query: Observation) {
-  return facts.find(
-    (fact) =>
-      BigInt(fact.cursor) <= BigInt(query.after) &&
-      fact.event.runID === query.runID &&
-      ['run-completed', 'run-cancelled', 'run-failed'].includes(
-        fact.event.kind,
-      ),
-  )
-}
-
-function crossedObservationCursor(facts: Fact[], after: string) {
-  return BigInt(facts.at(-1)!.cursor) >= BigInt(after)
 }

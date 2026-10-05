@@ -2,7 +2,7 @@ import { boundedBytes } from '@vid/object-storage'
 import { CommandExitError, E2B, type Sandbox, type CommandHandle } from 'e2b'
 import type {
   ExecutionLease,
-  RunSandbox,
+  SandboxSessionPort,
   SandboxTools,
   SandboxFiles,
 } from '../execute-run'
@@ -21,7 +21,7 @@ export type E2BSandboxOptions = Readonly<{
 export async function openE2BSandbox(
   options: E2BSandboxOptions,
   signal: AbortSignal,
-): Promise<RunSandbox> {
+): Promise<SandboxSessionPort> {
   signal.throwIfAborted()
   const client = new E2B({
     apiUrl: options.apiURL,
@@ -60,7 +60,9 @@ export async function openE2BSandbox(
 /** Foreground RPC promises settle before native filesystem-only pause. Unknown
  * RPC/pause outcomes still quarantine: pause is not external job cancellation.
  * SDK command kill only addresses a PID, not its process group. */
-class E2BSandboxSession implements RunSandbox, SandboxTools, SandboxFiles {
+class E2BSandboxSession
+  implements SandboxSessionPort, SandboxTools, SandboxFiles
+{
   readonly tools: SandboxTools = this
   readonly files: SandboxFiles = this
   readonly nativeRef

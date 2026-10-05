@@ -1,10 +1,13 @@
 import { expect, test } from 'bun:test'
+import { assignFileTools } from './harness/files'
+import { sha256, type ObjectStore } from '@vid/object-storage'
+import type { AssetReference } from '@vid/contract/execution'
 import {
   executeRun,
   type AgentHarness,
   type ExecutionLease,
   type ExecutionWrites,
-  type RunSandbox,
+  type SandboxSessionPort,
 } from './execute-run'
 
 function deferred<T>() {
@@ -60,7 +63,7 @@ function fixture() {
   const shutdown = new AbortController()
   const started = deferred<Parameters<AgentHarness['turn']>[0]>()
   const end = deferred<Awaited<ReturnType<AgentHarness['turn']>>>()
-  const sandbox: RunSandbox = {
+  const sandbox: SandboxSessionPort = {
     nativeRef: { provider: 'e2b', id: 'fixture-native' },
     renewTimeout: async () => {},
     files: {
@@ -101,7 +104,7 @@ function fixture() {
 
 test('allocates the lease-assigned workspace without passing provider configuration through execution', async () => {
   const f = fixture()
-  const workspaces = new Map<unknown, RunSandbox>()
+  const workspaces = new Map<unknown, SandboxSessionPort>()
   f.sandbox.tools.read = async () => 'assigned workspace contents'
   workspaces.set(lease, f.sandbox)
   f.deps.openSandbox = async (runID, signal) => {
@@ -597,6 +600,86 @@ for (const terminal of ['complete', 'cancel', 'fail'] as const) {
     expect(f.events).toEqual([
       ...(terminal === 'cancel' ? [] : ['closed']),
       { reason: 'execution-error' },
+    ])
+  })
+}
+
+for (const terminal of ['complete', 'cancel', 'unknown-upload'] as const) {
+  test(`${terminal} publishes prepared assets only with a completed private turn`, async () => {
+    const f = fixture()
+    const bytes = new Uint8Array([1, 2, 3])
+    const uploaded = new Map<string, Uint8Array>()
+    const objects: ObjectStore = {
+      read: async () => bytes,
+      put: async (key, content) => {
+        uploaded.set(key, content)
+        if (terminal === 'unknown-upload') throw new Error('Upload ACK lost')
+        return { byteLength: content.byteLength, sha256: sha256(content) }
+      },
+      close: () => {},
+    }
+    f.sandbox.files.readBytes = async () => bytes
+    const deps = {
+      ...f.deps,
+      fileTools: assignFileTools(objects, {
+        maxBytes: 10,
+        maxFiles: 1,
+        timeoutMs: 1000,
+      }),
+    }
+    let exported: AssetReference | undefined
+    deps.harness.turn = async ({ fileTools, signal }) => {
+      if (fileTools === undefined) throw new Error('Missing file authority')
+      exported = await fileTools
+        .exportFile({
+          path: '/chosen',
+          name: 'output.bin',
+          mimeType: 'application/octet-stream',
+          signal,
+        })
+        .catch(() => undefined)
+      if (terminal === 'cancel') {
+        f.deps.writes.renew = async () => 'cancel'
+        await Bun.sleep(10)
+      }
+      signal.throwIfAborted()
+      return { text: 'delivered', history: ['private'] }
+    }
+    expect(await executeRun(lease, deps, f.options)).toBe(
+      terminal === 'complete'
+        ? 'completed'
+        : terminal === 'cancel'
+          ? 'cancelled'
+          : 'failed',
+    )
+    expect(uploaded.size).toBe(1)
+    expect(f.events).toEqual([
+      'closed',
+      terminal === 'complete'
+        ? { text: 'delivered', history: ['private'], assets: [exported] }
+        : terminal === 'cancel'
+          ? 'cancelled'
+          : { reason: 'execution-error' },
+    ])
+  })
+}
+
+for (const authority of ['cancel', 'lost'] as const) {
+  test(`rejected sandbox identity reauthorizes ${authority} without beginning inference`, async () => {
+    const f = fixture()
+    f.options.pollMs = 60_000
+    let renewals = 0
+    f.deps.writes.renew = async () => (++renewals === 1 ? 'renewed' : authority)
+    f.deps.writes.saveSandbox = async () => false
+    f.deps.harness.turn = async () => {
+      throw new Error('Inference must not start')
+    }
+    expect(await executeRun(lease, f.deps, f.options)).toBe(
+      authority === 'cancel' ? 'cancelled' : 'lost',
+    )
+    expect(f.events).toEqual([
+      'closed',
+      ...(authority === 'cancel' ? ['cancelled'] : []),
     ])
   })
 }

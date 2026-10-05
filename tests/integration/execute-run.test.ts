@@ -19,7 +19,7 @@ import {
   type AgentHarness,
   type ExecutionLease,
   type ExecutionWrites,
-  type RunSandbox,
+  type SandboxSessionPort,
 } from '../../apps/agent/src/execute-run'
 import { openTestDatabase } from './database-fixture'
 
@@ -58,7 +58,7 @@ function pipeline(turnError: boolean) {
   const end = deferred<void>()
   const closing = deferred<void>()
   const closed = deferred<void>()
-  const sandbox: RunSandbox = {
+  const sandbox: SandboxSessionPort = {
     nativeRef: { provider: 'e2b', id: 'fixture-native' },
     renewTimeout: async () => {},
     files: {

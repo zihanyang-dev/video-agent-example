@@ -45,7 +45,8 @@ export function apiForUser(userID = '') {
           return await fetchSafe(new Request(request, { signal }))
         } finally {
           controllers.delete(controller)
-          if (controllers.size === 0) active.delete(userID)
+          if (controllers.size === 0 && active.get(userID) === controllers)
+            active.delete(userID)
         }
       },
       { preconnect: globalThis.fetch.preconnect },

@@ -18,119 +18,106 @@ export function mapPublicRunEvent(
 } {
   const messages = new Map(state.messages)
   const frames: Event[] = []
-  const emit = (frame: Event) => {
+  if (!state.started)
     frames.push({
+      type: EventType.RUN_STARTED,
+      threadId: fact.threadID,
+      runId: fact.runID,
+    })
+
+  let terminal = state.terminal
+  switch (fact.kind) {
+    case 'run-started':
+      break
+    case 'assistant-text':
+      frames.push(...textFrames(messages, fact))
+      messages.set(
+        fact.messageID,
+        (messages.get(fact.messageID) ?? '') + fact.delta,
+      )
+      break
+    case 'run-completed': {
+      frames.push(...textFrames(messages, fact))
+      messages.set(fact.messageID, fact.text)
+      frames.push(
+        { type: EventType.TEXT_MESSAGE_END, messageId: fact.messageID },
+        {
+          type: EventType.RUN_FINISHED,
+          threadId: fact.threadID,
+          runId: fact.runID,
+          outcome: { type: 'success' },
+        },
+      )
+      terminal = true
+      break
+    }
+    case 'run-cancelled':
+    case 'run-failed':
+      for (const messageId of messages.keys())
+        frames.push({ type: EventType.TEXT_MESSAGE_END, messageId })
+      frames.push(
+        fact.kind === 'run-cancelled'
+          ? {
+              type: EventType.RUN_FINISHED,
+              threadId: fact.threadID,
+              runId: fact.runID,
+              outcome: { type: 'cancelled' },
+            }
+          : {
+              type: EventType.RUN_ERROR,
+              code: fact.reason,
+              message: failureMessage(fact.reason),
+            },
+      )
+      terminal = true
+      break
+    default:
+      assertNever(fact)
+  }
+
+  return {
+    state: { started: true, terminal, messages },
+    frames: frames.map((frame) => ({
       ...frame,
       metadata: {
         mappingVersion: 'ag-ui-1.0.1-v1',
         eventID: `${fact.eventID}:${frame.type}:${'messageId' in frame ? frame.messageId : ''}`,
         factID: fact.eventID,
       },
+    })),
+  }
+}
+
+function textFrames(
+  messages: ReadonlyMap<string, string>,
+  fact: Extract<ExecutionEvent, { kind: 'assistant-text' | 'run-completed' }>,
+): Event[] {
+  const frames: Event[] = []
+  const previous = messages.get(fact.messageID)
+  if (previous === undefined)
+    frames.push({
+      type: EventType.TEXT_MESSAGE_START,
+      messageId: fact.messageID,
+      role: 'assistant',
     })
-  }
-  if (!state.started)
-    emit({
-      type: EventType.RUN_STARTED,
-      threadId: fact.threadID,
-      runId: fact.runID,
-    })
 
-  const terminal = appendFact({ messages, emit }, fact)
-  return {
-    state: { started: true, terminal: state.terminal || terminal, messages },
-    frames,
-  }
-}
-
-type FrameEmission = Readonly<{
-  messages: Map<string, string>
-  emit: (frame: Event) => void
-}>
-
-function beginMessage(emission: FrameEmission, messageID: string) {
-  if (emission.messages.has(messageID)) return
-  emission.messages.set(messageID, '')
-  emission.emit({
-    type: EventType.TEXT_MESSAGE_START,
-    messageId: messageID,
-    role: 'assistant',
-  })
-}
-
-function appendFact(emission: FrameEmission, fact: ExecutionEvent): boolean {
-  switch (fact.kind) {
-    case 'run-started':
-      return false
-    case 'assistant-text':
-      beginMessage(emission, fact.messageID)
-      emission.messages.set(
-        fact.messageID,
-        (emission.messages.get(fact.messageID) ?? '') + fact.delta,
-      )
-      if (fact.delta)
-        emission.emit({
-          type: EventType.TEXT_MESSAGE_CONTENT,
-          messageId: fact.messageID,
-          delta: fact.delta,
-        })
-      return false
-    case 'run-completed':
-      completeMessage(emission, fact)
-      emission.emit(finished(fact, 'success'))
-      return true
-    case 'run-cancelled':
-      endMessages(emission)
-      emission.emit(finished(fact, 'cancelled'))
-      return true
-    case 'run-failed':
-      endMessages(emission)
-      emission.emit({
-        type: EventType.RUN_ERROR,
-        code: fact.reason,
-        message: failureMessage(fact.reason),
-      })
-      return true
-    default:
-      return assertNever(fact)
-  }
-}
-
-function completeMessage(
-  emission: FrameEmission,
-  fact: Extract<ExecutionEvent, { kind: 'run-completed' }>,
-) {
-  beginMessage(emission, fact.messageID)
-  const previous = emission.messages.get(fact.messageID) ?? ''
-  // Completion is canonical, not a delta. AG-UI cannot retract draft text;
-  // a non-prefix correction is reconciled from the durable product snapshot.
-  const suffix = fact.text.startsWith(previous)
-    ? fact.text.slice(previous.length)
-    : ''
-  if (suffix)
-    emission.emit({
+  const delta =
+    fact.kind === 'assistant-text'
+      ? fact.delta
+      : completionSuffix(previous ?? '', fact.text)
+  if (delta)
+    frames.push({
       type: EventType.TEXT_MESSAGE_CONTENT,
       messageId: fact.messageID,
-      delta: suffix,
+      delta,
     })
-  emission.messages.set(fact.messageID, fact.text)
-  emission.emit({ type: EventType.TEXT_MESSAGE_END, messageId: fact.messageID })
+  return frames
 }
 
-function endMessages(emission: FrameEmission) {
-  for (const messageId of emission.messages.keys())
-    emission.emit({ type: EventType.TEXT_MESSAGE_END, messageId })
-}
-
-function finished(
-  fact: ExecutionEvent,
-  outcome: 'success' | 'cancelled',
-): Event {
-  return {
-    type: EventType.RUN_FINISHED,
-    threadId: fact.threadID,
-    runId: fact.runID,
-    outcome: { type: outcome },
-  }
+function completionSuffix(previous: string, text: string) {
+  // Completion is canonical, not a delta. AG-UI cannot retract draft text;
+  // a non-prefix correction is reconciled from the durable product snapshot.
+  return text.startsWith(previous) ? text.slice(previous.length) : ''
 }
 
 function failureMessage(

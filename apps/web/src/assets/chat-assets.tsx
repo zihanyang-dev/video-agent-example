@@ -1,20 +1,10 @@
-import { useEffect, useRef, useState, type ChangeEvent } from 'react'
-import {
-  useMutation,
-  useQuery,
-  useQueryClient,
-  queryOptions,
-} from '@tanstack/react-query'
+import { useState, type ChangeEvent } from 'react'
+import { useQuery, queryOptions } from '@tanstack/react-query'
 import { listAssets } from '@vid/contract/client'
 import { apiForUser, errorMessage } from '../http'
 import type { ThreadScope } from '../conversations/queries'
 import { AssetLinks } from './asset-links'
-import {
-  freezeUpload,
-  readUploads,
-  sendUpload,
-  type PendingUpload,
-} from './pending-uploads'
+import { useChatUploads } from './use-chat-uploads'
 
 export function assetsQuery(scope: ThreadScope) {
   return queryOptions({
@@ -46,58 +36,11 @@ export function ChatAssets({
   archived: boolean
 }) {
   const assets = useQuery(assetsQuery(scope))
-  const client = useQueryClient()
-  const [pending, setPending] = useState<PendingUpload[]>([])
-  const [error, setError] = useState('')
-  const isMounted = useRef(true)
-  useEffect(() => {
-    let isCurrent = true
-    isMounted.current = true
-    void readUploads(scope).then(
-      (uploads) => {
-        if (isCurrent) setPending(uploads)
-      },
-      () => {
-        if (isCurrent)
-          setError(
-            'Browser file storage is unavailable. Uploads require persistent browser storage.',
-          )
-      },
-    )
-    return () => {
-      isCurrent = false
-      isMounted.current = false
-    }
-  }, [scope.userID, scope.threadID])
-  const upload = useMutation({
-    meta: { userID: scope.userID },
-    mutationFn: (frozen: PendingUpload) => sendUpload(scope, frozen),
-  })
-  const send = (frozen: PendingUpload) =>
-    upload.mutate(frozen, {
-      onSuccess: () => {
-        setPending((entries) =>
-          entries.filter((entry) => entry.assetID !== frozen.assetID),
-        )
-        void client.invalidateQueries(assetsQuery(scope))
-      },
-    })
+  const upload = useChatUploads(scope)
   const choose = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0]
     event.target.value = ''
-    if (!file) return
-    setError('')
-    void freezeUpload(scope, file).then(
-      (frozen) => {
-        if (!isMounted.current) return
-        setPending((entries) => [...entries, frozen])
-        send(frozen)
-      },
-      () =>
-        setError(
-          'File could not be saved in this browser. Free browser storage before uploading.',
-        ),
-    )
+    if (file) void upload.chooseFile(file)
   }
   const toggle = (assetID: string) => {
     select(
@@ -118,9 +61,19 @@ export function ChatAssets({
             <input
               type="file"
               onChange={choose}
-              disabled={upload.isPending || !canSelect}
+              disabled={!upload.canChooseFile || !canSelect}
             />
           </label>
+          {upload.restoration === 'failed' && (
+            <button
+              disabled={upload.isBusy}
+              onClick={() => {
+                void upload.restoreUploads()
+              }}
+            >
+              Retry restoring saved uploads
+            </button>
+          )}
           <p className="detail">
             Receiving a video does not imply model understanding. File limits
             are enforced by the server. Keep this browser's data to retain
@@ -140,27 +93,77 @@ export function ChatAssets({
               Attach {asset.name}
             </label>
           ))}
-          {pending.map((frozen) => (
-            <div key={frozen.assetID}>
-              <span>Upload acceptance unknown: {frozen.name}. </span>
-              <button
-                disabled={upload.isPending || !canSelect}
-                onClick={() => send(frozen)}
-              >
-                Retry same file
-              </button>
-            </div>
+          {upload.pending.map((frozen) => (
+            <UploadRecovery
+              key={`${scope.userID}:${scope.threadID}:${frozen.assetID}`}
+              name={frozen.name}
+              outcome={upload.outcomes[frozen.assetID]}
+              disabled={upload.isBusy || !canSelect}
+              retry={() => {
+                void upload.retryUpload(frozen)
+              }}
+              forget={(acknowledged) => {
+                void upload.forgetUpload(frozen, acknowledged)
+              }}
+            />
           ))}
         </>
       )}
-      {upload.isPending && <p role="status">Uploading…</p>}
-      {upload.isError && (
-        <p role="alert">
-          {errorMessage(upload.error)} Retry preserves the same bytes and file
-          ID.
-        </p>
-      )}
-      {error && <p role="alert">{error}</p>}
+      {upload.status && <p role="status">{upload.status}</p>}
+      {upload.error && <p role="alert">{upload.error}</p>}
     </section>
+  )
+}
+
+export function UploadRecovery({
+  name,
+  outcome,
+  disabled,
+  retry,
+  forget,
+}: {
+  name: string
+  outcome: 'accepted' | 'refused' | undefined
+  disabled: boolean
+  retry: () => void
+  forget: (acknowledged: boolean) => void
+}) {
+  const [acknowledged, setAcknowledged] = useState(false)
+  return (
+    <div>
+      <span>
+        {outcome === 'accepted'
+          ? 'File accepted; saved upload retained'
+          : outcome === 'refused'
+            ? 'File refused by server'
+            : 'Upload acceptance unknown'}
+        : {name}.{' '}
+      </span>
+      <button disabled={disabled} onClick={retry}>
+        Retry same file
+      </button>
+      <p className="detail">
+        Check Chat history before forgetting this saved upload.
+      </p>
+      <label>
+        <input
+          type="checkbox"
+          checked={acknowledged}
+          disabled={disabled}
+          onChange={(event) => setAcknowledged(event.target.checked)}
+        />
+        I checked Chat history. Forgetting an uncertain saved upload loses exact
+        retry; it may already be saved on the server.
+      </label>
+      <button
+        disabled={disabled || !acknowledged}
+        onClick={() => forget(acknowledged)}
+      >
+        Forget saved upload locally and choose another file
+      </button>
+      <p className="detail">
+        This only removes browser retry bytes, not server files.
+      </p>
+    </div>
   )
 }

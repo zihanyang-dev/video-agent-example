@@ -1,5 +1,6 @@
 import { afterAll, expect, test } from 'bun:test'
 import { sql } from 'kysely'
+import { assetBudgetDefaults } from '@vid/config'
 import { createHTTP } from '../../apps/server/src/http'
 import { acceptExecutionEvent } from '../../apps/server/src/db/execution-events'
 import { archiveThread } from '../../apps/server/src/db/cancellations'
@@ -19,6 +20,8 @@ const shutdown = new AbortController()
 const route = createHTTP(db, {
   authentication: login.authentication,
   signal: shutdown.signal,
+  bodyCollection: { signal: shutdown.signal, timeoutMs: 1000 },
+  maxAssetBytes: assetBudgetDefaults.ASSET_MAX_BYTES,
   pollIntervalMs: 5,
 })
 const threadIDs: string[] = []
@@ -231,6 +234,8 @@ test.each(['expiry', 'logout', 'revocation'] as const)(
     const local = createHTTP(db, {
       authentication: identity.authentication,
       signal: shutdown.signal,
+      bodyCollection: { signal: shutdown.signal, timeoutMs: 1000 },
+      maxAssetBytes: assetBudgetDefaults.ASSET_MAX_BYTES,
       pollIntervalMs: 5,
     })
     const response = await local(
@@ -384,3 +389,250 @@ async function restoreUnmappedLegacyFixture(
     )
   })
 }
+
+for (const [field, value] of Object.entries({
+  version: '1',
+  runID: 'not-a-uuid',
+  commandID: crypto.randomUUID(),
+  threadID: crypto.randomUUID(),
+})) {
+  test(`malformed cancel ${field} cannot hide the real archive stop`, async () => {
+    const query = await ownedThread()
+    const submission = intent(query)
+    await acceptMessageIntent(db, submission)
+    const commandID = crypto.randomUUID()
+    const command = {
+      version: 1,
+      kind: 'cancel',
+      commandID,
+      runID: submission.runID,
+      threadID: query.threadID,
+      [field]: value,
+    }
+    await db
+      .insertInto('product.command_outbox')
+      .values({
+        command_id: commandID,
+        thread_id: query.threadID,
+        run_id: submission.runID,
+        message_id: null,
+        command,
+      })
+      .execute()
+    expect(
+      (await snapshotOwnedMessages(db, query))?.activeRuns[0]?.status,
+    ).toBe('accepted')
+    await archiveThread(db, query)
+    const commands = await db
+      .selectFrom('product.command_outbox')
+      .selectAll()
+      .where('thread_id', '=', query.threadID)
+      .execute()
+    expect(commands).toHaveLength(3)
+    expect(
+      commands.find((row) => row.command_id === commandID)?.command,
+    ).toEqual(command)
+    expect(
+      (await snapshotOwnedMessages(db, query))?.activeRuns[0]?.status,
+    ).toBe('stopping')
+  })
+}
+
+test('string-version starts cannot supply active or failed snapshot authority', async () => {
+  const query = await ownedThread()
+  const submission = intent(query)
+  await acceptMessageIntent(db, submission)
+  await db
+    .updateTable('product.command_outbox')
+    .set({ command: sql`jsonb_set(command, '{version}', '"1"'::jsonb)` })
+    .where('command_id', '=', submission.commandID)
+    .execute()
+  expect((await snapshotOwnedMessages(db, query))?.activeRuns).toEqual([])
+  await db
+    .insertInto('product.execution_events')
+    .values({
+      event_id: crypto.randomUUID(),
+      thread_id: query.threadID,
+      run_id: submission.runID,
+      ordinal: '1',
+      payload: {
+        version: 1,
+        kind: 'run-failed',
+        eventID: crypto.randomUUID(),
+        threadID: query.threadID,
+        runID: submission.runID,
+        reason: 'interrupted',
+      },
+    })
+    .execute()
+  expect((await snapshotOwnedMessages(db, query))?.failedRuns).toEqual([])
+})
+
+test('failed snapshot independently rejects string-version start authority', async () => {
+  const query = await ownedThread()
+  const submission = intent(query)
+  await acceptMessageIntent(db, submission)
+  await acceptExecutionEvent(db, {
+    ordinal: 1,
+    event: {
+      version: 1,
+      kind: 'run-failed',
+      eventID: crypto.randomUUID(),
+      threadID: query.threadID,
+      runID: submission.runID,
+      reason: 'interrupted',
+    },
+  })
+  await db
+    .updateTable('product.command_outbox')
+    .set({ command: sql`jsonb_set(command, '{version}', '"1"'::jsonb)` })
+    .where('command_id', '=', submission.commandID)
+    .execute()
+  expect((await snapshotOwnedMessages(db, query))?.failedRuns).toEqual([])
+})
+
+for (const field of [
+  'version',
+  'commandID',
+  'runID',
+  'threadID',
+  'messageID',
+] as const) {
+  test(`active snapshot rejects inconsistent start ${field}`, async () => {
+    const query = await ownedThread()
+    const submission = intent(query)
+    await acceptMessageIntent(db, submission)
+    const path = field === 'messageID' ? '{input,messageID}' : `{${field}}`
+    await db
+      .updateTable('product.command_outbox')
+      .set({
+        command: sql`jsonb_set(command, ${path}::text[], '"not-a-uuid"'::jsonb)`,
+      })
+      .where('command_id', '=', submission.commandID)
+      .execute()
+    expect((await snapshotOwnedMessages(db, query))?.activeRuns).toEqual([])
+    await archiveThread(db, query)
+    expect(
+      await db
+        .selectFrom('product.command_outbox')
+        .selectAll()
+        .where('thread_id', '=', query.threadID)
+        .execute(),
+    ).toHaveLength(1)
+  })
+}
+
+test('a cancel with a non-null indexed message is not stopping authority', async () => {
+  const query = await ownedThread()
+  const submission = intent(query)
+  await acceptMessageIntent(db, submission)
+  const messageID = crypto.randomUUID()
+  await db
+    .insertInto('product.messages')
+    .values({
+      thread_id: query.threadID,
+      message_id: messageID,
+      role: 'user',
+      text: 'orphan',
+    })
+    .execute()
+  const commandID = crypto.randomUUID()
+  await db
+    .insertInto('product.command_outbox')
+    .values({
+      command_id: commandID,
+      thread_id: query.threadID,
+      run_id: submission.runID,
+      message_id: messageID,
+      command: {
+        version: 1,
+        kind: 'cancel',
+        commandID,
+        threadID: query.threadID,
+        runID: submission.runID,
+      },
+    })
+    .execute()
+  expect((await snapshotOwnedMessages(db, query))?.activeRuns[0]?.status).toBe(
+    'accepted',
+  )
+  await archiveThread(db, query)
+  expect(
+    await db
+      .selectFrom('product.command_outbox')
+      .selectAll()
+      .where('thread_id', '=', query.threadID)
+      .execute(),
+  ).toHaveLength(3)
+})
+
+test('uppercase historical start and stop retain snapshot and receipt authority unchanged', async () => {
+  const query = await ownedThread()
+  const submission = intent(query)
+  await acceptMessageIntent(db, submission)
+  const start = {
+    version: 1,
+    kind: 'start',
+    commandID: submission.commandID.toUpperCase(),
+    runID: submission.runID.toUpperCase(),
+    threadID: query.threadID.toUpperCase(),
+    input: {
+      messageID: submission.messageID.toUpperCase(),
+      text: submission.text,
+    },
+  }
+  await db
+    .updateTable('product.command_outbox')
+    .set({ command: start })
+    .where('command_id', '=', submission.commandID)
+    .execute()
+  const commandID = crypto.randomUUID()
+  const cancel = {
+    version: 1,
+    kind: 'cancel',
+    commandID: commandID.toUpperCase(),
+    runID: submission.runID.toUpperCase(),
+    threadID: query.threadID.toUpperCase(),
+  }
+  await db
+    .insertInto('product.command_outbox')
+    .values({
+      command_id: commandID,
+      thread_id: query.threadID,
+      run_id: submission.runID,
+      message_id: null,
+      command: cancel,
+    })
+    .execute()
+  expect((await snapshotOwnedMessages(db, query))?.activeRuns[0]?.status).toBe(
+    'stopping',
+  )
+  await archiveThread(db, query)
+  expect(
+    await acceptExecutionEvent(db, {
+      ordinal: 1,
+      event: {
+        version: 1,
+        kind: 'run-failed',
+        eventID: crypto.randomUUID(),
+        threadID: query.threadID,
+        runID: submission.runID,
+        reason: 'interrupted',
+      },
+    }),
+  ).toBe('accepted')
+  expect((await snapshotOwnedMessages(db, query))?.failedRuns).toEqual([
+    {
+      runID: submission.runID,
+      messageID: submission.messageID,
+      reason: 'interrupted',
+    },
+  ])
+  const commands = await db
+    .selectFrom('product.command_outbox')
+    .select('command')
+    .where('thread_id', '=', query.threadID)
+    .orderBy('created_at')
+    .execute()
+  expect(commands.map((row) => row.command)).toEqual([start, cancel])
+})

@@ -19,6 +19,8 @@ export type ExecutionLease = Readonly<{
 
 /** Tool operations address only the worker-assigned sandbox, never a host path or container ID. */
 export interface SandboxTools {
+  /** Owns foreground abort and settlement; unknown mutative outcomes reject.
+   * Does not promise process-tree or external paid-job cancellation. */
   execute: (
     request: Readonly<{ command: string; signal: AbortSignal }>,
   ) => Promise<Readonly<{ stdout: string; stderr: string; exitCode: number }>>
@@ -30,11 +32,16 @@ export interface SandboxTools {
   ) => Promise<void>
 }
 
-/** The native environment owns foreground settlement and filesystem-only pause. */
-export interface RunSandbox {
+/** Vendor-independent business capabilities of the lease-assigned sandbox session,
+ * not a provider registry or a replica of the native SDK surface. */
+export interface SandboxSessionPort {
   tools: SandboxTools
+  /** Opaque native identity; execution persists it without interpreting provider details. */
   nativeRef: NativeSandboxReference
+  /** Awaits owned foreground/RPC settlement and filesystem-only pause; unknown
+   * outcomes reject. Neither external job cancellation nor durable artifact proof. */
   close: () => Promise<void>
+  /** Extends the assigned VM's TTL, not the database execution lease. */
   renewTimeout: () => Promise<void>
   files: SandboxFiles
 }
@@ -120,7 +127,7 @@ export type ExecuteRunDependencies = Readonly<{
   writes: ExecutionWrites
   fileTools?: (
     lease: ExecutionLease,
-    sandbox: RunSandbox,
+    sandbox: SandboxSessionPort,
     stopSpending: () => void,
   ) => FileTools
   harness: AgentHarness
@@ -128,7 +135,7 @@ export type ExecuteRunDependencies = Readonly<{
   openSandbox: (
     lease: ExecutionLease,
     signal: AbortSignal,
-  ) => Promise<RunSandbox>
+  ) => Promise<SandboxSessionPort>
 }>
 
 export type ExecuteRunOptions = Readonly<{
@@ -140,18 +147,17 @@ export type ExecuteRunOptions = Readonly<{
 
 export type ExecutionOutcome = 'completed' | 'cancelled' | 'failed' | 'lost'
 type StopReason = 'cancel' | 'lost' | 'execution-error' | 'interrupted'
-type TurnResult = Awaited<ReturnType<AgentHarness['turn']>>
+type SettledTurn = Readonly<ExecutionCompletion> | undefined
 type Execution = {
-  lease: ExecutionLease
-  deps: ExecuteRunDependencies
-  options: ExecuteRunOptions
-  controller: AbortController
+  readonly lease: ExecutionLease
+  readonly deps: ExecuteRunDependencies
+  readonly options: ExecuteRunOptions
+  readonly controller: AbortController
   reason?: StopReason
   acceptingText: boolean
   textWrites: Promise<void>
-  result?: TurnResult
-  sandbox?: RunSandbox
-  files?: FileTools
+  // Allocation owns close; heartbeat may renew this capability until settlement.
+  nativeSandbox?: SandboxSessionPort
   needsRecovery: boolean
   lastTimeoutRenewal: number
 }
@@ -185,10 +191,10 @@ async function renew(execution: Execution) {
       )
     if (
       status !== 'lost' &&
-      execution.sandbox !== undefined &&
+      execution.nativeSandbox !== undefined &&
       Date.now() - execution.lastTimeoutRenewal >= execution.options.leaseMs / 2
     ) {
-      await execution.sandbox.renewTimeout()
+      await execution.nativeSandbox.renewTimeout()
       execution.lastTimeoutRenewal = Date.now()
     }
   } catch {
@@ -244,15 +250,17 @@ function enqueueText(execution: Execution, delta: string) {
   })
 }
 
-async function runOwnedPipeline(execution: Execution) {
-  let sandbox: RunSandbox | undefined
+async function executeAssignedTurn(execution: Execution): Promise<SettledTurn> {
+  let sandbox: SandboxSessionPort | undefined
+  let fileTools: FileTools | undefined
+  let turnProduct: SettledTurn
   try {
     execution.controller.signal.throwIfAborted()
     sandbox = await execution.deps.openSandbox(
       execution.lease,
       execution.controller.signal,
     )
-    execution.sandbox = sandbox
+    execution.nativeSandbox = sandbox
     const saved = await execution.deps.writes.saveSandbox(
       execution.lease,
       sandbox.nativeRef,
@@ -263,13 +271,13 @@ async function runOwnedPipeline(execution: Execution) {
       return
     }
     if (execution.deps.fileTools !== undefined)
-      execution.files = execution.deps.fileTools(execution.lease, sandbox, () =>
+      fileTools = execution.deps.fileTools(execution.lease, sandbox, () =>
         stop(execution, 'execution-error'),
       )
     execution.controller.signal.throwIfAborted()
     const tools = sandbox.tools
     execution.acceptingText = true
-    execution.result = await execution.deps.harness.turn({
+    const turn = await execution.deps.harness.turn({
       text: execution.lease.text,
       history: execution.lease.history,
       tools: {
@@ -281,11 +289,16 @@ async function runOwnedPipeline(execution: Execution) {
           executeToolOperation(execution, () => tools.write(request)),
       },
       signal: execution.controller.signal,
-      ...(execution.files === undefined ? {} : { fileTools: execution.files }),
+      ...(fileTools === undefined ? {} : { fileTools }),
       onText: (delta) => enqueueText(execution, delta),
     })
     execution.acceptingText = false
     execution.controller.signal.throwIfAborted()
+    turnProduct = {
+      text: turn.text,
+      history: turn.history,
+      ...(fileTools === undefined ? {} : { assets: fileTools.prepared }),
+    }
   } catch (error) {
     // The owner's abort reason is expected interruption. A distinct rejection
     // (including allocation/turn abort cleanup failure) remains an execution error.
@@ -298,17 +311,21 @@ async function runOwnedPipeline(execution: Execution) {
   } finally {
     // turn's promise owns Pi abort/tool settlement. Never race it against abort.
     execution.acceptingText = false
-    await settleResources(execution, sandbox)
+    await settleResources(execution, sandbox, fileTools)
   }
+  // Cleanup and queued writes can stop an otherwise successful turn. The stop
+  // reason retains terminal authority; only a settled success carries products.
+  return execution.reason === undefined ? turnProduct : undefined
 }
 
 async function settleResources(
   execution: Execution,
-  sandbox: RunSandbox | undefined,
+  sandbox: SandboxSessionPort | undefined,
+  fileTools: FileTools | undefined,
 ) {
   try {
     await sandbox?.close()
-    if (execution.files?.hasUnknownOutcome()) stop(execution, 'execution-error')
+    if (fileTools?.hasUnknownOutcome()) stop(execution, 'execution-error')
   } catch {
     // A remote TTL is only an orphan backstop, not successful cleanup.
     stop(execution, 'execution-error')
@@ -334,8 +351,9 @@ async function settleRacingCancellation(
 
 async function finishExecution(
   execution: Execution,
+  turnProduct: SettledTurn,
 ): Promise<ExecutionOutcome> {
-  const { lease, deps, reason, result } = execution
+  const { lease, deps, reason } = execution
   if (reason === 'lost') return 'lost'
   if (reason === 'cancel') {
     if (await deps.writes.cancel(lease)) return 'cancelled'
@@ -348,18 +366,12 @@ async function finishExecution(
     // cancellation; never override it with a stale interruption or retry failure.
     return await settleRacingCancellation(execution)
   }
-  if (result === undefined)
+  if (turnProduct === undefined)
     throw new Error('Execution settled without a turn result')
   // An unknown commit outcome must retain uploaded objects: deleting here could
   // break an asset reference that PostgreSQL actually committed. Unreferenced
   // immutable objects require separately authorized operator reconciliation.
-  const completed = await deps.writes.complete(lease, {
-    text: result.text,
-    history: result.history,
-    ...(execution.files === undefined
-      ? {}
-      : { assets: execution.files.prepared }),
-  })
+  const completed = await deps.writes.complete(lease, turnProduct)
   if (completed) return 'completed'
   // Cancellation may arrive between the last poll and the fenced completion.
   // Re-authorize cancellation only; never retry a rejected completion.
@@ -392,10 +404,10 @@ export async function executeRun(
     await renew(execution)
     const polling = heartbeat(execution, monitoring.signal)
     try {
-      await runOwnedPipeline(execution)
+      const turnProduct = await executeAssignedTurn(execution)
       monitoring.abort()
       await polling
-      return await finishWithRecovery(execution)
+      return await finishWithRecovery(execution, turnProduct)
     } finally {
       monitoring.abort()
       await polling
@@ -423,6 +435,7 @@ async function executeToolOperation<Outcome>(
 
 async function finishWithRecovery(
   execution: Execution,
+  turnProduct: SettledTurn,
 ): Promise<ExecutionOutcome> {
   const { deps, lease } = execution
   if (execution.needsRecovery) {
@@ -436,7 +449,7 @@ async function finishWithRecovery(
   }
   let outcome: ExecutionOutcome
   try {
-    outcome = await finishExecution(execution)
+    outcome = await finishExecution(execution, turnProduct)
   } catch (error) {
     // A lost COMMIT acknowledgement is not permission to reuse the VM.
     await deps.writes.quarantine(lease)

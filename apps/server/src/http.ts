@@ -1,3 +1,4 @@
+import { readBody, type BodyCollectionPolicy } from './request-body'
 import type { DB } from '@vid/database/types'
 import type { Kysely } from 'kysely'
 import { Hono, type Context } from 'hono'
@@ -33,19 +34,23 @@ import {
 import { listAssets } from './db/assets'
 import { uploadAsset, downloadAsset } from './assets/http'
 import { fileSignatures } from './assets/files'
+import type { FileHTTP } from './assets/uploads'
 import {
   submitMessage,
   cancelObservation,
   openObservation,
-  readBody,
-  unavailable,
-  invalid,
-  conflict,
   type ConversationOptions,
 } from './conversation/http'
 
+const unavailable = () => Response.json({ error: 'Not found' }, { status: 404 })
+const invalid = () => Response.json({ error: 'Invalid input' }, { status: 400 })
+const conflict = () => Response.json({ error: 'Conflict' }, { status: 409 })
+
 export type HTTPResources = ConversationOptions & {
   db: Kysely<DB>
+  bodyCollection: BodyCollectionPolicy
+  maxAssetBytes: number
+  files?: FileHTTP
   authentication: ReturnType<typeof createAuthentication>
 }
 type HTTPEnv = { Bindings: HTTPResources; Variables: { ownerID: string } }
@@ -92,7 +97,8 @@ export function createRouter() {
         415: { description: 'Expected JSON' },
       },
     }),
-    (c) => signOut(c.env.authentication, c.env.db, c.req.raw),
+    (c) =>
+      signOut(c.env.authentication, c.env.db, c.req.raw, c.env.bodyCollection),
   )
   app.all(
     '/api/logout',
@@ -186,7 +192,9 @@ export function createRouter() {
     async (c) => {
       const rejection = requireJSON(c.req.raw)
       if (rejection) return rejection
-      const input = threadCreationSchema.safeParse(await readBody(c.req.raw))
+      const input = threadCreationSchema.safeParse(
+        await readBody(c.req.raw, c.env.bodyCollection),
+      )
       if (!input.success) return invalid()
       const accepted = await createOwnedThread(c.env.db, {
         ...input.data,
@@ -239,7 +247,9 @@ export function createRouter() {
       const rejection = requireJSON(c.req.raw)
       if (rejection) return rejection
       const query = ownedThread(c)
-      const input = threadUpdateSchema.safeParse(await readBody(c.req.raw))
+      const input = threadUpdateSchema.safeParse(
+        await readBody(c.req.raw, c.env.bodyCollection),
+      )
       if (!query || !input.success) return invalid()
       return Response.json({
         thread: await updateOwnedThread(c.env.db, { ...query, ...input.data }),
@@ -261,7 +271,9 @@ export function createRouter() {
       const query = ownedThread(c)
       if (
         !query ||
-        !publicSchemas.EmptyRequest.safeParse(await readBody(c.req.raw)).success
+        !publicSchemas.EmptyRequest.safeParse(
+          await readBody(c.req.raw, c.env.bodyCollection),
+        ).success
       )
         return invalid()
       return Response.json({ thread: await archiveThread(c.env.db, query) })
@@ -302,7 +314,12 @@ export function createRouter() {
       if (rejection) return rejection
       const query = ownedThread(c)
       return query
-        ? await submitMessage(c.env.db, query, c.req.raw, c.env.files)
+        ? await submitMessage(
+            c.env.db,
+            query,
+            await readBody(c.req.raw, c.env.bodyCollection),
+            c.env.maxAssetBytes,
+          )
         : invalid()
     },
   )
@@ -336,7 +353,11 @@ export function createRouter() {
       if (rejection) return rejection
       const query = ownedRun(c)
       return query
-        ? await cancelObservation(c.env.db, query, c.req.raw)
+        ? await cancelObservation(
+            c.env.db,
+            query,
+            await readBody(c.req.raw, c.env.bodyCollection),
+          )
         : invalid()
     },
   )
@@ -377,13 +398,26 @@ export function createRouter() {
       if (rejection) return rejection
       const query = ownedRun(c)
       if (!query) return invalid()
-      return await openObservation(c.env.db, query, c.req.raw, {
-        ...c.env,
-        authorize: async () =>
-          (await readIdentity(c.env.authentication, c.req.raw.headers))?.id ===
-            query.ownerID &&
-          (await readOwnedThread(c.env.db, query)) !== undefined,
-      })
+      return await openObservation(
+        c.env.db,
+        query,
+        {
+          body: await readBody(c.req.raw, c.env.bodyCollection),
+          headers: c.req.raw.headers,
+          signal: c.req.raw.signal,
+        },
+        {
+          signal: c.env.signal,
+          pollIntervalMs: c.env.pollIntervalMs,
+          ...(c.env.registerSubscription
+            ? { registerSubscription: c.env.registerSubscription }
+            : {}),
+          authorize: async () =>
+            (await readIdentity(c.env.authentication, c.req.raw.headers))
+              ?.id === query.ownerID &&
+            (await readOwnedThread(c.env.db, query)) !== undefined,
+        },
+      )
     },
   )
   app.get(

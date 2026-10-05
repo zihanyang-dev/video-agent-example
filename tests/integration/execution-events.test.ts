@@ -365,3 +365,35 @@ test('receipt authority requires indexed start headers to match the durable wire
       .execute(),
   ).toEqual([])
 })
+
+test('a string-version start cannot authorize a completion or any receipt writes', async () => {
+  const f = await fixture()
+  await db
+    .updateTable('product.command_outbox')
+    .set({ command: sql`jsonb_set(command, '{version}', '"1"'::jsonb)` })
+    .where('command_id', '=', f.commandID)
+    .execute()
+  const event: ExecutionEvent = {
+    ...f.start,
+    kind: 'run-completed',
+    messageID: crypto.randomUUID(),
+    text: 'must not adopt',
+  }
+  expect(await acceptExecutionEvent(db, { event, ordinal: 1 })).toBe(
+    'unknown-run',
+  )
+  expect(
+    await db
+      .selectFrom('product.execution_events')
+      .selectAll()
+      .where('thread_id', '=', f.threadID)
+      .execute(),
+  ).toEqual([])
+  expect(
+    await db
+      .selectFrom('product.messages')
+      .selectAll()
+      .where('message_id', '=', event.messageID)
+      .execute(),
+  ).toEqual([])
+})

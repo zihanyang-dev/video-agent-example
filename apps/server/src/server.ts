@@ -2,8 +2,8 @@ import { connectObjects, type ObjectStore } from '@vid/object-storage'
 import type { ServerEnv } from '@vid/config'
 import type { DB } from '@vid/database/types'
 import { executionStreams } from '@vid/contract/execution'
-import { Kysely, PostgresDialect } from 'kysely'
-import { Pool } from 'pg'
+import type { Kysely } from 'kysely'
+import { openDatabase } from '@vid/database/connection'
 import { createClient, type RedisClientType } from 'redis'
 import { createAuthentication } from './identity/authentication'
 import { createHTTP } from './http'
@@ -38,16 +38,7 @@ export class Server {
       accessKeyID: env.OBJECT_STORAGE_ACCESS_KEY_ID,
       secretAccessKey: env.OBJECT_STORAGE_SECRET_ACCESS_KEY,
     })
-    const pool = new Pool({
-      connectionString: env.DATABASE_URL,
-      max: 8,
-      connectionTimeoutMillis: env.IO_TIMEOUT_MS,
-      statement_timeout: env.IO_TIMEOUT_MS,
-      lock_timeout: env.IO_TIMEOUT_MS,
-      idle_in_transaction_session_timeout: env.IO_TIMEOUT_MS,
-    })
-    pool.on('error', this.fail)
-    this.db = new Kysely<DB>({ dialect: new PostgresDialect({ pool }) })
+    this.db = openDatabase(env, this.fail)
     const redisOptions = {
       url: env.REDIS_URL,
       disableOfflineQueue: true,
@@ -115,6 +106,11 @@ export class Server {
         githubClientID: this.env.GITHUB_CLIENT_ID,
         githubClientSecret: this.env.GITHUB_CLIENT_SECRET,
       }),
+      bodyCollection: {
+        signal: this.shutdown.signal,
+        timeoutMs: this.env.FILE_IO_TIMEOUT_MS,
+      },
+      maxAssetBytes: this.env.ASSET_MAX_BYTES,
       files: {
         objects: this.objects,
         maxAssetBytes: this.env.ASSET_MAX_BYTES,

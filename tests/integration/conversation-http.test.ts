@@ -28,7 +28,12 @@ const { db, close } = openTestDatabase()
 const login = await signedTestIdentity(db)
 const other = await signedTestIdentity(db)
 const shutdown = new AbortController()
+const httpResources = {
+  bodyCollection: { signal: shutdown.signal, timeoutMs: 3000 },
+  maxAssetBytes: 1024 * 1024,
+}
 const handle = createHTTP(db, {
+  ...httpResources,
   authentication: login.authentication,
   signal: shutdown.signal,
   pollIntervalMs: 5,
@@ -43,6 +48,10 @@ afterAll(async () => {
       .execute()
     await db
       .deleteFrom('product.command_outbox')
+      .where('thread_id', 'in', threads)
+      .execute()
+    await db
+      .deleteFrom('product.message_assets')
       .where('thread_id', 'in', threads)
       .execute()
     await db
@@ -144,6 +153,7 @@ test('unknown and foreign threads and runs have identical unavailable responses'
   const id = await thread()
   const { value } = await submit(id)
   const foreign = createHTTP(db, {
+    ...httpResources,
     authentication: other.authentication,
     pollIntervalMs: 5,
     signal: shutdown.signal,
@@ -222,6 +232,275 @@ test('cancel is authorized, replayable and never creates product messages', asyn
         .execute()
     ).length,
   ).toBe(2)
+})
+
+test.each(['events', 'cancel'] as const)(
+  'retained uppercase start authorizes owned %s without rewriting history',
+  async (action) => {
+    const id = await thread()
+    const { value } = await submit(id)
+    await sql`update product.command_outbox set command =
+      jsonb_set(jsonb_set(jsonb_set(jsonb_set(command,
+        '{threadID}', to_jsonb(upper(thread_id::text))),
+        '{runID}', to_jsonb(upper(run_id::text))),
+        '{commandID}', to_jsonb(upper(command_id::text))),
+        '{input,messageID}', to_jsonb(upper(message_id::text)))
+      where thread_id = ${id}::uuid`.execute(db)
+    const retained = await db
+      .selectFrom('product.command_outbox')
+      .select('command')
+      .where('command_id', '=', value.commandID)
+      .executeTakeFirstOrThrow()
+    const response = await request(
+      `/api/threads/${id}/runs/${value.runID}/${action}`,
+      action === 'events'
+        ? observe(id, value.runID)
+        : { commandID: crypto.randomUUID() },
+    )
+    await response.body?.cancel()
+    expect(response.status).toBe(action === 'events' ? 200 : 202)
+    expect(
+      (
+        await db
+          .selectFrom('product.command_outbox')
+          .select('command')
+          .where('command_id', '=', value.commandID)
+          .executeTakeFirstOrThrow()
+      ).command,
+    ).toEqual(retained.command)
+  },
+)
+
+test('retained uppercase cancellation permits canonical exact replay even after archive', async () => {
+  const id = await thread()
+  const { value } = await submit(id)
+  const commandID = crypto.randomUUID()
+  const path = `/api/threads/${id}/runs/${value.runID}/cancel`
+  const first = await request(path, { commandID })
+  expect(first.status).toBe(202)
+  const accepted = await first.json()
+  await sql`update product.command_outbox set command =
+    jsonb_set(jsonb_set(jsonb_set(command,
+      '{threadID}', to_jsonb(upper(thread_id::text))),
+      '{runID}', to_jsonb(upper(run_id::text))),
+      '{commandID}', to_jsonb(upper(command_id::text)))
+    where command_id = ${commandID}::uuid`.execute(db)
+  const retained = await db
+    .selectFrom('product.command_outbox')
+    .select('command')
+    .where('command_id', '=', commandID)
+    .executeTakeFirstOrThrow()
+  expect((await request(`/api/threads/${id}/archive`, {})).status).toBe(200)
+  const replay = await request(path, { commandID })
+  expect(replay.status).toBe(202)
+  expect(await replay.json()).toEqual(accepted)
+  expect(
+    (
+      await db
+        .selectFrom('product.command_outbox')
+        .select('command')
+        .where('command_id', '=', commandID)
+        .executeTakeFirstOrThrow()
+    ).command,
+  ).toEqual(retained.command)
+  expect(
+    await db
+      .selectFrom('product.command_outbox')
+      .select('command_id')
+      .where('thread_id', '=', id)
+      .execute(),
+  ).toHaveLength(2)
+})
+
+test.each([
+  ['{version}', 2],
+  ['{version}', '1'],
+  ['{version}', null],
+  ...['{threadID}', '{runID}', '{commandID}', '{input,messageID}'].flatMap(
+    (path): Array<[string, string]> => [
+      [path, 'not-a-uuid'],
+      [path, crypto.randomUUID().toUpperCase()],
+    ],
+  ),
+])(
+  'invalid retained start %s=%s cannot authorize observation or cancellation',
+  async (path, invalid) => {
+    const id = await thread()
+    const { value } = await submit(id)
+    const original = await db
+      .selectFrom('product.command_outbox')
+      .select('command')
+      .where('command_id', '=', value.commandID)
+      .executeTakeFirstOrThrow()
+    const statuses: number[] = []
+    try {
+      await sql`update product.command_outbox set command =
+      jsonb_set(command, ${path}::text[], ${JSON.stringify(invalid)}::jsonb)
+      where thread_id = ${id}::uuid`.execute(db)
+      for (const action of ['events', 'cancel']) {
+        const response = await request(
+          `/api/threads/${id}/runs/${value.runID}/${action}`,
+          action === 'events'
+            ? observe(id, value.runID)
+            : { commandID: crypto.randomUUID() },
+        )
+        await response.body?.cancel()
+        statuses.push(response.status)
+      }
+    } finally {
+      await db
+        .updateTable('product.command_outbox')
+        .set({ command: original.command })
+        .where('command_id', '=', value.commandID)
+        .execute()
+    }
+    expect(statuses).toEqual([404, 404])
+    expect(
+      await db
+        .selectFrom('product.command_outbox')
+        .select('command_id')
+        .where('thread_id', '=', id)
+        .execute(),
+    ).toHaveLength(1)
+  },
+)
+
+test.each([
+  ['{version}', '1'],
+  ['{version}', 2],
+  ['{commandID}', 'not-a-uuid'],
+  ['{threadID}', crypto.randomUUID()],
+  ['{runID}', crypto.randomUUID()],
+  ['{commandID}', crypto.randomUUID()],
+  ['{extra}', true],
+])(
+  'retained cancellation %s=%s is not an exact replay',
+  async (path, invalid) => {
+    const id = await thread()
+    const { value } = await submit(id)
+    const commandID = crypto.randomUUID()
+    const route = `/api/threads/${id}/runs/${value.runID}/cancel`
+    expect((await request(route, { commandID })).status).toBe(202)
+    const original = await db
+      .selectFrom('product.command_outbox')
+      .select('command')
+      .where('command_id', '=', commandID)
+      .executeTakeFirstOrThrow()
+    let status: number
+    try {
+      await sql`update product.command_outbox set command =
+      jsonb_set(command, ${path}::text[], ${JSON.stringify(invalid)}::jsonb)
+      where command_id = ${commandID}::uuid`.execute(db)
+      status = (await request(route, { commandID })).status
+    } finally {
+      await db
+        .updateTable('product.command_outbox')
+        .set({ command: original.command })
+        .where('command_id', '=', commandID)
+        .execute()
+    }
+    expect(status).toBe(409)
+    expect(
+      await db
+        .selectFrom('product.command_outbox')
+        .select('command_id')
+        .where('thread_id', '=', id)
+        .execute(),
+    ).toHaveLength(2)
+  },
+)
+
+test('foreign cancellation and colliding foreign command IDs preserve unavailable privacy', async () => {
+  const id = await thread()
+  const { value } = await submit(id)
+  const commandID = crypto.randomUUID()
+  expect(
+    (
+      await request(`/api/threads/${id}/runs/${value.runID}/cancel`, {
+        commandID,
+      })
+    ).status,
+  ).toBe(202)
+  const foreign = createHTTP(db, {
+    ...httpResources,
+    authentication: other.authentication,
+    signal: shutdown.signal,
+    pollIntervalMs: 5,
+  })
+  const response = await foreign(
+    new Request(`http://local/api/threads/${id}/runs/${value.runID}/cancel`, {
+      method: 'POST',
+      headers: other.headers,
+      body: JSON.stringify({ commandID }),
+    }),
+  )
+  const missing = await request(
+    `/api/threads/${crypto.randomUUID()}/runs/${value.runID}/cancel`,
+    { commandID },
+  )
+  expect(response.status).toBe(404)
+  expect(await response.text()).toBe(await missing.text())
+  const owned = await thread()
+  const run = await submit(owned)
+  await db
+    .updateTable('product.threads')
+    .set({ owner_id: other.user.id })
+    .where('thread_id', '=', id)
+    .execute()
+  const collision = await request(
+    `/api/threads/${owned}/runs/${run.value.runID}/cancel`,
+    { commandID },
+  )
+  expect(collision.status).toBe(404)
+  expect(await collision.json()).toEqual({ error: 'Not found' })
+})
+
+test('cancellation rechecks ownership after waiting for the durable thread lock', async () => {
+  const { cancelRun } = await import('../../apps/server/src/db/cancellations')
+  const id = await thread()
+  const { value } = await submit(id)
+  let selecting!: () => void
+  const selected = new Promise<void>((resolve) => {
+    selecting = resolve
+  })
+  const observed = db.withPlugin({
+    transformQuery({ node }) {
+      if (node.kind === 'SelectQueryNode') selecting()
+      return node
+    },
+    async transformResult({ result }) {
+      return result
+    },
+  })
+  let cancellation!: Promise<string>
+  await db.transaction().execute(async (tx) => {
+    await tx
+      .selectFrom('product.threads')
+      .select('thread_id')
+      .where('thread_id', '=', id)
+      .forUpdate()
+      .executeTakeFirstOrThrow()
+    cancellation = cancelRun(observed, {
+      ownerID: login.user.id,
+      threadID: id,
+      runID: value.runID,
+      commandID: crypto.randomUUID(),
+    })
+    await selected
+    await tx
+      .updateTable('product.threads')
+      .set({ owner_id: other.user.id })
+      .where('thread_id', '=', id)
+      .execute()
+  })
+  expect(await cancellation).toBe('unavailable')
+  expect(
+    await db
+      .selectFrom('product.command_outbox')
+      .select('command_id')
+      .where('thread_id', '=', id)
+      .execute(),
+  ).toHaveLength(1)
 })
 
 test('official SSE completion emits full text once, final-frame cursor and durable replay', async () => {
@@ -435,6 +714,7 @@ test('process shutdown closes an owned stream without cancelling its durable run
   const { value } = await submit(id)
   const signal = new AbortController()
   const local = createHTTP(db, {
+    ...httpResources,
     authentication: login.authentication,
     signal: signal.signal,
     pollIntervalMs: 5,
@@ -514,6 +794,7 @@ test('real Bun HTTP reconnect reconstructs durable text with a fresh handler', a
     hostname: '127.0.0.1',
     port: 0,
     fetch: createHTTP(db, {
+      ...httpResources,
       authentication: login.authentication,
       signal: shutdown.signal,
       pollIntervalMs: 5,
@@ -800,6 +1081,7 @@ test.each(['not-a-cursor', '01', '-1', '9223372036854775808'])(
 test('official generated fetch client creates, replays, reads, submits and durably logs out through native routes', async () => {
   const identity = await signedTestIdentity(db)
   const local = createHTTP(db, {
+    ...httpResources,
     authentication: identity.authentication,
     signal: shutdown.signal,
     pollIntervalMs: 5,
@@ -951,6 +1233,7 @@ test.each([
     expect(await acceptExecutionEvent(db, delivery)).toBe('accepted')
     expect(await acceptExecutionEvent(db, delivery)).toBe('accepted')
     const fresh = createHTTP(db, {
+      ...httpResources,
       authentication: login.authentication,
       signal: shutdown.signal,
       pollIntervalMs: 5,
@@ -987,6 +1270,7 @@ test.each([
       await server.stop(true)
     }
     const foreign = createHTTP(db, {
+      ...httpResources,
       authentication: other.authentication,
       signal: shutdown.signal,
       pollIntervalMs: 10,
@@ -1070,3 +1354,202 @@ test.each(['{threadID}', '{runID}', '{commandID}', '{input,messageID}'])(
     }
   },
 )
+
+test('asset allocation and message snapshots use bounded reads while preserving request and link order', async () => {
+  const { allocatedAssets } = await import('../../apps/server/src/db/assets')
+  const { snapshotOwnedMessages } =
+    await import('../../apps/server/src/db/conversations')
+  const { acceptMessageIntent } =
+    await import('../../apps/server/src/db/submissions')
+  const { threadUnavailable } =
+    await import('../../apps/server/src/db/thread-access')
+  const id = await thread()
+  const foreignID = await thread()
+  const assetIDs = Array.from({ length: 4 }, () => crypto.randomUUID())
+  for (const [index, assetID] of assetIDs.entries())
+    await db
+      .insertInto('product.assets')
+      .values({
+        asset_id: assetID,
+        thread_id: index === 3 ? foreignID : id,
+        source: 'upload',
+        name: `${index}.txt`,
+        mime_type: 'text/plain',
+        byte_length: 1,
+        sha256: sha256(new Uint8Array([index])),
+        object_key: `assets/uploads/${index === 3 ? foreignID : id}/${assetID}`,
+        ready_at: index === 2 ? null : new Date(),
+      })
+      .execute()
+  const ordered = assetIDs.slice(0, 2).reverse()
+  let selects = 0
+  const counted = db.withPlugin({
+    transformQuery({ node }) {
+      if (node.kind === 'SelectQueryNode') selects++
+      return node
+    },
+    async transformResult({ result }) {
+      return result
+    },
+  })
+  const allocations = await counted.transaction().execute((tx) =>
+    allocatedAssets(
+      tx,
+      id,
+      ordered.map((assetID) => assetID.toUpperCase()),
+    ),
+  )
+  expect(allocations.map((asset) => asset.assetID)).toEqual(ordered)
+  expect(selects).toBe(1)
+  for (const unavailable of [
+    ...assetIDs.slice(2),
+    crypto.randomUUID(),
+    '00000000-0000-0000-0000-000000000000',
+  ]) {
+    const cause = await db
+      .transaction()
+      .execute((tx) => allocatedAssets(tx, id, [...ordered, unavailable]))
+      .catch((cause: unknown) => cause)
+    expect(cause).toBe(threadUnavailable)
+  }
+  const query = { ownerID: login.user.id, threadID: id }
+  const messages = [ordered, [], ordered.slice().reverse()]
+  const expectedMessages: Array<{ id: string; assets: string[] }> = []
+  for (const assets of messages) {
+    const messageID = crypto.randomUUID()
+    expectedMessages.push({ id: messageID, assets })
+    expect(
+      (
+        await acceptMessageIntent(db, {
+          ...query,
+          messageID,
+          commandID: crypto.randomUUID(),
+          runID: crypto.randomUUID(),
+          text: 'ordered assets',
+          assetIDs: assets,
+        })
+      ).kind,
+    ).toBe('accepted')
+  }
+  selects = 0
+  const snapshot = await snapshotOwnedMessages(counted, query)
+  expect(
+    snapshot?.messages.map((message) => ({
+      id: message.messageID,
+      assets: message.assets.map((asset) => asset.assetID),
+    })),
+  ).toEqual(expectedMessages)
+  expect(selects).toBe(5)
+  const { archiveThread } =
+    await import('../../apps/server/src/db/cancellations')
+  await archiveThread(db, query)
+  expect((await snapshotOwnedMessages(db, query))?.messages).toEqual(
+    snapshot?.messages,
+  )
+})
+
+test('terminal reconnect retains its durable cursor across batches, cursor gaps and another run while reauthorizing each batch', async () => {
+  const { observeEvents } =
+    await import('../../apps/server/src/conversation/event-stream')
+  const id = await thread()
+  const target = await submit(id)
+  await emitText(
+    { threadID: id, runID: target.value.runID, messageID: crypto.randomUUID() },
+    1,
+    {
+      kind: 'run-completed',
+      text: 'done',
+    },
+  )
+  const terminal = (
+    await readPublicEvents(db, { ownerID: login.user.id, threadID: id })
+  )?.[0]
+  if (!terminal) throw new Error('Missing terminal')
+  // Replay cursors are global: a different thread leaves a real SQL cursor gap.
+  const gapThread = await thread()
+  const gapRun = await submit(gapThread)
+  await emitText(
+    {
+      threadID: gapThread,
+      runID: gapRun.value.runID,
+      messageID: crypto.randomUUID(),
+    },
+    1,
+    {
+      kind: 'run-completed',
+      text: 'private gap',
+    },
+  )
+  const otherRun = await submit(id)
+  const otherMessage = crypto.randomUUID()
+  for (let ordinal = 1; ordinal <= 101; ordinal++)
+    await emitText(
+      { threadID: id, runID: otherRun.value.runID, messageID: otherMessage },
+      ordinal,
+      {
+        kind: 'assistant-text',
+        delta: 'unrelated',
+      },
+    )
+  const after = (
+    await readPublicEvents(db, { ownerID: login.user.id, threadID: id })
+  )?.at(-1)?.cursor
+  if (!after) throw new Error('Missing observation boundary')
+  let authorizations = 0
+  const response = await observeEvents(db, {
+    ownerID: login.user.id,
+    threadID: id,
+    runID: target.value.runID,
+    after,
+    pollMs: 5,
+    requestSignal: new AbortController().signal,
+    processSignal: shutdown.signal,
+    authorize: async () => {
+      authorizations++
+      return true
+    },
+  })
+  const text = await response.text()
+  expect(text).toContain('RUN_STARTED')
+  expect(text).toContain('RUN_FINISHED')
+  expect(text).not.toContain('unrelated')
+  expect(lastFactCursor(text)).toBe(terminal.cursor)
+  expect(authorizations).toBe(5)
+})
+
+test('reconstruction includes the boundary fact but ignores later facts already loaded in its batch', async () => {
+  const id = await thread()
+  const { value } = await submit(id)
+  const messageID = crypto.randomUUID()
+  await emitText({ threadID: id, runID: value.runID, messageID }, 1, {
+    kind: 'assistant-text',
+    delta: 'Hello',
+  })
+  const after = (
+    await readPublicEvents(db, { ownerID: login.user.id, threadID: id })
+  )?.at(-1)?.cursor
+  if (!after) throw new Error('Missing boundary')
+  await emitText({ threadID: id, runID: value.runID, messageID }, 2, {
+    kind: 'assistant-text',
+    delta: ' world',
+  })
+  await emitText({ threadID: id, runID: value.runID, messageID }, 3, {
+    kind: 'run-completed',
+    text: 'Hello world',
+  })
+  const response = await request(
+    `/api/threads/${id}/runs/${value.runID}/events`,
+    {
+      ...observe(id, value.runID),
+      forwardedProps: { after },
+    },
+  )
+  const text = await response.text()
+  expect(text).toContain('"delta":" world"')
+  expect(text).not.toContain('"delta":"Hello"')
+  expect(text).not.toContain('"delta":"Hello world"')
+  expect(text.indexOf('TEXT_MESSAGE_START')).toBeLessThan(
+    text.indexOf('TEXT_MESSAGE_CONTENT'),
+  )
+  expect(text).toContain('RUN_FINISHED')
+})
