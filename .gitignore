@@ -1,8 +1,11 @@
 node_modules/
+.playwright-cli/
 dist/
 coverage/
 .cache/
 *.tsbuildinfo
+__pycache__/
+*.pyc
 .DS_Store
 .env
 .env.*

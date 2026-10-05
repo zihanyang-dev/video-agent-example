@@ -5,10 +5,19 @@
 
 import type { ColumnType } from 'kysely'
 
+export type ExecutionRunStatus =
+  'cancelled' | 'completed' | 'failed' | 'queued' | 'running'
+
 export type Generated<T> =
   T extends ColumnType<infer S, infer I, infer U>
     ? ColumnType<S, I | undefined, U>
     : ColumnType<T, T | undefined, T>
+
+export type Int8 = ColumnType<
+  string,
+  bigint | number | string,
+  bigint | number | string
+>
 
 export type Json = JsonValue
 
@@ -26,6 +35,110 @@ export type ProductMessageRole = 'assistant' | 'user'
 
 export type Timestamp = ColumnType<Date, Date | string, Date | string>
 
+export interface AuthAccount {
+  accessToken: string | null
+  accessTokenExpiresAt: Timestamp | null
+  accountId: string
+  createdAt: Generated<Timestamp>
+  id: string
+  idToken: string | null
+  password: string | null
+  providerId: string
+  refreshToken: string | null
+  refreshTokenExpiresAt: Timestamp | null
+  scope: string | null
+  updatedAt: Timestamp
+  userId: string
+}
+
+export interface AuthSession {
+  createdAt: Generated<Timestamp>
+  expiresAt: Timestamp
+  id: string
+  ipAddress: string | null
+  token: string
+  updatedAt: Timestamp
+  userAgent: string | null
+  userId: string
+}
+
+export interface AuthUser {
+  createdAt: Generated<Timestamp>
+  email: string
+  emailVerified: boolean
+  id: string
+  image: string | null
+  name: string
+  updatedAt: Generated<Timestamp>
+}
+
+export interface AuthVerification {
+  createdAt: Generated<Timestamp>
+  expiresAt: Timestamp
+  id: string
+  identifier: string
+  updatedAt: Generated<Timestamp>
+  value: string
+}
+
+export interface ExecutionCommandInbox {
+  command: Json
+  command_id: string
+  created_at: Generated<Timestamp>
+  kind: string
+  run_id: string
+  thread_id: string
+}
+
+export interface ExecutionConversations {
+  active_run_id: string | null
+  fence: Generated<number>
+  history: Generated<Json>
+  lease_owner: string | null
+  lease_until: Timestamp | null
+  legacy_workspace_checkpoint: Json | null
+  native_sandbox: Json | null
+  sandbox_recovery_required: Generated<boolean>
+  thread_id: string
+}
+
+export interface ExecutionEventOutbox {
+  created_at: Generated<Timestamp>
+  event: Json
+  event_id: string
+  ordinal: number
+  published_at: Timestamp | null
+  run_id: string
+  thread_id: string
+}
+
+export interface ExecutionRuns {
+  assistant_message_id: string | null
+  cancel_requested: Generated<boolean>
+  command_id: string
+  created_at: Generated<Timestamp>
+  message_id: string
+  run_id: string
+  status: Generated<ExecutionRunStatus>
+  text: string
+  thread_id: string
+}
+
+export interface ProductAssets {
+  asset_id: string
+  byte_length: number
+  created_at: Generated<Timestamp>
+  message_id: string | null
+  mime_type: string
+  name: string
+  object_key: string
+  ready_at: Timestamp | null
+  run_id: string | null
+  sha256: string
+  source: string
+  thread_id: string
+}
+
 export interface ProductCommandOutbox {
   command: Json
   command_id: string
@@ -33,6 +146,24 @@ export interface ProductCommandOutbox {
   message_id: string | null
   published_at: Timestamp | null
   run_id: string
+  thread_id: string
+}
+
+export interface ProductExecutionEvents {
+  event_id: string
+  ordinal: Int8
+  payload: Json
+  processed: Generated<boolean>
+  received_at: Generated<Timestamp>
+  replay_cursor: Int8 | null
+  run_id: string
+  thread_id: string
+}
+
+export interface ProductMessageAssets {
+  asset_id: string
+  message_id: string
+  position: number
   thread_id: string
 }
 
@@ -45,13 +176,28 @@ export interface ProductMessages {
 }
 
 export interface ProductThreads {
+  archived_at: Timestamp | null
   created_at: Generated<Timestamp>
-  owner_id: string
+  creation_title: Generated<string>
+  legacy_owner_id: string | null
+  owner_id: string | null
   thread_id: string
+  title: Generated<string>
 }
 
 export interface DB {
+  'auth.account': AuthAccount
+  'auth.session': AuthSession
+  'auth.user': AuthUser
+  'auth.verification': AuthVerification
+  'execution.command_inbox': ExecutionCommandInbox
+  'execution.conversations': ExecutionConversations
+  'execution.event_outbox': ExecutionEventOutbox
+  'execution.runs': ExecutionRuns
+  'product.assets': ProductAssets
   'product.command_outbox': ProductCommandOutbox
+  'product.execution_events': ProductExecutionEvents
+  'product.message_assets': ProductMessageAssets
   'product.messages': ProductMessages
   'product.threads': ProductThreads
 }

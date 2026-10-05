@@ -25,8 +25,16 @@ module.exports = {
       severity: 'error',
       from: { path: '^apps/web/' },
       to: {
-        path: '^packages/(config|database|messaging|execution-protocol|object-storage)/',
+        path: '^packages/((config|database|object-storage)/|contract/(src/execution(?:\\.ts$|/)|generated/execution-))',
       },
+    },
+    {
+      name: 'http-no-execution-contract',
+      severity: 'error',
+      from: {
+        path: '^packages/contract/(src/http(?:\\.test)?\\.ts$|generated/client/)',
+      },
+      to: { path: '^packages/contract/src/execution(?:\\.ts$|/)' },
     },
     {
       name: 'no-unresolved',
@@ -41,7 +49,7 @@ module.exports = {
     tsConfig: { fileName: 'tsconfig.json' },
     tsPreCompilationDeps: true,
     doNotFollow: { path: 'node_modules' },
-    exclude: '(^|/)(dist|coverage|generated|vendor)/',
+    exclude: '(^|/)(dist|coverage|vendor)/',
     enhancedResolveOptions: {
       exportsFields: ['exports'],
       conditionNames: ['types', 'import', 'default'],

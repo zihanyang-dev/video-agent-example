@@ -1,6 +1,7 @@
 {
   "compilerOptions": {
     "target": "ESNext",
+    "jsx": "react-jsx",
     "module": "Preserve",
     "moduleResolution": "Bundler",
     "lib": ["ESNext", "DOM", "DOM.Iterable"],
@@ -22,9 +23,10 @@
     "paths": {
       "@vid/config": ["./packages/config/src/index.ts"],
       "@vid/config/*": ["./packages/config/src/*"],
-      "@vid/execution-protocol": ["./packages/execution-protocol/src/index.ts"],
+      "@vid/contract/http": ["./packages/contract/src/http.ts"],
+      "@vid/contract/execution": ["./packages/contract/src/execution.ts"],
       "@vid/database/types": ["./packages/database/generated/db.ts"],
-      "@vid/messaging": ["./packages/messaging/src/index.ts"]
+      "@vid/object-storage": ["./packages/object-storage/src/index.ts"]
     }
   },
   "include": [

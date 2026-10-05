@@ -1,5 +1,18 @@
 {
   "name": "@vid/agent",
   "private": true,
-  "type": "module"
+  "type": "module",
+  "dependencies": {
+    "@vid/config": "workspace:*",
+    "@vid/database": "workspace:*",
+    "@vid/contract": "workspace:*",
+    "@vid/object-storage": "workspace:*",
+    "kysely": "0.29.6",
+    "pg": "8.23.1",
+    "redis": "6.3.0",
+    "zod": "4.6.5",
+    "e2b": "2.52.0",
+    "@earendil-works/pi-coding-agent": "1.0.1",
+    "@earendil-works/pi-ai": "1.0.1"
+  }
 }

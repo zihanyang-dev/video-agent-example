@@ -1,5 +1,11 @@
 {
   "name": "@vid/object-storage",
   "private": true,
-  "type": "module"
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "3.1146.0"
+  }
 }

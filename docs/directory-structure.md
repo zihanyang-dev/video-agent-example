@@ -1,109 +1,84 @@
-# 目录与依赖规则
+# 文件与依赖
 
-## 当前布局与目标数据库目录
+目录按应用自身的责任划分，不按三个应用的名字做镜像。server 拥有产品功能，agent 是执行进程，web 是呈现。
 
-根 Bun workspace、package 清单、锁文件与 Docker 检查工具链已存在；配置、内部协议和 server 规则基础已有源码。下图表示责任布局，不表示完整应用已交付。数据库 SQL-first 目录已建立并验证；空目录用 `.gitkeep` 保留，加入实际文件后移除占位文件。
+## server
 
 ```text
-apps/
-  web/src/
-    features/conversation/
-    api/
-  server/src/
-    modules/conversation/
-  agent/src/
-    worker/
-    sandbox/
-    workspace/
-    egress/
-packages/
-  database/
-    migrations/            # 手写 SQL，唯一表结构源码
-    generated/
-      db.ts                # kysely-codegen 生成，禁止手改
-      schema.sql           # pg_dump 生成，禁止手改
-  execution-protocol/src/
-  messaging/src/
-  object-storage/src/
-  config/src/
-config/
-  .env.example             # 唯一手填入口 config/.env 的模板
-scripts/
-  check.sh
-  database-check.sh        # 临时库生成、漂移检查与集成验证
-  generate-database.sh     # 内部类型生成阶段
-deploy/
-  docker/
-  sandbox/
-docs/
-tests/
-  integration/
-  e2e/
+apps/server/src/
+  main.ts                   读取配置和进程信号
+  server.ts                 HTTP/连接/后台任务的启动与关闭
+  http.ts                   HTTP 分发、身份与通用请求边界
+  identity/                 官方认证库接入、会话和注销
+  conversation/             会话、消息、取消、命令投递与公开事件
+  assets/                   统一资产的上传、规则和授权读取
+  db/                       产品查询、锁与原子变化
 ```
 
-## 应用内部如何放代码
+执行是会话的一轮，所以会话命令的发送、结果接收归 conversation。HTTP 身份入口不藏进 conversation；文件功能不分成 materials/artifacts 两套模块。SQL 集中在 db，但调用方式是具名事务函数，不是 repository/service 框架。
 
-### web
+## agent
 
-`features/conversation` 聚合会话的页面、输入、消息和进度展示。`api` 只放 HTTP 与 AG-UI 的客户端适配，不拥有产品规则。不连接内部基础设施。
+```text
+apps/agent/src/
+  main.ts                   读取配置和进程信号
+  worker.ts                 连接、后台循环、活跃任务与关闭
+  execute-run.ts            执行一个已领取任务、取消与收尾
+  run-loop.ts               并发预算、领取与等待运行
+  commands.ts               Redis 命令接收、持久接受后 ACK
+  events.ts                 执行 outbox 的 Redis 投递
+  db/                       租约、环境引用、私有历史和 outbox
+  harness/                  官方 pi、历史与明确工具
+  sandbox/                  环境操作及具体 E2B 实现
+```
 
-以后出现另一个独立产品能力时，再增加对应 feature；不预建组件库、状态管理框架或空页面。
+agent 没有用户侧 conversation 或资产领域。它接受已授权任务并执行；相关流程先用清楚的文件表达，不为两三个文件再建 execution、conversation 或 transport 目录。
 
-### server
+文件导入与交付是 harness 的工具行为：只使用已分配引用，guest 路径由 Agent 决定。没有独立 assets/workspace 模块。沙箱原生保存整个执行环境，数据库保存原生引用。
 
-按产品能力组织 `modules`，目前 `conversation` 已有消息提交规则与测试，Kysely 事务适配器已实现并通过真实数据库验证。模块内相关规则、入站接口与持久化实现相邻，不强制每个功能经过四层目录。
+worker 与 server 只共享协议，不共享产品权限代码。私有执行数据库的权限边界不等于产品目录必须出现 execution。
 
-未来文件可按具体行为命名，例如 `conversation.ts`、`messages.ts`、`http.ts`、`ag-ui.ts`、`conversations-postgres.ts`、`execution-commands.ts`、`execution-results.ts`。这些是命名示例，不是已创建的文件或固定文件数量。
+## web
 
-模块之间只使用公开入口，`index.ts` 只做再导出。auth、billing 有真实需求时再建立，不提前占位。
+```text
+apps/web/src/
+  main.tsx / http.ts / style.css
+  identity/                 登录、会话和隐私清理
+  conversations/            Chat、消息、运行观察与局部交互
+  assets/                   文件选择、上传与展示
+```
 
-### agent
+组件、查询、hooks 与相关测试围绕功能相邻，不按 components/hooks/types/utils 横切。Chat 是界面名称，threadID 是会话身份，页面不引入 workspace 或 project 实体。
 
-| 目录        | 内聚职责                                                              |
-| ----------- | --------------------------------------------------------------------- |
-| `worker`    | 运行规则、认领与控制、pi 适配、检查点、执行持久化、命令消费与事件发送 |
-| `sandbox`   | 工具执行合同与 Docker 实现，不拥有运行状态                            |
-| `workspace` | 文件保存、恢复和产物发布                                              |
-| `egress`    | 独立进程的访问校验、固定目标转发与凭据注入                            |
+## 共享包
 
-worker 的执行规则通过消费方所需的最小接口使用 pi、sandbox 和持久化，不直接依赖具体 SDK。接口为了表达真实边界和可测试行为，不为了把单一函数再转发一遍。
+| 包               | 责任                                                             |
+| ---------------- | ---------------------------------------------------------------- |
+| `contract`       | `http.ts` 公开合同、`execution.ts` 内部执行合同；schema 推导类型 |
+| `config`         | 按进程配置 schema 与 defaults                                    |
+| `database`       | 唯一迁移、生成 DB 类型与 schema                                  |
+| `object-storage` | 两个可信进程实际复用的有界对象字节操作                           |
 
-应用入口以后放在各自 `src/main.ts`，进程装配和生命周期放在 `src/bootstrap.ts`；egress 有自己的入口，仍属于 agent 包。不建立 `apps/gateway` 或第四个业务应用。
+合同文件按完整协议聚合，不为每个 schema 或常量建文件。执行合同只是进程 wire 的名称，不能进入 browser 的公开 HTTP 导入图。
 
-## 共享包拥有什么
+Redis 直接使用官方 SDK；不维护另一套 messaging SDK。存储包不决定用户归属，不是第二套资产业务。共享代码只有跨进程合同或真实非平凡复用才留下。
 
-| 包                   | 拥有                                                | 不拥有                                    |
-| -------------------- | --------------------------------------------------- | ----------------------------------------- |
-| `database`           | 手写 SQL 迁移、生成类型与 schema dump、必要连接工具 | 产品规则、运行规则、通用 repository       |
-| `execution-protocol` | 内部命令的线格式 schema 与推导类型                  | AG-UI 的重定义、pi 类型、数据库行         |
-| `messaging`          | Redis Streams 的发送、消费、确认及可靠发送机制      | owner 的事务、outbox 表定义、业务重试判定 |
-| `object-storage`     | 多个应用实际使用的对象存储操作                      | 会话授权、工作区恢复策略                  |
-| `config`             | 集中的配置 schema、默认值与按进程解析               | 密钥值、业务决策、隐式全局配置对象        |
+## 边界
 
-`database/migrations` 是唯一迁移目录，手写 SQL 按事实 owner 划分，conversation 属于 server，execution 属于 agent。dbmate 统一执行，不建立应用内迁移目录、自写迁移执行器或另一份手写 TypeScript 表结构。
+- 应用不互相 import 源码；共享包不依赖应用。
+- 纯规则不导入 HTTP、Redis、Kysely 或 SDK。HTTP 可以直接调用具名事务操作。
+- 应用 SQL 位于各自 db；迁移位于 packages/database/migrations。
+- SDK 参数只在具体适配与装配出现，消费者只要求实际使用的能力。
+- class 只为真实资源身份与生命周期存在，不为命名空间或转发存在。
+- 不创建通用 service/repository、provider registry、插件引擎、生命周期框架或 common/utils。
 
-`database/generated/db.ts` 与 `database/generated/schema.sql` 分别由 kysely-codegen 和 pg_dump 从只应用当前 checkout 迁移的新一次性数据库生成，禁止手改。固定数据库 patch/digest、dump restrict-key 并排除迁移 bookkeeping，保证字节级复现；不从开发库生成。
+## 部署、测试与文档
 
-数据库包仅在实际消费者需要运行时代码时增加 `src`，不预建无消费者的连接包装或手写 TypeScript 表定义。业务查询留在应用的持久化适配器中，普通查询使用 Kysely 类型化 query builder，必要的参数化特殊 SQL 留在该边界并说明理由。迁移本身允许且要求手写 SQL。
+- `deploy/`：原生 PostgreSQL SQL/psql、Redis config/ACL、Caddy 与固定镜像。
+- `config/.env`：唯一运维输入，各进程显式选择字段。
+- `profiles/`：显式加载的受控指令，不预设任务目录。
+- `scripts/`：可信、有界、有资源所有权的验证/生成控制器。
+- 相邻单元测试与真实 SQL/Redis、对象存储、VM、浏览器测试各自保护实际行为。
+- 文档描述使用方式与稳定设计，不保存重构过程；generated 核对来源与复现，不手改。
 
-共享代码必须对应实际复用或明确的跨进程线格式；命令 schema 当前由 server 构造和读取，agent 接收端尚未实现，不据此扩展通用协议框架。不建立 `common`、`utils`、`base` 或无消费者的技术包。
-
-## 依赖方向
-
-- 应用之间不直接 import 源码，通过 HTTP 或内部执行协议通信。
-- 共享包不依赖应用，不持有应用实例，也不读取应用目录。
-- web 不引用 database、messaging、内部执行协议或服务端配置代码；AG-UI 使用官方类型。
-- server 与 agent 可以消费对应共享包，但只写自己拥有的表；共享 schema 不授予跨 owner 写权限。
-- 核心规则不依赖 HTTP、Redis、Kysely 或 pi 的具体类型；适配器连接外部实现，装配入口绑定依赖。
-- 模块按职责聚合，不按全局 controller/service/repository 横切。拆分依据是责任，不是行数。
-
-根类型检查、lint 与 dependency-cruiser 配置已存在。依赖检查覆盖循环、跨应用和 web 私有包访问；SWC parser 保留类型导入，relative 与 alias 的 type-only 越界负向探针均已验证会失败。上游兼容性警告仍存在，不宣称所有工具组合均受正式支持；责任归属及未机械检查的规则仍需人工评审。
-
-## 配置、部署与测试
-
-- `config` 存放运维输入；`packages/config` 存放定义与校验代码。两者不重复维护默认值。
-- `deploy/docker` 放可信应用、egress、数据库、Redis 和对象存储的镜像与 Compose 配置。
-- `deploy/sandbox` 放不可信工具执行环境的镜像定义。
-- 单元测试与源码相邻，使用同名 `.test.ts`；`tests/integration` 验证真实基础设施边界，`tests/e2e` 验证完整消息到产物链路。
-- 本地安装依赖供 IDE 使用，`node_modules/` 不进 Git。服务、数据库和正式验证在 Docker 中执行；迁移镜像用于已有数据库，临时数据库脚本只用于检查。
-- skills 和场景目录暂不创建，待能力实现时再确定位置。
+小行为保持内聚，有明确边界才拆文件；没有消费者不建 barrel、空占位或备用实现。

@@ -18,10 +18,11 @@
   },
   "devDependencies": {
     "@vid/config": "workspace:*",
+    "better-auth": "1.7.7",
     "@vid/database": "workspace:*",
-    "@vid/execution-protocol": "workspace:*",
-    "@vid/messaging": "workspace:*",
+    "@vid/contract": "workspace:*",
     "redis": "6.3.0",
+    "e2b": "2.52.0",
     "kysely": "0.29.6",
     "pg": "8.23.1",
     "@types/pg": "8.23.1",
@@ -31,6 +32,13 @@
     "oxlint": "1.86.0",
     "oxlint-tsgolint": "7.0.2003",
     "prettier": "3.9.9",
-    "dependency-cruiser": "18.5.0"
+    "dependency-cruiser": "18.5.0",
+    "@ag-ui/core": "1.0.1",
+    "@ag-ui/encoder": "1.0.1",
+    "@vid/object-storage": "workspace:*",
+    "@ag-ui/client": "1.0.1",
+    "@aws-sdk/client-s3": "3.1146.0",
+    "hono-openapi": "1.3.3",
+    "@hey-api/openapi-ts": "0.99.0"
   }
 }

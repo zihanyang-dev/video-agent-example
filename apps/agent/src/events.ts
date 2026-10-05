@@ -1,0 +1,45 @@
+import { setTimeout } from 'node:timers/promises'
+import type { ExecutionDatabase } from './db/connection'
+import { executionStreams } from '@vid/contract/execution'
+import type { RedisClientType } from 'redis'
+import { publishEvent, pendingEventIDs } from './db/event-publication'
+
+export async function relayEvents(
+  db: ExecutionDatabase,
+  commands: RedisClientType,
+  polling: Readonly<{ signal: AbortSignal; pollMs: number }>,
+) {
+  while (!polling.signal.aborted) {
+    await publishPendingEvents(db, commands, polling.signal)
+    await waitForPublicationPoll(polling)
+  }
+}
+
+async function publishPendingEvents(
+  db: ExecutionDatabase,
+  commands: RedisClientType,
+  signal: AbortSignal,
+) {
+  const pending = await pendingEventIDs(db)
+  for (const row of pending) {
+    if (signal.aborted) break
+    await publishEvent(db, {
+      eventID: row.event_id,
+      publish: async (delivery) => {
+        await commands.xAdd(executionStreams.events, '*', {
+          delivery: JSON.stringify(delivery),
+        })
+      },
+    })
+  }
+}
+
+async function waitForPublicationPoll(
+  polling: Readonly<{ signal: AbortSignal; pollMs: number }>,
+) {
+  try {
+    await setTimeout(polling.pollMs, undefined, { signal: polling.signal })
+  } catch (error) {
+    if (!(error instanceof Error && error.name === 'AbortError')) throw error
+  }
+}

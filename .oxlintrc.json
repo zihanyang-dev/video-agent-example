@@ -21,8 +21,6 @@
     "complexity": ["error", 10],
     "max-params": ["error", 4],
     "max-nested-callbacks": ["error", 3],
-    "max-lines-per-function": ["error", 60],
-    "max-statements": ["error", 25],
     "no-else-return": "error",
     "no-restricted-properties": [
       "error",

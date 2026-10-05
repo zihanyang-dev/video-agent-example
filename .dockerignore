@@ -4,6 +4,8 @@
 **/coverage
 **/.cache
 **/*.tsbuildinfo
+**/__pycache__
+**/*.pyc
 **/.env*
 !**/.env.example
 config/credentials*

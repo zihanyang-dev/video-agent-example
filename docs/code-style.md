@@ -26,8 +26,8 @@
 | B2  | 长条件藏在 `isValid` / `check` / `verify*` 里                                                 | `人工`              |
 | B3  | command 或对象字面量携带接收方拥有或可推导的事实                                              | `人工`              |
 | B4  | 闭合联合的 `switch` 没有以 `assertNever` 收尾                                                 | `lint` + `人工`     |
-| B5  | 一个函数同时做线格式解析、产品策略和网络 I/O                                                  | `人工`              |
-| B6  | 一串外部调用是一堵匿名的墙,而不是有名字的线性阶段                                             | `人工`              |
+| B5  | 一个函数同时做线格式解析、产品策略、数据库事务和网络 I/O                                      | `人工`              |
+| B6  | 事务或外部调用是一堵匿名的墙,而不是有名字的线性阶段                                           | `人工`              |
 | B7  | 同一个值在没有新边界事实的情况下被再校验;或把提交前预检查当作最终授权                         | `人工`              |
 | B8  | helper / type / 模块只做转发、改名或减少行数                                                  | `人工`              |
 | B9  | 测试断言的是仪式、调用顺序或同一事实的另一种表示                                              | `人工`              |
@@ -114,15 +114,13 @@ async function reconcileRenderJob(report: ProviderReport) {
 {
   "complexity": ["error", 10],
   "max-params": ["error", 4],
-  "max-nested-callbacks": ["error", 3],
-  "max-lines-per-function": ["error", 60],
-  "max-statements": ["error", 25]
+  "max-nested-callbacks": ["error", 3]
 }
 ```
 
-这几条平时不会响。它们是保险,不是目标——**响了说明形状已经坏了,不是把数字调大。**
+这些规则提示分支、参数和回调的复杂度，不证明设计好坏，也不能靠调高阈值逃避审查。函数长度和语句数由人工审查：**不能只为了缩短函数拆出转发层和 helper 森林**。线性的资源装配或事务可以比一组来回跳转的小函数更清楚。
 
-参数超过 4 个改成一个具名的 options 对象;但那个对象必须是**一个真实的概念**,不是参数袋(B3)。
+参数过多时先分清责任、减少重复事实；只有参数本来描述同一个行动或身份，才使用具名对象。不能把不相干的 SQL、HTTP、策略、callback 和 SDK options 塞进一个对象来通过规则。
 
 ---
 
@@ -151,7 +149,7 @@ export type TRenderOutcome = …              // T 前缀
 export interface ProviderReportInterface {} // 后缀说的是语法不是事实
 ```
 
-- `interface` 用于会被实现或扩展的形状;其余一律 `type`
+- `interface` 用于实际会被实现或扩展的最小形状;其余用 `type`。不为每个具体实现建设接口。
 - 名字是**这个事实是什么**,不是它在代码里的角色
 - 泛型参数用有意义的词:`<Command>` `<Outcome>`,不是 `<T>` `<K>`——除非它真的是任意的
 
@@ -221,16 +219,9 @@ toolCallId      ——                pi 的字段名
 
 不写下来的代价是真的:同一个概念被现场翻译两次,下一个人会翻成别的词。
 
-### 3.6 禁止词 `人工`
+### 3.6 准确命名 `人工`
 
-标识符和文件名里不出现:
-
-```text
-Manager · Processor · Coordinator · Handler · Resource
-Payload · Data · Info · Utils · Common · Base · Helper
-```
-
-有具体名词就用具体名词。**这条同时拦文件名和导出名。**
+自有模块不用 `Manager`、`Processor`、`Utils`、`Common` 等词掩盖不明确的职责。有具体名词就用具体名词，但不维护标识符禁词表：官方 API 的 `data`、`Handler` 或 `Resource` 不因此需要翻译包装。判断依据是读者能否准确理解事实、作用与生命周期，而不是源码里出现了哪个词。
 
 ---
 
@@ -384,7 +375,7 @@ owner 错误有稳定语义和诊断原因,不直接成为公开文案。transpo
 
 ## 6. 模块与文件
 
-模块只为三类责任之一存在:**事实 owner** · **进程 adapter** · **明确命名的边界**。第三类只组合、翻译、适配,不拥有产品策略。
+模块只为三类责任之一存在:**事实 owner** · **进程 adapter** · **明确命名的边界**。第三类只组合、翻译、适配,不拥有产品策略。产品归属、执行进程职责与基础设施能力分别组织，不要求 server 和 agent 目录对称；具体结构见 [directory-structure.md](directory-structure.md)。
 
 ```text
 ❌  render/service.ts          一个 owner 的全部行为堆在一个桶
@@ -483,7 +474,9 @@ expect(outcome.video.durationMs).toBeCloseTo(30_000, -2)
 
 ---
 
-## 10. 注释写决定,不写代码 `人工`
+## 10. 注释充分记录决定,不复述语法 `人工`
+
+注释必须充分，不是越少越好。每个重要事务/资源入口要说明它保护的事实、权威、锁序、失败恢复与停止边界；不直观的 SDK 行为、不可观测结果、权限隐私约束和被否决的方案必须写出理由。相邻注释和代码一起维护，不能用长注释掩盖错误形状。
 
 **代码说它做了什么,注释说为什么是这个而不是另一个。** 一行复述下面那行的注释,下次改代码时
 没人会跟着改,于是它变成一句错话。
@@ -516,7 +509,7 @@ expect(outcome.video.durationMs).toBeCloseTo(30_000, -2)
 - `packages/database/migrations` 中的手写 SQL 是表结构唯一源码，按事实 owner 组织；共享数据库包不拥有产品或执行规则。
 - dbmate 统一执行迁移，只前向修正，不改写已应用迁移，不自写迁移执行器。kysely-codegen 生成 `packages/database/generated/db.ts`，pg_dump 独立生成 `packages/database/generated/schema.sql`；两者不手改、不作为迁移来源。生成只使用当前 checkout 迁移构建的一次性空库，不使用开发库；开发允许未提交迁移，发布只使用已提交版本。
 - 产品查询与事务位于 server 的持久化/发送适配器，执行查询与事务位于 agent 的持久化/发送适配器。普通查询用 Kysely 类型化 query builder；必要的特殊 SQL 仅限持久化边界，参数化并说明理由，不拼接外部输入。手写迁移 SQL 允许且必须审查。唯一约束与事务保护并发不变量。
-- 业务能力在应用内部聚合,不强制套四层目录。核心规则不依赖具体 SDK、数据库或 transport;最小接口由实际消费方定义,适配器实现,装配入口绑定。
+- 业务能力按一起变化的事实/行为聚合，不强制四层目录；SQL 统一在对应应用 `db/`。纯规则不导入 SDK、Kysely 或 transport，不拿事务句柄。持久化边界锁读权威事实、调用纯规则、原子应用变化；入口只解析/认证/翻译。简单入口可直接调用具名事务函数，不增加纯转发 service；真正跨步骤行为才有编排。最小接口由实际消费方定义，适配器实现，装配入口只绑定所需能力。
 - 跨应用不 import 源码,共享包不依赖应用,模块间只访问公开入口。当前 dependency-cruiser 检查类型导入、循环和跨应用依赖，使用 SWC parser；工具兼容性边界见技术栈文档。
 - 环境读取、配置 schema 与默认值集中在 `packages/config`,进程启动只解析自己的配置。私有凭据不是代码,不提交 Git、不进入镜像或 sandbox。
 
@@ -526,5 +519,4 @@ expect(outcome.video.durationMs).toBeCloseTo(30_000, -2)
 
 ## 来源
 
-本文件搬自 [zihanyang-dev/handover](https://github.com/zihanyang-dev/handover) 的 `docs/code-style.md`,
-规则按本项目的领域、持久化和分层约束持续修订。
+本文件以 [zihanyang-dev/handover](https://github.com/zihanyang-dev/handover) 的代码美学为基础，按实际领域、持久化和可靠性持续修订。2026 年的窄抽象、功能聚合和深模块设计依据见 [技术选择](technology-stack.md#设计依据)；它们不是反 class 共识，也不为新依赖或机械改写提供免责。

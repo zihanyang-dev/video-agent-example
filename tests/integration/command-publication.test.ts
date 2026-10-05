@@ -2,11 +2,12 @@ import { afterAll, expect, test } from 'bun:test'
 import {
   executionCommandSchema,
   type ExecutionCommand,
-} from '@vid/execution-protocol'
+} from '@vid/contract/execution'
 import { createClient } from 'redis'
-import { publishCommand } from '../../apps/server/src/modules/conversation/publish-command'
-import { createConversationWrites } from '../../apps/server/src/modules/conversation/conversations-postgres'
-import { openTestDatabase } from './database-fixture'
+import { sql } from 'kysely'
+import { publishCommand } from '../../apps/server/src/db/command-publication'
+import { acceptMessageIntent } from '../../apps/server/src/db/submissions'
+import { seedTestUser, openTestDatabase } from './database-fixture'
 
 const { db, close } = openTestDatabase()
 const threadIDs: string[] = []
@@ -30,15 +31,16 @@ afterAll(async () => {
   }
 })
 
-async function pendingCommand() {
+async function pendingCommand(threadID: string = crypto.randomUUID()) {
   const intent = {
     ownerID: 'publication-test-owner',
-    threadID: crypto.randomUUID(),
+    threadID,
     messageID: crypto.randomUUID(),
     commandID: crypto.randomUUID(),
     runID: crypto.randomUUID(),
     text: 'Hello',
   }
+  await seedTestUser(db, intent.ownerID)
   await db
     .insertInto('product.threads')
     .values({
@@ -47,7 +49,7 @@ async function pendingCommand() {
     })
     .execute()
   threadIDs.push(intent.threadID)
-  const accepted = await createConversationWrites(db).submit(intent)
+  const accepted = await acceptMessageIntent(db, intent)
   if (accepted.kind !== 'accepted')
     throw new Error('Fixture command was not accepted')
   return intent
@@ -187,7 +189,7 @@ test.each(['commandID', 'threadID', 'runID', 'messageID'] as const)(
         : { ...command, [field]: crypto.randomUUID() }
     await db
       .updateTable('product.command_outbox')
-      .set({ command: mismatched })
+      .set({ command: sql`${JSON.stringify(mismatched)}::jsonb` })
       .where('command_id', '=', intent.commandID)
       .execute()
     const { redis, stream, closeStream } = publicationStream()
@@ -283,6 +285,67 @@ test('a lost Redis acceptance receipt can duplicate delivery but preserves comma
         input: { messageID: intent.messageID, text: 'Hello' },
       })
     }
+  } finally {
+    await closeStream()
+  }
+})
+
+test('legacy uppercase JSON identities match canonical outbox headers and publish canonical JSON', async () => {
+  const intent = await pendingCommand('abcdefab-cdef-4abc-8def-abcdefabcded')
+  const command = {
+    version: 1,
+    kind: 'start',
+    commandID: 'ABCDEFAB-CDEF-4ABC-8DEF-ABCDEFABCDEF',
+    threadID: intent.threadID.toUpperCase(),
+    runID: 'BCDEFABC-DEFA-4BCD-8EFA-BCDEFABCDEFA',
+    input: { messageID: 'CDEFABCD-EFAB-4CDE-8FAB-CDEFABCDEFAB', text: 'Hello' },
+  } as const
+  // Use known alphabetic UUIDs; keep FK-backed thread and message columns intact.
+  await db
+    .insertInto('product.messages')
+    .values({
+      message_id: command.input.messageID,
+      thread_id: intent.threadID,
+      role: 'user',
+      text: 'Hello',
+    })
+    .execute()
+  await db
+    .updateTable('product.command_outbox')
+    .set({
+      command_id: command.commandID,
+      run_id: command.runID,
+      message_id: command.input.messageID,
+      command,
+    })
+    .where('command_id', '=', intent.commandID)
+    .execute()
+  const { redis, stream, closeStream } = publicationStream()
+  try {
+    await redis.connect()
+    expect(
+      await publishCommand(db, {
+        commandID: command.commandID,
+        publish: async (published) => {
+          await redis.xAdd(stream, '*', { command: JSON.stringify(published) })
+        },
+      }),
+    ).toBe('published')
+    const entries = await redis.xRange(stream, '-', '+')
+    if (entries === null) {
+      throw new Error('Expected published Redis command')
+    }
+    expect(entries).toHaveLength(1)
+    expect(JSON.parse(entries[0]?.message.command ?? 'null')).toEqual({
+      ...command,
+      commandID: 'abcdefab-cdef-4abc-8def-abcdefabcdef',
+      threadID: intent.threadID,
+      runID: 'bcdefabc-defa-4bcd-8efa-bcdefabcdefa',
+      input: {
+        messageID: 'cdefabcd-efab-4cde-8fab-cdefabcdefab',
+        text: 'Hello',
+      },
+    })
   } finally {
     await closeStream()
   }

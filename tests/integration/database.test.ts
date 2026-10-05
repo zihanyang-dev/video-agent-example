@@ -1,5 +1,5 @@
 import { afterAll, expect, test } from 'bun:test'
-import { openTestDatabase } from './database-fixture'
+import { seedTestUser, openTestDatabase } from './database-fixture'
 
 const { db, close } = openTestDatabase()
 const threadIDs: string[] = []
@@ -25,6 +25,7 @@ afterAll(async () => {
 
 async function createThread() {
   const thread_id = crypto.randomUUID()
+  await seedTestUser(db, 'database-test-owner')
   await db
     .insertInto('product.threads')
     .values({ thread_id, owner_id: 'database-test-owner' })
@@ -176,4 +177,21 @@ test('a start command cannot refer to an absent message', async () => {
       .execute()
       .catch((error: unknown) => error),
   ).toMatchObject({ code: '23503' })
+})
+
+test('new threads must reference an existing real authentication user', async () => {
+  const threadID = crypto.randomUUID()
+  const rejected = await db
+    .insertInto('product.threads')
+    .values({ thread_id: threadID, owner_id: 'unknown-authentication-user' })
+    .execute()
+    .catch((cause: unknown) => cause)
+  expect(rejected).toMatchObject({ code: '23503' })
+  expect(
+    await db
+      .selectFrom('product.threads')
+      .select('thread_id')
+      .where('thread_id', '=', threadID)
+      .execute(),
+  ).toEqual([])
 })

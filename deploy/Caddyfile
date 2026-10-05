@@ -1,0 +1,18 @@
+{
+	admin off
+	auto_https off
+}
+
+:8080 {
+	handle /api/* {
+		# Caddy flushes text/event-stream immediately by default. Avoid -1:
+		# it leaves upstream requests alive after a browser disconnects.
+		reverse_proxy server:{$SERVER_PORT:8787}
+	}
+
+	handle {
+		root * /srv
+		try_files {path} /index.html
+		file_server
+	}
+}
