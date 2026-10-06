@@ -293,7 +293,9 @@ CREATE TABLE product.messages (
     thread_id uuid NOT NULL,
     role product.message_role NOT NULL,
     text text NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    sources jsonb DEFAULT '[]'::jsonb NOT NULL,
+    CONSTRAINT messages_sources_check CHECK (((jsonb_typeof(sources) = 'array'::text) AND (jsonb_array_length(sources) <= 15)))
 );
 
 
@@ -377,6 +379,14 @@ ALTER TABLE ONLY execution.command_inbox
 
 
 --
+-- Name: command_inbox command_inbox_run_identity; Type: CONSTRAINT; Schema: execution; Owner: -
+--
+
+ALTER TABLE ONLY execution.command_inbox
+    ADD CONSTRAINT command_inbox_run_identity UNIQUE (thread_id, run_id, command_id);
+
+
+--
 -- Name: conversations conversations_pkey; Type: CONSTRAINT; Schema: execution; Owner: -
 --
 
@@ -414,6 +424,14 @@ ALTER TABLE ONLY execution.runs
 
 ALTER TABLE ONLY execution.runs
     ADD CONSTRAINT runs_pkey PRIMARY KEY (run_id);
+
+
+--
+-- Name: runs runs_thread_identity; Type: CONSTRAINT; Schema: execution; Owner: -
+--
+
+ALTER TABLE ONLY execution.runs
+    ADD CONSTRAINT runs_thread_identity UNIQUE (thread_id, run_id);
 
 
 --
@@ -564,6 +582,27 @@ CREATE INDEX runs_thread_status_idx ON execution.runs USING btree (thread_id, st
 
 
 --
+-- Name: execution_events_run_message_idx; Type: INDEX; Schema: product; Owner: -
+--
+
+CREATE INDEX execution_events_run_message_idx ON product.execution_events USING btree (run_id, ordinal) WHERE (payload ? 'messageID'::text);
+
+
+--
+-- Name: execution_events_run_processed_idx; Type: INDEX; Schema: product; Owner: -
+--
+
+CREATE INDEX execution_events_run_processed_idx ON product.execution_events USING btree (run_id, ordinal DESC) WHERE processed;
+
+
+--
+-- Name: execution_events_run_terminal_idx; Type: INDEX; Schema: product; Owner: -
+--
+
+CREATE UNIQUE INDEX execution_events_run_terminal_idx ON product.execution_events USING btree (run_id) WHERE ((payload ->> 'kind'::text) = ANY (ARRAY['run-completed'::text, 'run-cancelled'::text, 'run-failed'::text]));
+
+
+--
 -- Name: execution_events_thread_replay_idx; Type: INDEX; Schema: product; Owner: -
 --
 
@@ -601,19 +640,27 @@ ALTER TABLE ONLY auth.session
 
 
 --
--- Name: event_outbox event_outbox_run_id_fkey; Type: FK CONSTRAINT; Schema: execution; Owner: -
+-- Name: conversations conversations_active_run_identity; Type: FK CONSTRAINT; Schema: execution; Owner: -
+--
+
+ALTER TABLE ONLY execution.conversations
+    ADD CONSTRAINT conversations_active_run_identity FOREIGN KEY (thread_id, active_run_id) REFERENCES execution.runs(thread_id, run_id);
+
+
+--
+-- Name: event_outbox event_outbox_run_identity; Type: FK CONSTRAINT; Schema: execution; Owner: -
 --
 
 ALTER TABLE ONLY execution.event_outbox
-    ADD CONSTRAINT event_outbox_run_id_fkey FOREIGN KEY (run_id) REFERENCES execution.runs(run_id);
+    ADD CONSTRAINT event_outbox_run_identity FOREIGN KEY (thread_id, run_id) REFERENCES execution.runs(thread_id, run_id);
 
 
 --
--- Name: runs runs_command_id_fkey; Type: FK CONSTRAINT; Schema: execution; Owner: -
+-- Name: runs runs_command_identity; Type: FK CONSTRAINT; Schema: execution; Owner: -
 --
 
 ALTER TABLE ONLY execution.runs
-    ADD CONSTRAINT runs_command_id_fkey FOREIGN KEY (command_id) REFERENCES execution.command_inbox(command_id);
+    ADD CONSTRAINT runs_command_identity FOREIGN KEY (thread_id, run_id, command_id) REFERENCES execution.command_inbox(thread_id, run_id, command_id);
 
 
 --
@@ -641,11 +688,11 @@ ALTER TABLE ONLY product.assets
 
 
 --
--- Name: command_outbox command_outbox_message_id_fkey; Type: FK CONSTRAINT; Schema: product; Owner: -
+-- Name: command_outbox command_outbox_message_identity; Type: FK CONSTRAINT; Schema: product; Owner: -
 --
 
 ALTER TABLE ONLY product.command_outbox
-    ADD CONSTRAINT command_outbox_message_id_fkey FOREIGN KEY (message_id) REFERENCES product.messages(message_id);
+    ADD CONSTRAINT command_outbox_message_identity FOREIGN KEY (thread_id, message_id) REFERENCES product.messages(thread_id, message_id);
 
 
 --

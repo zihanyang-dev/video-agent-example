@@ -20,6 +20,7 @@ import { claimExecutionRun } from './db/execution-leases'
 import type { ExecuteRunDependencies } from './execute-run'
 import { createPiHarness } from './harness/pi'
 import { runWorker } from './run-loop'
+import type { WorkerHealth } from './worker-health'
 
 type WorkerAssignment = Partial<
   Pick<ExecuteRunDependencies, 'harness' | 'openSandbox'>
@@ -46,6 +47,7 @@ export async function startWorker(
     DATABASE_URL: env.DATABASE_URL,
     REDIS_URL: env.REDIS_URL,
     IO_TIMEOUT_MS: env.IO_TIMEOUT_MS,
+    POLL_MS: env.POLL_MS,
   }
   const worker = allocateWorkerProcess(connections, assignment.signal, objects)
   try {
@@ -62,8 +64,7 @@ export async function startWorker(
 
     const execution = {
       writes: bindExecutionWrites(worker.db),
-      claim: (options: Readonly<{ ownerID: string; leaseMs: number }>) =>
-        claimExecutionRun(worker.db, options),
+      claim: worker.claim,
       harness,
       openSandbox,
       ...(fileTools === undefined ? {} : { fileTools }),
@@ -74,6 +75,7 @@ export async function startWorker(
       leaseMs: env.LEASE_MS,
       pollMs: env.POLL_MS,
       signal: worker.signal,
+      runTimeoutMs: Math.max(1000, env.SANDBOX_TIMEOUT_MS - 20000),
     }
     worker.own(acceptCommands(worker.db, consumer, worker.signal))
     worker.own(runWorker(execution, scheduling))
@@ -83,9 +85,17 @@ export async function startWorker(
         pollMs: env.POLL_MS,
       }),
     )
-    return { done: worker.done, stop: worker.stop }
+    worker.markReady()
+    return { done: worker.done, stop: worker.stop, health: worker.health }
   } catch (error) {
-    await worker.stop()
+    try {
+      await worker.stop()
+    } catch (cleanup) {
+      throw new AggregateError(
+        [error, cleanup],
+        'Worker startup and cleanup failed',
+      )
+    }
     throw error
   }
 }
@@ -101,6 +111,12 @@ async function loadConfiguredHarness(env: WorkerEnv) {
     reasoning: env.MODEL_REASONING,
     input: env.MODEL_INPUT === 'text' ? ['text'] : ['text', 'image'],
     systemPrompt,
+    webSearch: {
+      authMode: env.WEB_SEARCH_AUTH_MODE,
+      ...(env.TAVILY_API_KEY === undefined
+        ? {}
+        : { apiKey: env.TAVILY_API_KEY }),
+    },
   })
 }
 
@@ -140,14 +156,22 @@ function connectWorkerStorage(env: WorkerEnv, needsStorage: boolean) {
 }
 
 function allocateWorkerProcess(
-  connections: Pick<WorkerEnv, 'DATABASE_URL' | 'REDIS_URL' | 'IO_TIMEOUT_MS'>,
+  connections: Pick<WorkerEnv, 'DATABASE_URL' | 'REDIS_URL' | 'IO_TIMEOUT_MS'> &
+    Partial<Pick<WorkerEnv, 'POLL_MS'>>,
   signal: AbortSignal | undefined,
   objects: ObjectStore | undefined,
 ) {
   try {
     return new WorkerProcess(connections, signal, objects)
   } catch (cause) {
-    objects?.close()
+    try {
+      objects?.close()
+    } catch (cleanup) {
+      throw new AggregateError(
+        [cause, cleanup],
+        'Worker construction and cleanup failed',
+      )
+    }
     throw cause
   }
 }
@@ -162,12 +186,33 @@ export class WorkerProcess {
   private readonly tasks: Promise<void>[] = []
   private readonly failures: unknown[] = []
   private closing?: Promise<void>
+  private started = false
+
+  markReady() {
+    this.started = true
+  }
+
+  readonly health = (): WorkerHealth => {
+    const phase =
+      this.failures.length > 0
+        ? 'failed'
+        : this.signal.aborted
+          ? 'stopping'
+          : this.started && this.commands.isReady && this.blockingReader.isReady
+            ? 'ready'
+            : 'starting'
+    return { live: !this.signal.aborted, ready: phase === 'ready', phase }
+  }
+
+  readonly claim = (options: Readonly<{ ownerID: string; leaseMs: number }>) =>
+    claimExecutionRun(this.db, options)
 
   constructor(
     private readonly connections: Pick<
       WorkerEnv,
       'DATABASE_URL' | 'REDIS_URL' | 'IO_TIMEOUT_MS'
-    >,
+    > &
+      Partial<Pick<WorkerEnv, 'POLL_MS'>>,
     private readonly externalSignal?: AbortSignal,
     private readonly objects?: ObjectStore,
   ) {
@@ -232,19 +277,24 @@ export class WorkerProcess {
   }
 
   close(): Promise<void> {
-    if (this.closing !== undefined) return this.closing
+    // Publish ownership before synchronous abort listeners can reenter close.
+    this.closing ??= Promise.resolve().then(() => this.disconnectAfterTasks())
     this.abort()
-    this.closing = this.disconnectAfterTasks()
     return this.closing
   }
 
   private async disconnectAfterTasks() {
     this.externalSignal?.removeEventListener('abort', this.abort)
     await Promise.all(this.tasks)
-    this.objects?.close()
     const disconnected = await Promise.allSettled([
-      this.disconnectRedis(),
-      this.db.destroy(),
+      Promise.resolve().then(() => this.objects?.close()),
+      Promise.resolve().then(() => {
+        if (this.blockingReader.isOpen) this.blockingReader.destroy()
+      }),
+      Promise.resolve().then(() => {
+        if (this.commands.isOpen) this.commands.destroy()
+      }),
+      Promise.resolve().then(() => this.db.destroy()),
     ])
     for (const connection of disconnected) {
       if (connection.status === 'rejected')
@@ -256,11 +306,6 @@ export class WorkerProcess {
         'Worker process failed; unaccepted deliveries remain pending',
       )
     }
-  }
-
-  private async disconnectRedis() {
-    if (this.blockingReader.isOpen) this.blockingReader.destroy()
-    if (this.commands.isOpen) this.commands.destroy()
   }
 }
 

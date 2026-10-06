@@ -53,13 +53,9 @@ async function storeUpload(
   // Legacy storage is read-only. First reconcile an uncertain historical PUT;
   // otherwise stage identical bytes at the deterministic writable location.
   // A failed GET is not proof of absence: never delete or overwrite old bytes.
-  if (reservation.ready_at !== null) {
-    const confirmed = await confirmStored(io, {
-      ...asset,
-      objectKey: reservation.object_key,
-    })
-    return confirmed ? reservation.object_key : null
-  }
+  // SQL already records a confirmed publication. Reservation checked immutable
+  // identity and current write authority; replay does not need storage IO.
+  if (reservation.ready_at !== null) return reservation.object_key
 
   if (reservation.object_key !== asset.objectKey) {
     const confirmed = await confirmStored(io, {
@@ -76,6 +72,7 @@ async function storeUpload(
       asset.mimeType,
       io.signal,
     )
+    return asset.objectKey
   } catch {
     // PUT may have committed despite a lost receipt (or an exact concurrent
     // retry won). Read the assigned key below; never blindly delete it.

@@ -9,10 +9,4 @@
 		# it leaves upstream requests alive after a browser disconnects.
 		reverse_proxy server:{$SERVER_PORT:8787}
 	}
-
-	handle {
-		root * /srv
-		try_files {path} /index.html
-		file_server
-	}
 }

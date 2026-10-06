@@ -1,12 +1,11 @@
 import { z } from 'zod'
+import { webSourcesSchema } from './web-source'
+import { fileNameSchema } from './file-name'
+import { publicFailureReasonSchema } from './failure-reason'
 
 const file = {
   objectKey: z.string().min(1).max(1024),
-  name: z
-    .string()
-    .min(1)
-    .max(255)
-    .regex(/^(?!\.{1,2}$)(?!.*[/\\])[\x20-\x7e\u0080-\uffff]+$/),
+  name: fileNameSchema,
   mimeType: z
     .string()
     .max(127)
@@ -23,7 +22,7 @@ export const assetReferenceSchema = z
   .readonly()
 export type AssetReference = z.infer<typeof assetReferenceSchema>
 
-export const ASSET_MAX_INPUT_FILES = 16
+const ASSET_MAX_INPUT_FILES = 16
 export const ASSET_MAX_OUTPUT_FILES = 32
 
 const startInputSchema = z
@@ -86,6 +85,21 @@ const identities = {
   runID: z.uuid().toLowerCase(),
 }
 
+const completedEventSchema = z
+  .strictObject({
+    ...identities,
+    kind: z.literal('run-completed'),
+    sources: webSourcesSchema.optional(),
+    messageID: z.uuid().toLowerCase(),
+    text: z.string(),
+    assets: z
+      .array(assetReferenceSchema)
+      .max(ASSET_MAX_OUTPUT_FILES)
+      .readonly()
+      .optional(),
+  })
+  .readonly()
+
 /** Facts for server acceptance. Object keys are private allocation references, never client URLs.
  * Private history, tool arguments and errors never travel here. */
 export const executionEventSchema = z.discriminatedUnion('kind', [
@@ -98,19 +112,7 @@ export const executionEventSchema = z.discriminatedUnion('kind', [
       delta: z.string(),
     })
     .readonly(),
-  z
-    .strictObject({
-      ...identities,
-      kind: z.literal('run-completed'),
-      messageID: z.uuid().toLowerCase(),
-      text: z.string(),
-      assets: z
-        .array(assetReferenceSchema)
-        .max(ASSET_MAX_OUTPUT_FILES)
-        .readonly()
-        .optional(),
-    })
-    .readonly(),
+  completedEventSchema,
   z
     .strictObject({ ...identities, kind: z.literal('run-cancelled') })
     .readonly(),
@@ -118,11 +120,7 @@ export const executionEventSchema = z.discriminatedUnion('kind', [
     .strictObject({
       ...identities,
       kind: z.literal('run-failed'),
-      reason: z.enum([
-        'execution-error',
-        'interrupted',
-        'sandbox-recovery-required',
-      ]),
+      reason: publicFailureReasonSchema,
     })
     .readonly(),
 ])
@@ -138,6 +136,83 @@ export const executionDeliverySchema = z
   .readonly()
 
 export type ExecutionDelivery = z.infer<typeof executionDeliverySchema>
+
+// Retained Redis v1 envelopes predate the SQL asset consolidation. These are
+// explicit inbound-only schemas: outbound schemas/JSON Schema remain normative.
+// Strict branches reject simultaneous aliases and unknown fields before upgrade.
+const legacyMaterialSchema = z.strictObject({
+  materialID: z.uuid().toLowerCase(),
+  ...file,
+})
+const legacyArtifactSchema = z.strictObject({
+  artifactID: z.uuid().toLowerCase(),
+  ...file,
+})
+const legacyStartInputSchema = z
+  .strictObject({
+    messageID: z.uuid().toLowerCase(),
+    text: z.string(),
+    materials: z
+      .array(legacyMaterialSchema)
+      .max(ASSET_MAX_INPUT_FILES)
+      .optional(),
+  })
+  .transform(({ materials, ...input }): z.input<typeof startInputSchema> => ({
+    ...input,
+    ...(materials?.length
+      ? {
+          assets: materials.map(({ materialID, ...reference }) => ({
+            assetID: materialID,
+            ...reference,
+          })),
+        }
+      : {}),
+  }))
+  .pipe(startInputSchema)
+const legacyStartCommandSchema = startCommandSchema
+  .unwrap()
+  .extend({ input: legacyStartInputSchema })
+  .pipe(startCommandSchema)
+
+/** Parse only at the untyped Redis command boundary; output is current ExecutionCommand. */
+export const inboundExecutionCommandSchema = z.union([
+  executionCommandSchema,
+  legacyStartCommandSchema,
+])
+
+const legacyCompletedEventSchema = completedEventSchema
+  .unwrap()
+  .omit({ assets: true })
+  .extend({
+    artifacts: z
+      .array(legacyArtifactSchema)
+      .max(ASSET_MAX_OUTPUT_FILES)
+      .optional(),
+  })
+  .transform(
+    ({ artifacts, ...event }): z.input<typeof completedEventSchema> => ({
+      ...event,
+      ...(artifacts !== undefined
+        ? {
+            assets: artifacts.map(({ artifactID, ...reference }) => ({
+              assetID: artifactID,
+              ...reference,
+            })),
+          }
+        : {}),
+    }),
+  )
+  .pipe(completedEventSchema)
+const inboundExecutionEventSchema = z.union([
+  executionEventSchema,
+  legacyCompletedEventSchema,
+])
+
+/** Preserves the retained ordinal; output is current ExecutionDelivery. */
+export const inboundExecutionDeliverySchema = executionDeliverySchema
+  .unwrap()
+  .extend({ event: inboundExecutionEventSchema })
+  .readonly()
 
 /** Native schema export for foreign wire validators, never fake HTTP routes.
  * UUID parsing additionally canonicalizes case; validators do not insert or

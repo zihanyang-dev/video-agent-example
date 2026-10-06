@@ -1,8 +1,6 @@
 import { expect, test } from 'bun:test'
 import {
-  authorizeThread,
   decideThreadAccess,
-  authorizeCancellation,
   decideMessageReplay,
   normalizeMessageIntent,
 } from './submission'
@@ -35,11 +33,30 @@ test('normalization preserves opaque ownership and canonicalizes all execution i
 })
 
 test('authorization treats missing and foreign threads equally without case-folding owners', () => {
-  expect(authorizeThread('Owner-ABC', 'Owner-ABC')).toBe('authorized')
-  expect(authorizeThread('Owner-ABC', 'owner-abc')).toBe('unavailable')
-  expect(authorizeThread('Owner-ABC', null)).toBe('unavailable')
-  expect(authorizeCancellation(false)).toBe('unavailable')
-  expect(authorizeCancellation(true)).toBe('authorized')
+  for (const action of ['read', 'write', 'cancel'] as const) {
+    expect(
+      decideThreadAccess(
+        'Owner-ABC',
+        { ownerID: 'Owner-ABC', archived: false },
+        action,
+      ),
+    ).toBe('authorized')
+    expect(
+      decideThreadAccess(
+        'Owner-ABC',
+        { ownerID: 'owner-abc', archived: false },
+        action,
+      ),
+    ).toBe('unavailable')
+    expect(
+      decideThreadAccess(
+        'Owner-ABC',
+        { ownerID: null, archived: false },
+        action,
+      ),
+    ).toBe('unavailable')
+    expect(decideThreadAccess('Owner-ABC', null, action)).toBe('unavailable')
+  }
 })
 
 const saved = {

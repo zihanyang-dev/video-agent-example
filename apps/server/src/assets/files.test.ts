@@ -1,9 +1,13 @@
 import { expect, test } from 'bun:test'
 import { validateFile, validGeneratedAssets } from './files'
 test('file authority rejects paths, spoofed signatures, and accepts real bytes', () => {
-  expect(validateFile('../image.png', 'image/png', new Uint8Array([1]))).toBe(
-    false,
-  )
+  expect(
+    validateFile(
+      '../image.png',
+      'image/png',
+      new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]),
+    ),
+  ).toBe(false)
   expect(validateFile('image.png', 'image/png', new Uint8Array([1]))).toBe(
     false,
   )
@@ -14,6 +18,13 @@ test('file authority rejects paths, spoofed signatures, and accepts real bytes',
     validateFile('note.txt', 'text/html', new TextEncoder().encode('<script>')),
   ).toBe(false)
 })
+
+for (const mimeType of ['constructor', 'toString', '__proto__'])
+  test(`inherited property ${mimeType} is not an accepted MIME type`, () => {
+    expect(
+      validateFile('note.txt', mimeType, new TextEncoder().encode('hello')),
+    ).toBe(false)
+  })
 
 test('UTF-8 attachment names remain names without becoming paths or header controls', () => {
   const bytes = new TextEncoder().encode('hello')

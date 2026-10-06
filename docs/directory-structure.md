@@ -1,6 +1,6 @@
 # 文件与依赖
 
-目录按应用自身的责任划分，不按三个应用的名字做镜像。server 拥有产品功能，agent 是执行进程，web 是呈现。
+目录按实际责任划分：server 拥有产品功能，agent 是执行进程，不要求两者目录对称。
 
 ## server
 
@@ -21,6 +21,7 @@ apps/server/src/
 ## agent
 
 ```text
+apps/agent/prompt.md        worker 的系统提示词
 apps/agent/src/
   main.ts                   读取配置和进程信号
   worker.ts                 连接、后台循环、活跃任务与关闭
@@ -38,18 +39,6 @@ agent 没有用户侧 conversation 或资产领域。它接受已授权任务并
 文件导入与交付是 harness 的工具行为：只使用已分配引用，guest 路径由 Agent 决定。没有独立 assets/workspace 模块。沙箱原生保存整个执行环境，数据库保存原生引用。
 
 worker 与 server 只共享协议，不共享产品权限代码。私有执行数据库的权限边界不等于产品目录必须出现 execution。
-
-## web
-
-```text
-apps/web/src/
-  main.tsx / http.ts / style.css
-  identity/                 登录、会话和隐私清理
-  conversations/            Chat、消息、运行观察与局部交互
-  assets/                   文件选择、上传与展示
-```
-
-组件、查询、hooks 与相关测试围绕功能相邻，不按 components/hooks/types/utils 横切。Chat 是界面名称，threadID 是会话身份，页面不引入 workspace 或 project 实体。
 
 ## 共享包
 
@@ -77,9 +66,8 @@ Redis 直接使用官方 SDK；不维护另一套 messaging SDK。存储包不�
 
 - `deploy/`：原生 PostgreSQL SQL/psql、Redis config/ACL、Caddy 与固定镜像。
 - `config/.env`：唯一运维输入，各进程显式选择字段。
-- `profiles/`：显式加载的受控指令，不预设任务目录。
 - `scripts/`：可信、有界、有资源所有权的验证/生成控制器。
-- 相邻单元测试与真实 SQL/Redis、对象存储、VM、浏览器测试各自保护实际行为。
+- 相邻单元测试与 SQL/Redis、对象存储、VM 和部署测试各自保护实际行为。
 - 文档描述使用方式与稳定设计，不保存重构过程；generated 核对来源与复现，不手改。
 
 小行为保持内聚，有明确边界才拆文件；没有消费者不建 barrel、空占位或备用实现。

@@ -171,6 +171,7 @@ export interface ProductMessages {
   created_at: Generated<Timestamp>
   message_id: string
   role: ProductMessageRole
+  sources: Generated<Json>
   text: string
   thread_id: string
 }

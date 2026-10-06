@@ -38,6 +38,9 @@ const positiveInteger = z.coerce
   .int({ error: 'Must be a positive integer' })
   .positive({ error: 'Must be a positive integer' })
 const port = positiveInteger.max(65535, { error: 'Must be at most 65535' })
+const ioTimeout = positiveInteger.min(1000).max(60000).default(5000)
+// Fixed native RPC budget, shared with the resource adapter and TTL validation.
+export const sandboxRequestTimeoutMs = 10000
 
 export const assetBudgetDefaults = {
   ASSET_MAX_BYTES: 8388608,
@@ -62,7 +65,7 @@ const objectStorage = {
     .default(assetBudgetDefaults.FILE_IO_TIMEOUT_MS),
 }
 
-export const serverEnvSchema = z.object({
+const serverEnvSchema = z.object({
   ...objectStorage,
   DATABASE_URL: databaseUrl,
   REDIS_URL: redisUrl,
@@ -91,21 +94,22 @@ export const serverEnvSchema = z.object({
   }),
   GITHUB_CLIENT_ID: requiredString,
   GITHUB_CLIENT_SECRET: requiredString,
-  IO_TIMEOUT_MS: positiveInteger.min(1000).max(60000).default(5000),
+  IO_TIMEOUT_MS: ioTimeout,
   POLL_MS: positiveInteger.max(10000).default(200),
 })
 
-export const workerEnvSchema = z
+const workerEnvSchema = z
   .object({
     ...objectStorage,
     DATABASE_URL: databaseUrl,
     REDIS_URL: redisUrl,
+    // Explicit demo mode, never a fallback from a failed keyed request.
+    WEB_SEARCH_AUTH_MODE: z.enum(['keyless', 'key']).default('keyless'),
+    TAVILY_API_KEY: requiredString.optional(),
     MODEL_BASE_URL: httpUrl,
     MODEL_API_KEY: requiredString,
     MODEL_ID: requiredString,
-    MODEL_PROMPT_PATH: requiredString.default(
-      '/app/profiles/video/instructions.md',
-    ),
+    MODEL_PROMPT_PATH: requiredString.default('/app/apps/agent/prompt.md'),
     // Custom endpoints must declare limits; do not fabricate model-registry metadata.
     MODEL_CONTEXT_WINDOW: positiveInteger,
     MODEL_MAX_OUTPUT_TOKENS: positiveInteger,
@@ -118,13 +122,26 @@ export const workerEnvSchema = z
     E2B_API_KEY: requiredString,
     E2B_SANDBOX_URL: httpUrl,
     E2B_TEMPLATE: requiredString.default('base'),
-    SANDBOX_PROVIDER: z.literal('e2b').default('e2b'),
     SANDBOX_TIMEOUT_MS: positiveInteger.max(3600000).default(300000),
-    LEASE_MS: positiveInteger.default(30000),
-    POLL_MS: positiveInteger.default(200),
-    CONCURRENCY: positiveInteger.default(3),
-    IO_TIMEOUT_MS: positiveInteger.min(1000).max(60000).default(5000),
+    // Native JS timers use signed 32-bit millisecond delays.
+    LEASE_MS: positiveInteger.max(2147483647).default(30000),
+    // Match the server's polling ceiling: no overflow or hour-long claim stalls.
+    POLL_MS: positiveInteger.max(10000).default(200),
+    // Each active run owns a VM and model stream; cap per-process fan-out.
+    CONCURRENCY: positiveInteger.max(32).default(3),
+    IO_TIMEOUT_MS: ioTimeout,
   })
+  .refine(
+    (env) =>
+      env.WEB_SEARCH_AUTH_MODE === 'key'
+        ? Boolean(env.TAVILY_API_KEY?.trim())
+        : env.TAVILY_API_KEY === undefined,
+    {
+      path: ['TAVILY_API_KEY'],
+      message:
+        'Required only for WEB_SEARCH_AUTH_MODE=key; omit in keyless mode',
+    },
+  )
   // Reserve three polling intervals for renewal; this is not a guarantee against pauses.
   .refine((env) => env.LEASE_MS > 3 * env.POLL_MS, {
     path: ['LEASE_MS'],
@@ -135,13 +152,19 @@ export const workerEnvSchema = z
     message: 'Must leave space for input within MODEL_CONTEXT_WINDOW',
   })
 
-export const migrationEnvSchema = z.object({
+const migrationEnvSchema = z.object({
   DATABASE_URL: databaseUrl,
 })
 
+const administrationEnvSchema = migrationEnvSchema.extend({
+  IO_TIMEOUT_MS: ioTimeout,
+})
+
+export type AdministrationEnv = z.infer<typeof administrationEnvSchema>
 export type ServerEnv = z.infer<typeof serverEnvSchema>
 export type WorkerEnv = z.infer<typeof workerEnvSchema>
-export type MigrationEnv = z.infer<typeof migrationEnvSchema>
+export type WebSearchAuthMode = WorkerEnv['WEB_SEARCH_AUTH_MODE']
+type MigrationEnv = z.infer<typeof migrationEnvSchema>
 
 function readEnv<Schema extends z.ZodType>(
   schema: Schema,
@@ -171,6 +194,13 @@ export function readServerEnv(source: EnvSource = process.env): ServerEnv {
 /** Parse trusted execution input; no unconsumed provider credentials are required. */
 export function readWorkerEnv(source: EnvSource = process.env): WorkerEnv {
   return readEnv(workerEnvSchema, source)
+}
+
+/** Administrative SQL needs a connection and deadlines, never application secrets. */
+export function readAdministrationEnv(
+  source: EnvSource = process.env,
+): AdministrationEnv {
+  return readEnv(administrationEnvSchema, source)
 }
 
 /** Parse only the migration connection; this does not create or select a database. */

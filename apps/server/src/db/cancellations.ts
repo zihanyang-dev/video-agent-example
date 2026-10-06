@@ -1,6 +1,6 @@
 import { readActiveRuns, publicThread } from './conversations'
+import { acceptedStartIdentity } from './accepted-start'
 import { lockThread, threadUnavailable } from './thread-access'
-import { authorizeCancellation } from '../conversation/submission'
 import type { DB } from '@vid/database/types'
 import {
   cancelCommandSchema,
@@ -17,26 +17,17 @@ export async function hasAcceptedRun(
   { ownerID, threadID, runID }: OwnedRun,
 ) {
   const row = await db
-    .selectFrom('product.command_outbox')
+    .selectFrom('product.command_outbox as start')
     .innerJoin(
-      'product.threads',
-      'product.threads.thread_id',
-      'product.command_outbox.thread_id',
+      'product.threads as thread',
+      'thread.thread_id',
+      'start.thread_id',
     )
-    .select('command_id')
-    .where('product.threads.owner_id', '=', ownerID)
-    .where('product.command_outbox.thread_id', '=', threadID)
-    .where('run_id', '=', runID)
-    .where(sql<string>`command ->> 'kind'`, '=', 'start')
-    .where(
-      sql<boolean>`lower(command ->> 'threadID') = product.command_outbox.thread_id::text`,
-    )
-    .where(sql<boolean>`lower(command ->> 'runID') = run_id::text`)
-    .where(sql<boolean>`lower(command ->> 'commandID') = command_id::text`)
-    .where(
-      sql<boolean>`lower(command #>> '{input,messageID}') = message_id::text`,
-    )
-    .where(sql<boolean>`command -> 'version' = '1'::jsonb`)
+    .select('start.command_id')
+    .where('thread.owner_id', '=', ownerID)
+    .where('start.thread_id', '=', threadID)
+    .where('start.run_id', '=', runID)
+    .where(acceptedStartIdentity())
     .executeTakeFirst()
   return row !== undefined
 }
@@ -59,11 +50,7 @@ export async function cancelRun(
         runID: request.runID,
         commandID: request.commandID,
       })
-      if (
-        authorizeCancellation(await hasAcceptedRun(tx, request)) ===
-        'unavailable'
-      )
-        return 'unavailable'
+      if (!(await hasAcceptedRun(tx, request))) return 'unavailable'
       const inserted = await tx
         .insertInto('product.command_outbox')
         .values({

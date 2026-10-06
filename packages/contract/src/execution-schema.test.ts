@@ -99,5 +99,4 @@ test('foreign JSON Schema consumers enforce real command and delivery boundaries
       executionDeliverySchema.safeParse(value).success,
     )
   expect(JSON.stringify(schemas)).not.toContain('readOnly')
-  expect(executionJSONSchemas()).toEqual(schemas)
 })

@@ -1,0 +1,129 @@
+---
+name: Credentialless native checks
+
+'on':
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: >-
+    ci-${{ github.workflow }}-${{ github.event.pull_request.number ||
+    github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  basic:
+    name: Basic checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      # v7.0.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '24.21.0'
+          package-manager-cache: false
+      - name: Validate Actions YAML with checksum-pinned actionlint
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ci-logs
+          tool="$RUNNER_TEMP/actionlint"
+          mkdir -p "$tool"
+          base=https://github.com/rhysd/actionlint/releases/download/v1.7.12
+          curl --fail --silent --show-error --location --max-time 60 \
+            "$base/actionlint_1.7.12_linux_amd64.tar.gz" \
+            -o "$tool/archive.tgz"
+          checksum=8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+          echo "$checksum  $tool/archive.tgz" | sha256sum --check
+          tar -xzf "$tool/archive.tgz" -C "$tool" actionlint
+          "$tool/actionlint" .github/workflows/ci.yaml 2>&1 \
+            | tee ci-logs/actionlint.log
+      - name: Install hash-locked Shell and YAML tooling
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          tool="$RUNNER_TEMP/vid-ci-python"
+          python3 -m venv "$tool"
+          "$tool/bin/python" -m pip install --require-hashes \
+            --only-binary=:all: -r .github/python/requirements.txt
+          echo "VID_CI_PYTHON_BIN=$tool/bin" >> "$GITHUB_ENV"
+      - name: Build the checks environment once
+        run: |
+          image=$(docker build --quiet -f deploy/docker/checks.Dockerfile .)
+          echo "VID_CHECK_IMAGE=$image" >> "$GITHUB_ENV"
+      - name: Check sources and read-only generation drift
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ci-logs
+          {
+            sh .github/python/check.sh
+            sh scripts/check.sh
+            sh scripts/check.sh test tests/scripts/ci-policy.test.ts \
+              tests/scripts/proxy-deadline.test.ts \
+              tests/scripts/reconciliation-cli.test.ts \
+              tests/scripts/process-diagnostics.test.ts \
+              scripts/generate-api.test.ts
+            sh scripts/check.sh run .github/verify-api.ts
+          } 2>&1 | tee ci-logs/check.log
+      - name: Failure evidence (explicit logs only)
+        if: failure()
+        # v7.0.1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: ci-${{ github.job }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: ignore
+          path: |
+            ci-logs/check.log
+            ci-logs/actionlint.log
+  integration:
+    name: Native integration
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      # v7.0.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '24.21.0'
+          package-manager-cache: false
+      - name: Build the checks environment once
+        run: |
+          image=$(docker build --quiet -f deploy/docker/checks.Dockerfile .)
+          echo "VID_CHECK_IMAGE=$image" >> "$GITHUB_ENV"
+      - name: Database, storage and production deployment
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ci-logs
+          {
+            sh scripts/database-check.sh check
+            node --test tests/scripts/production-runtime.test.ts
+            node --test tests/scripts/storage-initialization.test.ts
+            sh tests/scripts/deployment-check.sh
+          } 2>&1 | tee ci-logs/check.log
+      - name: Failure evidence (explicit logs only)
+        if: failure()
+        # v7.0.1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: ci-${{ github.job }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: ignore
+          path: |
+            ci-logs/check.log
+            ci-logs/actionlint.log

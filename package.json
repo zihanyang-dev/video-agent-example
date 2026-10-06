@@ -13,8 +13,8 @@
     "test:integration": "bun test tests/integration",
     "typecheck": "tsc --noEmit",
     "lint": "oxlint --type-aware --deny-warnings apps packages tests scripts deploy",
-    "fmt:check": "prettier --check . '!**/generated/**' '!**/vendor/**' --ignore-path .gitignore",
-    "boundaries": "depcruise --config .dependency-cruiser.cjs apps packages"
+    "fmt:check": "prettier --check . '!**/generated/**' --ignore-path .gitignore",
+    "boundaries": "depcruise --config .dependency-cruiser.cjs apps packages && bun test tests/scripts/architecture.test.ts"
   },
   "devDependencies": {
     "@vid/config": "workspace:*",
@@ -38,7 +38,6 @@
     "@vid/object-storage": "workspace:*",
     "@ag-ui/client": "1.0.1",
     "@aws-sdk/client-s3": "3.1146.0",
-    "hono-openapi": "1.3.3",
-    "@hey-api/openapi-ts": "0.99.0"
+    "hono-openapi": "1.3.3"
   }
 }

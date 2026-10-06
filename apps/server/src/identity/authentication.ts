@@ -3,7 +3,11 @@ import type { Kysely } from 'kysely'
 import type { DB } from '@vid/database/types'
 import { openAPI } from 'better-auth/plugins'
 import { revokeSession } from '../db/sessions'
-import { readBody, type BodyCollectionPolicy } from '../request-body'
+import {
+  readBody,
+  requestBodyRejection,
+  type BodyCollectionPolicy,
+} from '../request-body'
 import { publicSchemas } from '@vid/contract/http'
 
 export type AuthenticationSettings = Readonly<{
@@ -102,11 +106,15 @@ export async function signOut(
   )
     return new Response('Expected JSON request', { status: 415 })
 
-  if (
-    !publicSchemas.EmptyRequest.safeParse(
-      await readBody(request, bodyCollection),
-    ).success
-  )
+  let body: unknown
+  try {
+    body = await readBody(request, bodyCollection)
+  } catch (cause) {
+    const rejection = requestBodyRejection(cause)
+    if (rejection) return rejection
+    throw cause
+  }
+  if (!publicSchemas.EmptyRequest.safeParse(body).success)
     return Response.json({ error: 'Invalid input' }, { status: 400 })
 
   const session = await auth.api.getSession({

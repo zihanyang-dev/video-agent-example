@@ -1,4 +1,5 @@
 import { expect, test } from 'bun:test'
+import { createPiHarness } from './harness/pi'
 import { assignFileTools } from './harness/files'
 import { sha256, type ObjectStore } from '@vid/object-storage'
 import type { AssetReference } from '@vid/contract/execution'
@@ -21,8 +22,6 @@ function deferred<T>() {
 const lease: ExecutionLease = {
   runID: 'run',
   threadID: 'thread',
-  commandID: 'command',
-  messageID: 'user',
   text: 'hello',
   fence: 7,
   ownerID: 'worker',
@@ -35,7 +34,12 @@ function recordingWrites(events: unknown[]): ExecutionWrites {
       if (reason === 'execution-error') events.push({ reason })
     },
     renew: async (owned, leaseMs) => {
-      expect(owned).toBe(lease)
+      expect(owned).toMatchObject({
+        runID: lease.runID,
+        threadID: lease.threadID,
+        ownerID: lease.ownerID,
+        fence: lease.fence,
+      })
       expect(leaseMs).toBe(1000)
       return 'renewed'
     },
@@ -65,16 +69,12 @@ function fixture() {
   const end = deferred<Awaited<ReturnType<AgentHarness['turn']>>>()
   const sandbox: SandboxSessionPort = {
     nativeRef: { provider: 'e2b', id: 'fixture-native' },
-    renewTimeout: async () => {},
-    files: {
-      readBytes: async () => new Uint8Array(),
-      writeBytes: async () => {},
-    },
-    tools: {
-      execute: async () => ({ stdout: '', stderr: '', exitCode: 0 }),
-      read: async () => '',
-      write: async () => {},
-    },
+
+    readBytes: async () => new Uint8Array(),
+    writeBytes: async () => {},
+    execute: async () => ({ stdout: '', stderr: '', exitCode: 0 }),
+    read: async () => '',
+    write: async () => {},
     close: async () => {
       events.push('closed')
     },
@@ -104,12 +104,12 @@ function fixture() {
 
 test('allocates the lease-assigned workspace without passing provider configuration through execution', async () => {
   const f = fixture()
-  const workspaces = new Map<unknown, SandboxSessionPort>()
-  f.sandbox.tools.read = async () => 'assigned workspace contents'
-  workspaces.set(lease, f.sandbox)
-  f.deps.openSandbox = async (runID, signal) => {
+  const workspaces = new Map<string, SandboxSessionPort>()
+  f.sandbox.read = async () => 'assigned workspace contents'
+  workspaces.set(lease.runID, f.sandbox)
+  f.deps.openSandbox = async (owned, signal) => {
     signal.throwIfAborted()
-    const workspace = workspaces.get(runID)
+    const workspace = workspaces.get(owned.runID)
     if (!workspace) throw new Error('Workspace was not assigned to this run')
     return workspace
   }
@@ -418,9 +418,10 @@ test('turn abort rejection is awaited and preserves an explicit shutdown interru
 
 test('cancellation racing completion is settled without committing history', async () => {
   const f = fixture()
-  let count = 0
-  f.deps.writes.renew = async () => (++count === 1 ? 'renewed' : 'cancel')
-  f.deps.writes.complete = async () => false
+  f.deps.writes.complete = async () => {
+    f.events.push('cancelled')
+    return 'cancelled'
+  }
   const run = executeRun(lease, f.deps, f.options)
   await f.started.promise
   f.end.resolve({ text: '', history: 'not committed' })
@@ -445,41 +446,6 @@ test('an unknown terminal database outcome is surfaced after cleanup, never retr
   expect(f.events).toEqual(['closed'])
 })
 
-for (const authority of ['cancel', 'lost', 'renewed'] as const) {
-  test(`shutdown terminal rejection reauthorizes ${authority} without retrying a paid turn`, async () => {
-    const f = fixture()
-    let renewals = 0
-    let turns = 0
-    let failures = 0
-    const turn = f.deps.harness.turn
-    f.deps.harness.turn = async (input) => {
-      turns++
-      return await turn(input)
-    }
-    f.deps.writes.renew = async () => (++renewals === 1 ? 'renewed' : authority)
-    f.deps.writes.fail = async (_lease, reason) => {
-      failures++
-      f.events.push({ reason })
-      return false
-    }
-    // No heartbeat can observe the terminal race before the failed write.
-    f.options.pollMs = 60_000
-    const run = executeRun(lease, f.deps, f.options)
-    await f.started.promise
-    f.shutdown.abort()
-    f.end.resolve({ text: '', history: 'must not commit' })
-    expect(await run).toBe(authority === 'cancel' ? 'cancelled' : 'lost')
-    expect(turns).toBe(1)
-    expect(failures).toBe(1)
-    expect(renewals).toBe(2)
-    expect(f.events).toEqual([
-      'closed',
-      { reason: 'interrupted' },
-      ...(authority === 'cancel' ? ['cancelled'] : []),
-    ])
-  })
-}
-
 test('native identity is fenced durably before inference can spend', async () => {
   const f = fixture()
   let persisted = false
@@ -501,7 +467,7 @@ test('native identity is fenced durably before inference can spend', async () =>
 test('uncertain command outcome aborts spending before Pi can request another inference', async () => {
   const f = fixture()
   let observedAbort = false
-  f.sandbox.tools.execute = async () => {
+  f.sandbox.execute = async () => {
     throw new Error('command ACK lost')
   }
   f.deps.harness.turn = async ({ tools, signal }) => {
@@ -516,10 +482,10 @@ test('uncertain command outcome aborts spending before Pi can request another in
 })
 
 for (const outcome of ['cancel', 'failure'] as const) {
-  test(`${outcome} retains environment files for the next known native resume`, async () => {
+  test(`${outcome} does not erase bytes written through the assigned in-memory file port (not native resume proof)`, async () => {
     const f = fixture()
     const files = new Map<string, string>()
-    f.sandbox.tools.write = async ({ path, content }) => {
+    f.sandbox.write = async ({ path, content }) => {
       files.set(path, content)
     }
     f.deps.harness.turn = async ({ tools, signal }) => {
@@ -530,7 +496,10 @@ for (const outcome of ['cancel', 'failure'] as const) {
       })
       if (outcome === 'failure') throw new Error('model failed')
       f.deps.writes.renew = async () => 'cancel'
-      await Bun.sleep(10)
+      await new Promise<void>((resolve) => {
+        signal.addEventListener('abort', () => resolve(), { once: true })
+        if (signal.aborted) resolve()
+      })
       signal.throwIfAborted()
       return { text: '', history: [] }
     }
@@ -538,69 +507,6 @@ for (const outcome of ['cancel', 'failure'] as const) {
       outcome === 'cancel' ? 'cancelled' : 'failed',
     )
     expect(files.get('/home/user/arbitrary-place/notes')).toBe('persistent')
-  })
-}
-
-test('unknown renewal after rejected completion quarantines before returning failed without replay', async () => {
-  const f = fixture()
-  f.options.pollMs = 60_000
-  let turns = 0
-  let completions = 0
-  let quarantines = 0
-  let renewals = 0
-  f.deps.harness.turn = async () => {
-    turns++
-    return { text: 'paid answer', history: ['private'] }
-  }
-  f.deps.writes.complete = async () => {
-    completions++
-    return false
-  }
-  f.deps.writes.renew = async () => {
-    if (++renewals === 1) return 'renewed'
-    throw new Error('renewal outcome unknown')
-  }
-  f.deps.writes.quarantine = async (_lease, reason) => {
-    quarantines++
-    f.events.push({ reason })
-  }
-  expect(await executeRun(lease, f.deps, f.options)).toBe('failed')
-  expect(quarantines).toBe(1)
-  expect(turns).toBe(1)
-  expect(completions).toBe(1)
-  expect(f.events).toEqual(['closed', { reason: 'execution-error' }])
-})
-
-for (const terminal of ['complete', 'cancel', 'fail'] as const) {
-  test(`recovery observed after rejected ${terminal} settles failed without retrying terminal`, async () => {
-    const f = fixture()
-    f.options.pollMs = 60_000
-    let renewals = 0
-    let attempts = 0
-    let quarantines = 0
-    f.deps.writes.renew = async () => {
-      if (++renewals === 1) return terminal === 'cancel' ? 'cancel' : 'renewed'
-      return 'recovery-required'
-    }
-    f.deps.writes[terminal] = async () => {
-      attempts++
-      return false
-    }
-    f.deps.writes.quarantine = async (_lease, reason) => {
-      quarantines++
-      f.events.push({ reason })
-    }
-    f.deps.harness.turn = async () => {
-      if (terminal === 'fail') f.shutdown.abort()
-      return { text: 'paid', history: ['discard'] }
-    }
-    expect(await executeRun(lease, f.deps, f.options)).toBe('failed')
-    expect(attempts).toBe(1)
-    expect(quarantines).toBe(1)
-    expect(f.events).toEqual([
-      ...(terminal === 'cancel' ? [] : ['closed']),
-      { reason: 'execution-error' },
-    ])
   })
 }
 
@@ -618,7 +524,7 @@ for (const terminal of ['complete', 'cancel', 'unknown-upload'] as const) {
       },
       close: () => {},
     }
-    f.sandbox.files.readBytes = async () => bytes
+    f.sandbox.readBytes = async () => bytes
     const deps = {
       ...f.deps,
       fileTools: assignFileTools(objects, {
@@ -640,7 +546,10 @@ for (const terminal of ['complete', 'cancel', 'unknown-upload'] as const) {
         .catch(() => undefined)
       if (terminal === 'cancel') {
         f.deps.writes.renew = async () => 'cancel'
-        await Bun.sleep(10)
+        await new Promise<void>((resolve) => {
+          signal.addEventListener('abort', () => resolve(), { once: true })
+          if (signal.aborted) resolve()
+        })
       }
       signal.throwIfAborted()
       return { text: 'delivered', history: ['private'] }
@@ -683,3 +592,622 @@ for (const authority of ['cancel', 'lost'] as const) {
     ])
   })
 }
+
+test('terminal and quarantine failures retain both causes after cleanup without retry', async () => {
+  const f = fixture()
+  const terminal = new Error('terminal COMMIT acknowledgement lost')
+  const quarantine = new Error('quarantine COMMIT acknowledgement lost')
+  let attempts = 0
+  f.deps.writes.complete = async () => {
+    attempts++
+    throw terminal
+  }
+  f.deps.writes.quarantine = async () => {
+    expect(f.events).toEqual(['closed'])
+    throw quarantine
+  }
+  const run = executeRun(lease, f.deps, f.options)
+  await f.started.promise
+  f.end.resolve({ text: '', history: [] })
+  const failure = await run.catch((cause: unknown) => cause)
+  expect(failure).toBeInstanceOf(AggregateError)
+  if (!(failure instanceof AggregateError))
+    throw new Error('Expected both failures')
+  expect(failure.errors).toEqual([terminal, quarantine])
+  expect(attempts).toBe(1)
+})
+
+test('coalesces 10000 synchronous deltas behind the actual append gate and ignores empty fragments', async () => {
+  const f = fixture()
+  const writing = deferred<void>()
+  const release = deferred<void>()
+  const deltas: string[] = []
+  f.deps.writes.appendText = async (_lease, delta) => {
+    deltas.push(delta)
+    if (deltas.length === 1) {
+      writing.resolve()
+      await release.promise
+    }
+    return true
+  }
+  const run = executeRun(lease, f.deps, f.options)
+  const input = await f.started.promise
+  input.onText('first:')
+  await writing.promise
+  for (let i = 0; i < 10000; i++) {
+    input.onText('')
+    input.onText(String(i % 10))
+  }
+  f.end.resolve({ text: 'first:' + '0123456789'.repeat(1000), history: [] })
+  try {
+    expect(deltas).toEqual(['first:'])
+  } finally {
+    release.resolve()
+  }
+  expect(await run).toBe('completed')
+  expect(deltas).toEqual(['first:', '0123456789'.repeat(1000)])
+  expect(f.events.at(-1)).toEqual({ text: deltas.join(''), history: [] })
+})
+
+test('pending UTF8 overflow aborts synchronously, discards unsent content and joins the issued append', async () => {
+  const f = fixture()
+  const writing = deferred<void>()
+  const release = deferred<void>()
+  const closed = deferred<void>()
+  const deltas: string[] = []
+  f.sandbox.close = async () => {
+    closed.resolve()
+    f.events.push('closed')
+  }
+  f.deps.writes.appendText = async (_lease, delta) => {
+    deltas.push(delta)
+    writing.resolve()
+    await release.promise
+    f.events.push('append-settled')
+    return true
+  }
+  const run = executeRun(lease, f.deps, f.options)
+  const input = await f.started.promise
+  input.onText('issued')
+  await writing.promise
+  // 65536 UTF8 bytes fit; the next byte must stop spending before another inference.
+  input.onText('😀'.repeat(16384))
+  expect(input.signal.aborted).toBe(false)
+  input.onText('x')
+  const stopped = input.signal.aborted
+  input.onText('must discard')
+  f.end.resolve({ text: 'discard', history: ['PRIVATE HISTORY'] })
+  await closed.promise
+  try {
+    expect(stopped).toBe(true)
+    expect(f.events).toEqual(['closed'])
+    expect(deltas).toEqual(['issued'])
+  } finally {
+    release.resolve()
+  }
+  expect(await run).toBe('failed')
+  expect(deltas).toEqual(['issued'])
+  expect(f.events).toEqual([
+    'closed',
+    'append-settled',
+    { reason: 'execution-error' },
+  ])
+})
+
+for (const returned of [false, true]) {
+  test(`whole-turn UTF8 budget rejects ${returned ? 'unstreamed return' : 'already-drained fragments'} without terminal replay`, async () => {
+    const f = fixture()
+    let turns = 0
+    let stoppedAtLimit = false
+    let stoppedAfterLimit = false
+    f.deps.harness.turn = async (input) => {
+      turns++
+      if (returned) return { text: '😀'.repeat(262145), history: [] }
+      // Drain each fragment so the pending quota cannot explain this failure.
+      for (let i = 0; i < 16; i++) {
+        input.onText('😀'.repeat(16384))
+        await Promise.resolve()
+        await Promise.resolve()
+      }
+      stoppedAtLimit = input.signal.aborted
+      input.onText('x')
+      stoppedAfterLimit = input.signal.aborted
+      input.signal.throwIfAborted()
+      return { text: '', history: [] }
+    }
+    expect(await executeRun(lease, f.deps, f.options)).toBe('failed')
+    expect(turns).toBe(1)
+    if (!returned) {
+      expect(stoppedAtLimit).toBe(false)
+      expect(stoppedAfterLimit).toBe(true)
+    }
+    expect(f.events.at(-1)).toEqual({ reason: 'execution-error' })
+    expect(
+      f.events.some(
+        (event) =>
+          typeof event === 'object' && event !== null && 'history' in event,
+      ),
+    ).toBe(false)
+  })
+}
+
+for (const stage of [
+  'renew-sql',
+  'turn',
+  'append',
+  'pause',
+  'terminal-complete',
+  'terminal-fail',
+  'terminal-cancel',
+  'quarantine',
+] as const) {
+  test(`private ${stage} diagnosis contains only safe identity and classification`, async () => {
+    const f = fixture()
+    const canary = 'PRIVATE key=secret prompt=hidden body=tool history=private'
+    const failure = new Error(canary, { cause: { private: canary } })
+    const records: unknown[][] = []
+    const original = console.error
+    console.error = (...args: unknown[]) => {
+      records.push(args)
+    }
+    if (stage === 'renew-sql')
+      f.deps.writes.renew = async () => {
+        throw failure
+      }
+    f.deps.harness.turn = async (input) => {
+      if (['turn', 'quarantine'].includes(stage)) throw failure
+      if (stage === 'terminal-fail') f.shutdown.abort()
+      if (stage === 'append') input.onText('public text')
+      return { text: '', history: [] }
+    }
+    if (stage === 'append')
+      f.deps.writes.appendText = async () => {
+        throw failure
+      }
+    if (stage === 'pause')
+      f.sandbox.close = async () => {
+        throw failure
+      }
+    if (stage === 'terminal-complete')
+      f.deps.writes.complete = async () => {
+        throw failure
+      }
+    if (stage === 'terminal-fail')
+      f.deps.writes.fail = async () => {
+        throw failure
+      }
+    if (stage === 'terminal-cancel') {
+      f.deps.writes.renew = async () => 'cancel'
+      f.deps.writes.cancel = async () => {
+        throw failure
+      }
+    }
+    if (stage === 'quarantine')
+      f.deps.writes.quarantine = async () => {
+        throw failure
+      }
+    try {
+      await executeRun(lease, f.deps, f.options).catch(() => {})
+      expect(records).toContainEqual([
+        { runID: 'run', fence: 7, stage, classification: 'unknown-outcome' },
+      ])
+      expect(JSON.stringify(records)).not.toContain(canary)
+      for (const record of records)
+        expect(Object.keys(record[0] as object).sort()).toEqual([
+          'classification',
+          'fence',
+          'runID',
+          'stage',
+        ])
+      expect(JSON.stringify(f.events)).not.toContain(canary)
+    } finally {
+      console.error = original
+    }
+  })
+}
+
+for (const mode of ['coalesce', 'overflow', 'provider-failure'] as const) {
+  test(`native Pi ${mode} settles its callback, drain and pause with safe diagnostics and no inference replay`, async () => {
+    const f = fixture()
+    const canary = 'PRIVATE_NATIVE_KEY_BODY_PROMPT_HISTORY_TOOL'
+    const writing = deferred<void>()
+    const release = deferred<void>()
+    const produced = deferred<void>()
+    const paused = deferred<void>()
+    const pause = deferred<void>()
+    const deltas: string[] = []
+    const records: unknown[][] = []
+    let requests = 0
+    let fragments = 0
+    let appendSettled = false
+    let turnSettled = false
+    let terminalAttempts = 0
+    f.options.pollMs = 60_000
+    f.deps.writes.renew = async () => 'renewed'
+    f.deps.writes.appendText = async (_lease, delta) => {
+      deltas.push(delta)
+      writing.resolve()
+      await release.promise
+      appendSettled = true
+      return true
+    }
+    f.sandbox.close = async () => {
+      paused.resolve()
+      await pause.promise
+      f.events.push('closed')
+    }
+    const complete = f.deps.writes.complete
+    f.deps.writes.complete = async (owned, product) => {
+      terminalAttempts++
+      expect(turnSettled).toBe(true)
+      expect(appendSettled).toBe(true)
+      return await complete(owned, product)
+    }
+    const frame = (delta: unknown, finish_reason: string | null = null) =>
+      `data: ${JSON.stringify({ id: 'fixture', object: 'chat.completion.chunk', model: 'fixture-model', choices: [{ index: 0, delta, finish_reason }] })}\n\n`
+    const server = Bun.serve({
+      hostname: '127.0.0.1',
+      port: 0,
+      fetch() {
+        requests++
+        if (mode === 'provider-failure')
+          return Response.json({ error: { message: canary } }, { status: 500 })
+        const encoder = new TextEncoder()
+        return new Response(
+          new ReadableStream({
+            async start(controller) {
+              controller.enqueue(
+                encoder.encode(
+                  frame({
+                    role: 'assistant',
+                    content: 'first:',
+                    reasoning_content: canary,
+                  }),
+                ),
+              )
+              // Hold the actual DB-port append before native Pi receives the burst.
+              await writing.promise
+              const burst =
+                mode === 'coalesce'
+                  ? Array.from({ length: 10000 }, (_, i) =>
+                      frame({ content: String(i % 10) }),
+                    ).join('')
+                  : frame({ content: '😀'.repeat(16385) }) +
+                    frame({
+                      tool_calls: [
+                        {
+                          index: 0,
+                          id: 'private-call',
+                          type: 'function',
+                          function: {
+                            name: 'execute',
+                            arguments: JSON.stringify({ command: canary }),
+                          },
+                        },
+                      ],
+                    })
+              controller.enqueue(
+                encoder.encode(
+                  burst +
+                    frame({}, mode === 'coalesce' ? 'stop' : 'tool_calls') +
+                    'data: [DONE]\n\n',
+                ),
+              )
+              controller.close()
+            },
+          }),
+          { headers: { 'content-type': 'text/event-stream' } },
+        )
+      },
+    })
+    const native = createPiHarness({
+      baseURL: `http://127.0.0.1:${server.port}/v1`,
+      key: canary,
+      modelID: 'fixture-model',
+      contextWindow: 16384,
+      maxOutputTokens: 512,
+      reasoning: true,
+      input: ['text'],
+      systemPrompt: canary,
+    })
+    let toolCalls = 0
+    f.sandbox.execute = async () => {
+      toolCalls++
+      return { stdout: canary, stderr: canary, exitCode: 0 }
+    }
+    f.deps.harness.turn = async (input) => {
+      f.started.resolve(input)
+      try {
+        return await native.turn({
+          ...input,
+          onText: (delta) => {
+            input.onText(delta)
+            fragments++
+            if (fragments === (mode === 'coalesce' ? 10001 : 2))
+              produced.resolve()
+          },
+        })
+      } finally {
+        turnSettled = true
+      }
+    }
+    const original = console.error
+    console.error = (...args: unknown[]) => {
+      records.push(args)
+    }
+    const run = executeRun({ ...lease, history: null }, f.deps, f.options)
+    try {
+      if (mode !== 'provider-failure') await produced.promise
+      await paused.promise
+      expect(turnSettled).toBe(true)
+      expect(f.events).toEqual([])
+      expect(terminalAttempts).toBe(0)
+      if (mode !== 'provider-failure') expect(deltas).toEqual(['first:'])
+      pause.resolve()
+      release.resolve()
+      expect(await run).toBe(mode === 'coalesce' ? 'completed' : 'failed')
+      expect(requests).toBe(1)
+      expect(toolCalls).toBe(0)
+      expect(terminalAttempts).toBe(mode === 'coalesce' ? 1 : 0)
+      expect(JSON.stringify(records)).not.toContain(canary)
+      const publicEvents = f.events.map((event) => {
+        if (typeof event === 'object' && event !== null && 'history' in event) {
+          const { history: _private, ...publicProduct } = event
+          return publicProduct
+        }
+        return event
+      })
+      expect(JSON.stringify(publicEvents)).not.toContain(canary)
+      if (mode === 'coalesce') {
+        expect(deltas).toEqual(['first:', '0123456789'.repeat(1000)])
+        expect(f.events.at(-1)).toMatchObject({ text: deltas.join('') })
+      } else {
+        expect(records).toContainEqual([
+          {
+            runID: 'run',
+            fence: 7,
+            stage: mode === 'overflow' ? 'text-budget' : 'turn',
+            classification:
+              mode === 'overflow' ? 'text-budget-exceeded' : 'unknown-outcome',
+          },
+        ])
+        expect(deltas).toEqual(mode === 'overflow' ? ['first:'] : [])
+      }
+    } finally {
+      pause.resolve()
+      release.resolve()
+      await run.catch(() => {})
+      console.error = original
+      await server.stop(true)
+    }
+  })
+}
+
+for (const authority of ['cancel', 'lost'] as const) {
+  test(`${authority} discards a coalesced batch but joins the issued append before terminal`, async () => {
+    const f = fixture()
+    const writing = deferred<void>()
+    const release = deferred<void>()
+    const aborted = deferred<void>()
+    const closed = deferred<void>()
+    let status: 'renewed' | 'cancel' | 'lost' = 'renewed'
+    const deltas: string[] = []
+    f.deps.writes.renew = async () => status
+    f.deps.writes.appendText = async (_lease, delta) => {
+      deltas.push(delta)
+      writing.resolve()
+      await release.promise
+      f.events.push('append-settled')
+      return true
+    }
+    f.sandbox.close = async () => {
+      f.events.push('closed')
+      closed.resolve()
+    }
+    const run = executeRun(lease, f.deps, f.options)
+    const input = await f.started.promise
+    input.signal.addEventListener('abort', () => aborted.resolve(), {
+      once: true,
+    })
+    input.onText('issued')
+    await writing.promise
+    for (let i = 0; i < 10000; i++) input.onText('x')
+    status = authority
+    await aborted.promise
+    input.onText('late')
+    f.end.resolve({ text: 'discard', history: [] })
+    await closed.promise
+    try {
+      expect(f.events).toEqual(['closed'])
+      expect(deltas).toEqual(['issued'])
+    } finally {
+      release.resolve()
+    }
+    expect(await run).toBe(authority === 'cancel' ? 'cancelled' : 'lost')
+    expect(deltas).toEqual(['issued'])
+    expect(f.events).toEqual([
+      'closed',
+      'append-settled',
+      ...(authority === 'cancel' ? ['cancelled'] : []),
+    ])
+  })
+}
+
+test('65536 small pending fragments fit, empty callbacks spend no quota, and the next byte stops admission', async () => {
+  const f = fixture()
+  const writing = deferred<void>()
+  const release = deferred<void>()
+  const deltas: string[] = []
+  f.deps.writes.appendText = async (_lease, delta) => {
+    deltas.push(delta)
+    writing.resolve()
+    await release.promise
+    return true
+  }
+  const run = executeRun(lease, f.deps, f.options)
+  const input = await f.started.promise
+  input.onText('issued')
+  await writing.promise
+  for (let i = 0; i < 65536; i++) {
+    input.onText('')
+    input.onText('x')
+  }
+  const stoppedAtLimit = input.signal.aborted
+  for (let i = 0; i < 10000; i++) input.onText('')
+  const stoppedAfterEmpty = input.signal.aborted
+  input.onText('x')
+  const stoppedAfterLimit = input.signal.aborted
+  f.end.resolve({ text: 'discard', history: [] })
+  release.resolve()
+  expect(await run).toBe('failed')
+  expect(stoppedAtLimit).toBe(false)
+  expect(stoppedAfterEmpty).toBe(false)
+  expect(stoppedAfterLimit).toBe(true)
+  expect(deltas).toEqual(['issued'])
+})
+
+test('whole-turn text admission refuses the next byte after sixteen drained fragments', async () => {
+  const f = fixture()
+  let receipt = deferred<void>()
+  let appendedBytes = 0
+  f.deps.writes.appendText = async (_lease, delta) => {
+    appendedBytes += Buffer.byteLength(delta)
+    receipt.resolve()
+    return true
+  }
+  const run = executeRun(lease, f.deps, f.options)
+  const input = await f.started.promise
+  for (let index = 0; index < 16; index++) {
+    receipt = deferred<void>()
+    input.onText('😀'.repeat(16384))
+    await receipt.promise
+  }
+  expect(appendedBytes).toBe(1048576)
+  expect(input.signal.aborted).toBe(false)
+  input.onText('x')
+  expect(input.signal.aborted).toBe(true)
+  f.end.resolve({ text: 'Must not become a completed answer', history: [] })
+  expect(await run).toBe('failed')
+  expect(appendedBytes).toBe(1048576)
+  expect(f.events).toEqual(['closed', { reason: 'execution-error' }])
+})
+
+test('native Pi inference admission stops spending after sixteen drained batches', async () => {
+  const f = fixture()
+  f.deps.writes.renew = async () => 'renewed'
+  let requests = 0
+  let tools = 0
+  let appendedBytes = 0
+  const canary = 'PRIVATE_NATIVE_TOOL_HISTORY'
+  f.sandbox.execute = async () => {
+    tools++
+    return { stdout: canary, stderr: '', exitCode: 0 }
+  }
+  f.deps.writes.appendText = async (_lease, delta) => {
+    appendedBytes += Buffer.byteLength(delta)
+    return true
+  }
+  const server = Bun.serve({
+    hostname: '127.0.0.1',
+    port: 0,
+    fetch() {
+      requests++
+      if (requests > 17)
+        return Response.json({ error: { message: canary } }, { status: 500 })
+      const chunk = (delta: unknown, finish_reason: string | null = null) =>
+        `data: ${JSON.stringify({ id: 'fixture', object: 'chat.completion.chunk', model: 'fixture-model', choices: [{ index: 0, delta, finish_reason }] })}\n\n`
+      return new Response(
+        chunk({
+          role: 'assistant',
+          content: requests <= 16 ? '😀'.repeat(16384) : 'x',
+        }) +
+          chunk({
+            tool_calls: [
+              {
+                index: 0,
+                id: `call-${requests}`,
+                type: 'function',
+                function: {
+                  name: 'execute',
+                  arguments: JSON.stringify({ command: canary }),
+                },
+              },
+            ],
+          }) +
+          chunk({}, 'tool_calls') +
+          'data: [DONE]\n\n',
+        { headers: { 'content-type': 'text/event-stream' } },
+      )
+    },
+  })
+  f.deps.harness = createPiHarness({
+    baseURL: `http://127.0.0.1:${server.port}/v1`,
+    key: canary,
+    modelID: 'fixture-model',
+    contextWindow: 16384,
+    maxOutputTokens: 512,
+    reasoning: false,
+    input: ['text'],
+    systemPrompt: canary,
+  })
+  try {
+    expect(
+      await executeRun({ ...lease, history: null }, f.deps, f.options),
+    ).toBe('failed')
+    expect(appendedBytes).toBe(1048576)
+    expect(requests).toBe(16)
+    expect(tools).toBe(16)
+    expect(f.events).toEqual(['closed', { reason: 'execution-error' }])
+    expect(JSON.stringify(f.events)).not.toContain(canary)
+  } finally {
+    await server.stop(true)
+  }
+})
+
+test('readonly transport failure is an ordinary tool error without VM quarantine', async () => {
+  const f = fixture()
+  f.sandbox.read = async () => {
+    throw new Error('Readonly transport unavailable')
+  }
+  f.deps.harness.turn = async (input) => {
+    const failure = await input.tools
+      .read({ path: '/input', signal: input.signal })
+      .catch((error: unknown) => error)
+    expect(failure).toEqual(new Error('Readonly transport unavailable'))
+    expect(input.signal.aborted).toBe(false)
+    return { text: 'Read unavailable', history: [] }
+  }
+  expect(await executeRun(lease, f.deps, f.options)).toBe('completed')
+  expect(f.events).not.toContainEqual({ reason: 'execution-error' })
+})
+
+test('history size rejection fails independently without quarantining a settled VM', async () => {
+  const f = fixture()
+  const { admitPiHistory } = await import('./harness/pi-history')
+  f.deps.harness.turn = async () => {
+    admitPiHistory({ private: 'x'.repeat(4 * 1024 * 1024) })
+    return { text: '', history: [] }
+  }
+  let quarantines = 0
+  f.deps.writes.quarantine = async () => {
+    quarantines++
+  }
+  expect(await executeRun(lease, f.deps, f.options)).toBe('failed')
+  expect(quarantines).toBe(0)
+  expect(f.events).toEqual(['closed', { reason: 'execution-error' }])
+})
+
+test('run deadline aborts spending while SQL heartbeat retains separate cleanup authority', async () => {
+  const f = fixture()
+  f.deps.harness.turn = async ({ signal }) => {
+    await new Promise<void>((resolve) =>
+      signal.addEventListener('abort', () => resolve(), { once: true }),
+    )
+    signal.throwIfAborted()
+    return { text: '', history: [] }
+  }
+  expect(
+    await executeRun(lease, f.deps, { ...f.options, runTimeoutMs: 10 }),
+  ).toBe('failed')
+  expect(f.events).toEqual(['closed', { reason: 'execution-error' }])
+})

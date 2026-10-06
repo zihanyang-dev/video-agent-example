@@ -1,9 +1,7 @@
 import { assetBudgetDefaults } from '@vid/config'
+import { acceptedStartIdentity } from './accepted-start'
 import { validGeneratedAssets, type AssetLimits } from '../assets/files'
-import {
-  publicEvent,
-  planPublicReceipts,
-} from '../conversation/execution-receipts'
+import { publicEvent } from '../conversation/execution-receipts'
 import type { DB } from '@vid/database/types'
 import {
   executionEventSchema,
@@ -50,6 +48,22 @@ async function acceptReceipt(
 ): Promise<ReceiptOutcome> {
   if (!(await authorizedRun(tx, event))) return 'unknown-run'
 
+  // Compare against a prior receipt, before this event could become the first
+  // message-bearing ordinal. The partial index reads one identity, not its text.
+  if ('messageID' in event) {
+    const prior = await tx
+      .selectFrom('product.execution_events')
+      .select(sql<string>`payload ->> 'messageID'`.as('messageID'))
+      .where('thread_id', '=', event.threadID)
+      .where('run_id', '=', event.runID)
+      .where(sql<boolean>`payload ? 'messageID'`)
+      .orderBy('ordinal', 'asc')
+      .limit(1)
+      .executeTakeFirst()
+    if (prior !== undefined && prior.messageID !== event.messageID)
+      throw receiptConflict
+  }
+
   const inserted = await tx
     .insertInto('product.execution_events')
     .values({
@@ -81,7 +95,8 @@ async function acceptReceipt(
     !validGeneratedAssets(event, event.assets ?? [], limits)
   )
     throw receiptConflict
-  await applyPublicFacts(tx, event)
+  await storeFinalMessage(tx, event)
+  await publishContiguousReceipts(tx, event)
   return 'accepted'
 }
 
@@ -98,55 +113,61 @@ async function authorizedRun(
     .executeTakeFirst()
   if (!thread) return false
   const start = await tx
-    .selectFrom('product.command_outbox')
-    .select('command_id')
-    .where('thread_id', '=', event.threadID)
-    .where('run_id', '=', event.runID)
-    .where(sql<string>`command ->> 'kind'`, '=', 'start')
-    .where(sql<boolean>`lower(command ->> 'threadID') = thread_id::text`)
-    .where(sql<boolean>`lower(command ->> 'runID') = run_id::text`)
-    .where(sql<boolean>`lower(command ->> 'commandID') = command_id::text`)
-    .where(
-      sql<boolean>`lower(command #>> '{input,messageID}') = message_id::text`,
-    )
-    .where(sql<boolean>`command -> 'version' = '1'::jsonb`)
+    .selectFrom('product.command_outbox as start')
+    .select('start.command_id')
+    .where('start.thread_id', '=', event.threadID)
+    .where('start.run_id', '=', event.runID)
+    .where(acceptedStartIdentity())
     .executeTakeFirst()
   return start !== undefined
 }
 
-async function applyPublicFacts(
+async function publishContiguousReceipts(
   tx: Transaction<DB>,
   event: ExecutionEvent,
 ): Promise<void> {
-  const receipts = await tx
-    .selectFrom('product.execution_events')
-    .selectAll()
-    .where('thread_id', '=', event.threadID)
-    .where('run_id', '=', event.runID)
-    .orderBy('ordinal', 'asc')
-    .execute()
-  const plan = planPublicReceipts(
-    receipts.map((receipt) => ({
-      event: executionEventSchema.parse(receipt.payload),
-      ordinal: BigInt(receipt.ordinal),
-      processed: receipt.processed,
-    })),
-  )
-  if (plan.kind === 'conflict') throw receiptConflict
-  await storeFinalMessage(tx, event)
-
-  for (const publication of plan.publications) {
-    await tx
-      .updateTable('product.execution_events')
-      .set({
-        processed: true,
-        replay_cursor: publication.suppressed
-          ? null
-          : sql<string>`nextval('product.execution_event_replay_cursor')`,
-      })
-      .where('event_id', '=', publication.eventID)
-      .execute()
-  }
+  // Existing processed receipts are the committed contiguous prefix; no second
+  // watermark is persisted. Indexed successor lookups stop at the first gap.
+  // A terminal is unique per run, including when it arrived before that gap.
+  await sql`
+    with recursive
+      terminal as (
+        select ordinal from product.execution_events
+        where thread_id = ${event.threadID} and run_id = ${event.runID}
+          and payload ->> 'kind' in ('run-completed', 'run-cancelled', 'run-failed')
+      ),
+      contiguous as (
+        select event_id, ordinal, payload ->> 'kind' as kind
+        from product.execution_events
+        where thread_id = ${event.threadID} and run_id = ${event.runID}
+          and ordinal = coalesce((
+            select ordinal from product.execution_events
+            where thread_id = ${event.threadID} and run_id = ${event.runID} and processed
+            order by ordinal desc limit 1
+          ), 0) + 1
+        union all
+        select next.event_id, next.ordinal, next.kind
+        from contiguous as prior
+        join lateral (
+          select event_id, ordinal, payload ->> 'kind' as kind
+          from product.execution_events
+          where thread_id = ${event.threadID} and run_id = ${event.runID}
+            and ordinal = prior.ordinal + 1
+          limit 1
+        ) as next on true
+      ),
+      publication as materialized (
+        select event_id,
+          case when exists (
+            select 1 from terminal
+            where contiguous.kind = 'assistant-text' or contiguous.ordinal > terminal.ordinal
+          ) then null else nextval('product.execution_event_replay_cursor') end as cursor
+        from contiguous order by ordinal
+      )
+    update product.execution_events as receipt
+    set processed = true, replay_cursor = publication.cursor
+    from publication where receipt.event_id = publication.event_id
+  `.execute(tx)
 }
 
 async function storeFinalMessage(
@@ -162,6 +183,7 @@ async function storeFinalMessage(
         thread_id: event.threadID,
         role: 'assistant',
         text: event.text,
+        sources: sql`${JSON.stringify(event.sources ?? [])}::jsonb`,
       })
       .onConflict((conflict) => conflict.doNothing())
       .returning('message_id')
@@ -177,6 +199,7 @@ export async function readPublicEvents(
   query: Readonly<{
     ownerID: string
     threadID: string
+    runID?: string
     after?: string
     limit?: number
   }>,
@@ -202,6 +225,9 @@ export async function readPublicEvents(
     .select(['payload', 'ordinal', 'replay_cursor'])
     .where('product.threads.owner_id', '=', query.ownerID)
     .where('product.execution_events.thread_id', '=', query.threadID)
+    .$if(query.runID !== undefined, (qb) =>
+      qb.where('product.execution_events.run_id', '=', query.runID!),
+    )
     .where('replay_cursor', '>', query.after ?? '0')
     .orderBy('replay_cursor', 'asc')
     .limit(query.limit ?? 1000)

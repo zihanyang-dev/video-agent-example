@@ -69,19 +69,6 @@ export function decideMessageReplay(
   }
 }
 
-export function authorizeThread(
-  ownerID: string,
-  threadOwnerID: string | null,
-): 'authorized' | 'unavailable' {
-  return threadOwnerID === ownerID ? 'authorized' : 'unavailable'
-}
-
-export function authorizeCancellation(
-  hasAcceptedStart: boolean,
-): 'authorized' | 'unavailable' {
-  return hasAcceptedStart ? 'authorized' : 'unavailable'
-}
-
 /** Archive denies new writes and their retries, but history and explicit stop
  * requests remain available. Foreign and absent threads share privacy recovery. */
 export function decideThreadAccess(
@@ -89,11 +76,7 @@ export function decideThreadAccess(
   thread: Readonly<{ ownerID: string | null; archived: boolean }> | null,
   action: 'read' | 'write' | 'cancel',
 ): 'authorized' | 'unavailable' | 'conflict' {
-  if (
-    thread === null ||
-    authorizeThread(ownerID, thread.ownerID) === 'unavailable'
-  )
-    return 'unavailable'
+  if (thread === null || thread.ownerID !== ownerID) return 'unavailable'
   if (action === 'write' && thread.archived) return 'conflict'
   return 'authorized'
 }

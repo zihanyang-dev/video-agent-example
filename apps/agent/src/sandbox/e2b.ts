@@ -1,10 +1,9 @@
-import { boundedBytes } from '@vid/object-storage'
-import { CommandExitError, E2B, type Sandbox, type CommandHandle } from 'e2b'
-import type {
-  ExecutionLease,
-  SandboxSessionPort,
-  SandboxTools,
-  SandboxFiles,
+import { sandboxRequestTimeoutMs } from '@vid/config'
+import { CommandExitError, FileNotFoundError, E2B, type Sandbox } from 'e2b'
+import {
+  type ExecutionLease,
+  type SandboxSessionPort,
+  type SandboxTools,
 } from '../execute-run'
 
 export type E2BSandboxOptions = Readonly<{
@@ -16,8 +15,7 @@ export type E2BSandboxOptions = Readonly<{
   lease: ExecutionLease
 }>
 
-/** Never retry an unknown allocation ACK. The caller quarantines even a null
- * reference. Retained timeout-kill is a backstop, not persistence assurance. */
+/** An unknown allocation acknowledgement must never be retried. */
 export async function openE2BSandbox(
   options: E2BSandboxOptions,
   signal: AbortSignal,
@@ -29,7 +27,7 @@ export async function openE2BSandbox(
     sandboxUrl: options.sandboxURL,
     debug: false,
     retries: 0,
-    requestTimeoutMs: 10000,
+    requestTimeoutMs: sandboxRequestTimeoutMs,
   })
   const { lease } = options
   if (lease.nativeRef !== undefined && lease.nativeRef.provider !== 'e2b')
@@ -52,22 +50,14 @@ export async function openE2BSandbox(
           timeoutMs: options.timeoutMs,
           onResume: 'reboot',
         })
-  // A cancellation arriving during create/connect still returns the known ID:
-  // execution persists it under its cleanup lease before checking abort.
+  // Return a known ID even if cancellation arrived during allocation, so the
+  // caller can persist it under its cleanup lease before observing the abort.
   return new E2BSandboxSession(remote, signal, options.timeoutMs)
 }
 
-/** Foreground RPC promises settle before native filesystem-only pause. Unknown
- * RPC/pause outcomes still quarantine: pause is not external job cancellation.
- * SDK command kill only addresses a PID, not its process group. */
-class E2BSandboxSession
-  implements SandboxSessionPort, SandboxTools, SandboxFiles
-{
-  readonly tools: SandboxTools = this
-  readonly files: SandboxFiles = this
+class E2BSandboxSession implements SandboxSessionPort {
   readonly nativeRef
   private closing?: Promise<void>
-  private readonly pending = new Set<Promise<unknown>>()
   private unknownOutcome = false
 
   constructor(
@@ -83,95 +73,92 @@ class E2BSandboxSession
     return this.closing
   }
 
-  async renewTimeout() {
-    if (this.closing !== undefined) return
-    const request = this.remote.setTimeout(this.timeoutMs, {
-      requestTimeoutMs: 10000,
-    })
-    this.pending.add(request)
-    try {
-      await request
-    } catch (error) {
-      this.unknownOutcome = true
-      throw error
-    } finally {
-      this.pending.delete(request)
-    }
-  }
-
   private async pause() {
-    await Promise.allSettled(this.pending)
     const paused = await this.remote.pause({
       keepMemory: false,
-      requestTimeoutMs: 10000,
+      requestTimeoutMs: sandboxRequestTimeoutMs,
     })
-    // false may describe a preexisting RAM snapshot, not a conversion to disk-only.
     if (!paused || this.unknownOutcome)
-      throw new Error(
-        'Sandbox recovery required: pause or command outcome uncertain',
-      )
+      throw new Error('Sandbox recovery required: mutative outcome uncertain')
   }
 
   private async operation<Outcome>(
     signal: AbortSignal,
     action: (signal: AbortSignal) => Promise<Outcome>,
-    uncertainOnAbort = false,
+    mutative = false,
   ) {
     const cancellation = AbortSignal.any([this.owner, signal])
     cancellation.throwIfAborted()
-    if (this.closing !== undefined) throw new Error('Sandbox is settling')
+    if (this.closing !== undefined) throw new Error('Sandbox is closing')
     if (this.unknownOutcome)
       throw new Error('Sandbox recovery required: operation outcome uncertain')
-    const request = action(cancellation)
-    this.pending.add(request)
     try {
-      return await request
+      return await action(cancellation)
     } catch (error) {
-      // A cancelled file upload can already have committed remotely. Only
-      // foreground commands have the separate owned PID settlement guarantee.
-      if (uncertainOnAbort || error !== cancellation.reason)
-        this.unknownOutcome = true
+      if (mutative) this.unknownOutcome = true
       throw error
-    } finally {
-      this.pending.delete(request)
     }
   }
 
   async execute({ command, signal }: Parameters<SandboxTools['execute']>[0]) {
-    return await this.operation(signal, async (cancellation) => {
-      // Starting with no abort signal avoids detaching the foreground stream.
-      // If start's ACK is lost, operation() quarantines; never start it again.
-      const handle = await this.remote.commands.run(command, {
-        background: true,
-        timeoutMs: this.timeoutMs,
-        requestTimeoutMs: 10000,
-      })
-      let killing: Promise<boolean> | undefined
-      const abort = () => {
-        killing ??= handle.kill()
-        void killing.catch(() => {}) // awaited below, never detached cleanup
-      }
-      cancellation.addEventListener('abort', abort, { once: true })
-      if (cancellation.aborted) abort()
-      try {
-        const completed = await commandCompletion(handle)
-        if (killing !== undefined) await killing
-        cancellation.throwIfAborted()
-        return {
-          stdout: completed.stdout,
-          stderr: completed.stderr,
-          exitCode: completed.exitCode,
+    return await this.operation(
+      signal,
+      async (cancellation) => {
+        const deadline = AbortSignal.any([
+          cancellation,
+          AbortSignal.timeout(this.timeoutMs),
+        ])
+        let outputBytes = 0
+        // The official SDK retains the current decoded event before callbacks.
+        // This caps continued output, not transport frames or peak SDK memory.
+        const onOutput = (chunk: string) => {
+          outputBytes += Buffer.byteLength(chunk)
+          if (outputBytes > 256 * 1024)
+            throw new Error('Sandbox command output limit exceeded')
         }
-      } finally {
-        cancellation.removeEventListener('abort', abort)
-        if (killing !== undefined) await killing
-      }
-    })
+        const handle = await this.remote.commands.run(command, {
+          background: true,
+          timeoutMs: this.timeoutMs,
+          requestTimeoutMs: sandboxRequestTimeoutMs,
+          signal: deadline,
+          onStdout: onOutput,
+          onStderr: onOutput,
+        })
+        let killing: Promise<boolean> | undefined
+        const abort = () => {
+          killing ??= handle.kill()
+          void killing.catch(() => {})
+        }
+        deadline.addEventListener('abort', abort, { once: true })
+        if (deadline.aborted) abort()
+        try {
+          const result = await handle.wait().catch((error: unknown) => {
+            if (error instanceof CommandExitError) return error
+            abort()
+            throw error
+          })
+          deadline.throwIfAborted()
+          return {
+            stdout: result.stdout,
+            stderr: result.stderr,
+            exitCode: result.exitCode,
+          }
+        } finally {
+          deadline.removeEventListener('abort', abort)
+          try {
+            await killing
+          } finally {
+            await handle.disconnect()
+          }
+        }
+      },
+      true,
+    )
   }
 
   async read({ path, signal }: Parameters<SandboxTools['read']>[0]) {
-    return await this.operation(signal, (cancellation) =>
-      this.remote.files.read(path, { signal: cancellation }),
+    return new TextDecoder().decode(
+      await this.readBytes(path, signal, 256 * 1024),
     )
   }
 
@@ -186,11 +173,32 @@ class E2BSandboxSession
 
   async readBytes(path: string, signal: AbortSignal, maxBytes: number) {
     return await this.operation(signal, async (cancellation) => {
-      const stream = await this.remote.files.read(path, {
-        format: 'stream',
-        signal: cancellation,
-      })
-      return await boundedBytes(stream, maxBytes)
+      const stream = await this.remote.files
+        .read(path, { format: 'stream', signal: cancellation })
+        .catch((error: unknown) => {
+          if (error instanceof FileNotFoundError)
+            throw new Error('Sandbox file not found')
+          throw error
+        })
+      const reader = stream.getReader()
+      const chunks: Uint8Array[] = []
+      let length = 0
+      try {
+        let next = await reader.read()
+        while (!next.done && length + next.value.byteLength <= maxBytes) {
+          length += next.value.byteLength
+          chunks.push(next.value)
+          next = await reader.read()
+        }
+        if (!next.done) throw new Error('Sandbox file byte limit exceeded')
+        return Buffer.concat(chunks, length)
+      } finally {
+        try {
+          await reader.cancel()
+        } finally {
+          reader.releaseLock()
+        }
+      }
     })
   }
 
@@ -203,14 +211,5 @@ class E2BSandboxSession
         this.remote.files.write(path, buffer, { signal: cancellation }),
       true,
     )
-  }
-}
-
-async function commandCompletion(handle: CommandHandle) {
-  try {
-    return await handle.wait()
-  } catch (error) {
-    if (!(error instanceof CommandExitError)) throw error
-    return error
   }
 }

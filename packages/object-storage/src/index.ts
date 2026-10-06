@@ -1,7 +1,1 @@
-export {
-  connectObjects,
-  boundedBytes,
-  sha256,
-  type ObjectConnection,
-  type ObjectStore,
-} from './objects'
+export { connectObjects, sha256, type ObjectStore } from './objects'

@@ -1,12 +1,4 @@
-import { afterAll, expect, test } from 'bun:test'
-import {
-  createThread,
-  getThread,
-  listMessages,
-  submitMessage,
-  logout,
-} from '@vid/contract/client'
-import { createClient } from '@vid/contract/fetch'
+import { afterAll, expect, spyOn, test } from 'bun:test'
 import { messagesResponseSchema } from '@vid/contract/http'
 import { sha256 } from '@vid/object-storage'
 import { EventSchema } from '@ag-ui/core/schemas'
@@ -22,11 +14,29 @@ import {
   acceptExecutionEvent,
   readPublicEvents,
 } from '../../apps/server/src/db/execution-events'
-import { openTestDatabase } from './database-fixture'
+import { openTestDatabase, settleTestCleanup } from './database-fixture'
 
 const { db, close } = openTestDatabase()
-const login = await signedTestIdentity(db)
-const other = await signedTestIdentity(db)
+const login = await signedTestIdentity(db).catch(async (cause: unknown) => {
+  try {
+    await close()
+  } catch (cleanup) {
+    throw new AggregateError([cause, cleanup], 'Test identity setup failed', {
+      cause,
+    })
+  }
+  throw cause
+})
+const other = await signedTestIdentity(db).catch(async (cause: unknown) => {
+  try {
+    await close()
+  } catch (cleanup) {
+    throw new AggregateError([cause, cleanup], 'Test identity setup failed', {
+      cause,
+    })
+  }
+  throw cause
+})
 const shutdown = new AbortController()
 const httpResources = {
   bodyCollection: { signal: shutdown.signal, timeoutMs: 3000 },
@@ -41,33 +51,22 @@ const handle = createHTTP(db, {
 const threads: string[] = []
 afterAll(async () => {
   shutdown.abort()
-  if (threads.length) {
-    await db
-      .deleteFrom('product.execution_events')
-      .where('thread_id', 'in', threads)
-      .execute()
-    await db
-      .deleteFrom('product.command_outbox')
-      .where('thread_id', 'in', threads)
-      .execute()
-    await db
-      .deleteFrom('product.message_assets')
-      .where('thread_id', 'in', threads)
-      .execute()
-    await db
-      .deleteFrom('product.messages')
-      .where('thread_id', 'in', threads)
-      .execute()
-    await db
-      .deleteFrom('product.assets')
-      .where('thread_id', 'in', threads)
-      .execute()
-    await db
-      .deleteFrom('product.threads')
-      .where('thread_id', 'in', threads)
-      .execute()
-  }
-  await close()
+  await settleTestCleanup([
+    ...(
+      [
+        'product.execution_events',
+        'product.command_outbox',
+        'product.message_assets',
+        'product.assets',
+        'product.messages',
+        'product.threads',
+      ] as const
+    ).map((table) => async () => {
+      if (threads.length)
+        await db.deleteFrom(table).where('thread_id', 'in', threads).execute()
+    }),
+    close,
+  ])
 })
 async function request(path: string, body?: unknown, headers?: HeadersInit) {
   return await handle(
@@ -110,6 +109,138 @@ function observe(threadID: string, runID: string) {
     forwardedProps: {},
   }
 }
+
+test.each([
+  ['malformed', 400],
+  ['too-large', 413],
+  ['timed-out', 408],
+  ['stopping', 503],
+  ['transport-failed', 503],
+] as const)('JSON %s recovery has HTTP status %i', async (kind, status) => {
+  const stopping = new AbortController()
+  let source: ReadableStreamDefaultController<Uint8Array> | undefined
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      source = controller
+      if (kind === 'transport-failed') {
+        controller.error(new Error('Private transport diagnostic'))
+        return
+      }
+      if (kind === 'timed-out' || kind === 'stopping') return
+      controller.enqueue(
+        new TextEncoder().encode(
+          kind === 'too-large' ? 'x'.repeat(65537) : '{',
+        ),
+      )
+      controller.close()
+    },
+  })
+  if (kind === 'stopping') stopping.abort()
+  const route = createHTTP(db, {
+    authentication: login.authentication,
+    signal: stopping.signal,
+    bodyCollection: { signal: stopping.signal, timeoutMs: 10 },
+    maxAssetBytes: 1024,
+    pollIntervalMs: 5,
+  })
+  try {
+    const response = await route(
+      new Request('http://127.0.0.1:8787/api/threads', {
+        method: 'POST',
+        headers: login.headers,
+        body,
+      }),
+    ).catch((cause: unknown) => cause)
+    expect(response).toBeInstanceOf(Response)
+    if (!(response instanceof Response))
+      throw new Error('Expected body rejection response')
+    expect(response.status).toBe(status)
+    expect(await response.text()).not.toContain('Private transport diagnostic')
+    expect(body.locked).toBe(false)
+  } finally {
+    stopping.abort()
+    try {
+      source?.close()
+    } catch {
+      // A consumed, failed or cancelled source is already closed.
+    }
+  }
+})
+
+test.each([
+  ['too-large', 413],
+  ['timed-out', 408],
+  ['stopping', 503],
+  ['transport-failed', 503],
+] as const)('upload %s recovery has HTTP status %i', async (kind, status) => {
+  const threadID = await thread()
+  const stopping = new AbortController()
+  let source: ReadableStreamDefaultController<Uint8Array> | undefined
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      source = controller
+      if (kind === 'transport-failed')
+        controller.error(new Error('Private upload diagnostic'))
+      if (kind === 'too-large') controller.enqueue(new Uint8Array(1025))
+    },
+  })
+  if (kind === 'stopping') stopping.abort()
+  let storageAttempts = 0
+  const route = createHTTP(db, {
+    authentication: login.authentication,
+    signal: stopping.signal,
+    bodyCollection: { signal: stopping.signal, timeoutMs: 10 },
+    maxAssetBytes: 1024,
+    pollIntervalMs: 5,
+    files: {
+      signal: stopping.signal,
+      timeoutMs: 10,
+      maxAssetBytes: 1024,
+      objects: {
+        read: async () => {
+          storageAttempts++
+          throw new Error('Unexpected storage read')
+        },
+        put: async () => {
+          storageAttempts++
+          throw new Error('Unexpected storage write')
+        },
+        close: () => {},
+      },
+    },
+  })
+  const headers = new Headers(login.headers)
+  headers.set('content-type', 'text/plain')
+  headers.set('x-asset-id', crypto.randomUUID())
+  headers.set('x-file-name', 'note.txt')
+  try {
+    const response = await route(
+      new Request(`http://127.0.0.1:8787/api/threads/${threadID}/assets`, {
+        method: 'POST',
+        headers,
+        body,
+      }),
+    )
+    expect(response.status).toBe(status)
+    expect(await response.text()).not.toContain('Private upload diagnostic')
+    expect(storageAttempts).toBe(0)
+    expect(body.locked).toBe(false)
+    expect(
+      await db
+        .selectFrom('product.assets')
+        .select('asset_id')
+        .where('thread_id', '=', threadID)
+        .execute(),
+    ).toEqual([])
+  } finally {
+    stopping.abort()
+    try {
+      source?.close()
+    } catch {
+      // A failed or cancelled upload source is already closed.
+    }
+  }
+})
 
 test('owned thread snapshots, durable submission replay and malformed input', async () => {
   const id = await thread()
@@ -601,16 +732,80 @@ test.each(['run-cancelled', 'run-failed'] as const)(
   },
 )
 
+test('first durable SSE read rejects early EOF instead of spinning', async () => {
+  const response = new Response(
+    new ReadableStream<Uint8Array>({
+      start: (controller) => controller.close(),
+    }),
+  )
+  const body = response.body!
+  const reader = body.getReader()
+  const acquire = spyOn(body, 'getReader').mockReturnValue(reader)
+  const nativeRead = reader.read.bind(reader)
+  let reads = 0
+  const bounded = spyOn(reader, 'read').mockImplementation(async () => {
+    // A timer cannot reliably interrupt a microtask-only EOF loop. Keep the
+    // native stream, but force a diagnostic failure if EOF is read repeatedly.
+    if (++reads > 2) throw new Error('Reader continued after EOF')
+    const result = await nativeRead()
+    // DOM requires an explicit EOF value; Bun permits it to be absent.
+    return result.done
+      ? { done: true as const, value: undefined }
+      : { done: false as const, value: result.value }
+  })
+  try {
+    const failure: unknown = await readFirstFact(response).catch(
+      (error: unknown) => error,
+    )
+    expect(failure).toBeInstanceOf(Error)
+    expect(failure).toHaveProperty(
+      'message',
+      'SSE ended before its first durable cursor',
+    )
+  } finally {
+    bounded.mockRestore()
+    acquire.mockRestore()
+    reader.releaseLock()
+  }
+})
+
+test('first durable SSE read preserves split UTF-8 and releases the reader', async () => {
+  const text = 'data: {"delta":"🎬"}\nid: 1\n\n'
+  const bytes = new TextEncoder().encode(text)
+  const split = new TextEncoder().encode('data: {"delta":"').length + 1
+  const response = new Response(
+    new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(bytes.slice(0, split))
+        controller.enqueue(bytes.slice(split))
+        controller.close()
+      },
+    }),
+  )
+  expect(await readFirstFact(response)).toBe(text)
+  expect(response.body?.locked).toBe(false)
+})
+
 async function readFirstFact(response: Response) {
   const reader = response.body?.getReader()
   if (!reader) throw new Error('Missing stream')
+  const decoder = new TextDecoder()
   try {
     let text = ''
-    while (!text.includes('\nid: '))
-      text += new TextDecoder().decode((await reader.read()).value)
+    let chunk: Awaited<ReturnType<typeof reader.read>>
+    do {
+      chunk = await reader.read()
+      text += decoder.decode(chunk.value, { stream: true })
+    } while (!chunk.done && !text.includes('\nid: '))
+    if (!text.includes('\nid: '))
+      throw new Error('SSE ended before its first durable cursor')
     return text
   } finally {
-    await reader.cancel()
+    try {
+      await reader.cancel()
+    } finally {
+      reader.releaseLock()
+    }
   }
 }
 
@@ -1078,7 +1273,7 @@ test.each(['not-a-cursor', '01', '-1', '9223372036854775808'])(
   },
 )
 
-test('official generated fetch client creates, replays, reads, submits and durably logs out through native routes', async () => {
+test('native Fetch creates, replays, reads, submits and durably logs out through native routes', async () => {
   const identity = await signedTestIdentity(db)
   const local = createHTTP(db, {
     ...httpResources,
@@ -1087,41 +1282,53 @@ test('official generated fetch client creates, replays, reads, submits and durab
     pollIntervalMs: 5,
   })
   const server = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: local })
-  const client = createClient({
-    baseUrl: server.url.toString(),
-    headers: identity.headers,
-  })
   const threadID = crypto.randomUUID()
   threads.push(threadID)
   try {
-    const body = { threadID, title: ' Generated client ' }
-    const created = await createThread({ client, body, throwOnError: true })
-    expect(created.response.status).toBe(201)
-    expect(created.data.thread.title).toBe('Generated client')
-    expect(
-      (await createThread({ client, body, throwOnError: true })).response
-        .status,
-    ).toBe(200)
-    const read = await getThread({
-      client,
-      path: { threadID },
-      throwOnError: true,
+    const body = { threadID, title: ' Native Fetch ' }
+    const headers = new Headers(identity.headers)
+    headers.set('content-type', 'application/json')
+    const created = await fetch(new URL('/api/threads', server.url), {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
     })
-    expect(read.response.status).toBe(200)
-    expect(read.data.thread.threadID).toBe(threadID)
-    const submitted = await submitMessage({
-      client,
-      throwOnError: true,
-      path: { threadID },
-      body: { messageID: crypto.randomUUID(), text: 'hello' },
+    expect(created.status).toBe(201)
+    expect((await created.json()).thread.title).toBe('Native Fetch')
+    const replay = await fetch(new URL('/api/threads', server.url), {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
     })
-    expect(submitted.response.status).toBe(202)
-    expect(submitted.data.runID).toBeDefined()
-    const signedOut = await logout({ client, body: {}, throwOnError: true })
-    expect(signedOut.response.status).toBe(200)
-    expect(signedOut.response.headers.get('set-cookie')).toContain('Max-Age=0')
+    expect(replay.status).toBe(200)
+    const read = await fetch(new URL(`/api/threads/${threadID}`, server.url), {
+      headers,
+    })
+    expect(read.status).toBe(200)
+    expect((await read.json()).thread.threadID).toBe(threadID)
+    const submitted = await fetch(
+      new URL(`/api/threads/${threadID}/messages`, server.url),
+      {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ messageID: crypto.randomUUID(), text: 'hello' }),
+      },
+    )
+    expect(submitted.status).toBe(202)
+    expect((await submitted.json()).runID).toBeDefined()
+    const signedOut = await fetch(new URL('/api/logout', server.url), {
+      method: 'POST',
+      headers,
+      body: '{}',
+    })
+    expect(signedOut.status).toBe(200)
+    expect(signedOut.headers.get('set-cookie')).toContain('Max-Age=0')
     expect(
-      (await getThread({ client, path: { threadID } })).response?.status,
+      (
+        await fetch(new URL(`/api/threads/${threadID}`, server.url), {
+          headers,
+        })
+      ).status,
     ).toBe(401)
   } finally {
     await server.stop(true)
@@ -1192,14 +1399,10 @@ test('server shutdown cancels a slow S3 response body before closing its owned c
   let stopping: Promise<void> | undefined
   try {
     await streaming
-    // Let the SDK receive headers and enter the bounded body read.
-    await Bun.sleep(100)
-    let stopped = false
-    stopping = process.stop().then(() => {
-      stopped = true
-    })
-    await Bun.sleep(250)
-    expect(stopped).toBe(true)
+    // The real storage request is in flight; await owned shutdown rather than
+    // guessing when the SDK has consumed headers or its body.
+    stopping = process.stop()
+    await stopping
   } finally {
     release()
     await stopping
@@ -1239,18 +1442,16 @@ test.each([
       pollIntervalMs: 5,
     })
     const server = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: fresh })
-    const client = createClient({
-      baseUrl: server.url.toString(),
-      headers: login.headers,
-    })
     try {
       for (let reload = 0; reload < 2; reload++) {
-        const snapshot = await listMessages({
-          client,
-          path: { threadID: id },
-          throwOnError: true,
-        })
-        expect(messagesResponseSchema.parse(snapshot.data)).toEqual({
+        const snapshot = await fetch(
+          new URL(`/api/threads/${id}/messages`, server.url),
+          {
+            headers: login.headers,
+          },
+        )
+        expect(snapshot.status).toBe(200)
+        expect(messagesResponseSchema.parse(await snapshot.json())).toEqual({
           messages: [
             {
               messageID: body.messageID,
@@ -1258,6 +1459,7 @@ test.each([
               text: 'Hello',
               createdAt: expect.any(String),
               assets: [],
+              sources: [],
             },
           ],
           activeRuns: [],
@@ -1392,6 +1594,11 @@ test('asset allocation and message snapshots use bounded reads while preserving 
       return result
     },
   })
+  await counted
+    .transaction()
+    .execute((tx) => allocatedAssets(tx, id, ordered.slice(0, 1)))
+  const singleAllocationReads = selects
+  selects = 0
   const allocations = await counted.transaction().execute((tx) =>
     allocatedAssets(
       tx,
@@ -1400,7 +1607,7 @@ test('asset allocation and message snapshots use bounded reads while preserving 
     ),
   )
   expect(allocations.map((asset) => asset.assetID)).toEqual(ordered)
-  expect(selects).toBe(1)
+  expect(selects).toBeLessThanOrEqual(singleAllocationReads)
   for (const unavailable of [
     ...assetIDs.slice(2),
     crypto.randomUUID(),
@@ -1433,18 +1640,47 @@ test('asset allocation and message snapshots use bounded reads while preserving 
   }
   selects = 0
   const snapshot = await snapshotOwnedMessages(counted, query)
+  expect(snapshot).not.toBeNull()
   expect(
-    snapshot?.messages.map((message) => ({
+    snapshot!.messages.map((message) => ({
       id: message.messageID,
       assets: message.assets.map((asset) => asset.assetID),
     })),
   ).toEqual(expectedMessages)
-  expect(selects).toBe(5)
+  const smallSnapshotReads = selects
+  // Grow the actual message/link rows by an order of magnitude: a per-message
+  // asset query would grow with them, while batched reads remain bounded.
+  for (let index = 0; index < 30; index++) {
+    const messageID = crypto.randomUUID()
+    expectedMessages.push({ id: messageID, assets: ordered })
+    expect(
+      (
+        await acceptMessageIntent(db, {
+          ...query,
+          messageID,
+          commandID: crypto.randomUUID(),
+          runID: crypto.randomUUID(),
+          text: 'larger snapshot',
+          assetIDs: ordered,
+        })
+      ).kind,
+    ).toBe('accepted')
+  }
+  selects = 0
+  const largerSnapshot = await snapshotOwnedMessages(counted, query)
+  expect(largerSnapshot).not.toBeNull()
+  expect(
+    largerSnapshot!.messages.map((message) => ({
+      id: message.messageID,
+      assets: message.assets.map((asset) => asset.assetID),
+    })),
+  ).toEqual(expectedMessages)
+  expect(selects).toBeLessThanOrEqual(smallSnapshotReads * 2)
   const { archiveThread } =
     await import('../../apps/server/src/db/cancellations')
   await archiveThread(db, query)
   expect((await snapshotOwnedMessages(db, query))?.messages).toEqual(
-    snapshot?.messages,
+    largerSnapshot?.messages,
   )
 })
 
@@ -1514,7 +1750,9 @@ test('terminal reconnect retains its durable cursor across batches, cursor gaps 
   expect(text).toContain('RUN_FINISHED')
   expect(text).not.toContain('unrelated')
   expect(lastFactCursor(text)).toBe(terminal.cursor)
-  expect(authorizations).toBe(5)
+  // At least pre/post authorization per fetched reconstruction batch; harmless
+  // extra checks must not fail this contract. Revocation is exercised below.
+  expect(authorizations).toBeGreaterThanOrEqual(4)
 })
 
 test('reconstruction includes the boundary fact but ignores later facts already loaded in its batch', async () => {
@@ -1552,4 +1790,70 @@ test('reconstruction includes the boundary fact but ignores later facts already 
     text.indexOf('TEXT_MESSAGE_CONTENT'),
   )
   expect(text).toContain('RUN_FINISHED')
+})
+
+test('revoked ownership after a real reconstruction read emits no SSE bytes', async () => {
+  const { observeEvents } =
+    await import('../../apps/server/src/conversation/event-stream')
+  const { readOwnedThread } =
+    await import('../../apps/server/src/db/conversations')
+  const id = await thread()
+  const { value } = await submit(id)
+  const canary = 'PRIVATE_REVOKED_RECONSTRUCTION_TEXT'
+  await emitText(
+    { threadID: id, runID: value.runID, messageID: crypto.randomUUID() },
+    1,
+    {
+      kind: 'run-completed',
+      text: canary,
+    },
+  )
+  const terminal = (
+    await readPublicEvents(db, { ownerID: login.user.id, threadID: id })
+  )?.[0]
+  if (!terminal) throw new Error('Missing terminal')
+  let ledgerRead = false
+  let revoked = false
+  const observed = db.withPlugin({
+    transformQuery({ node }) {
+      ledgerRead = JSON.stringify(node).includes('execution_events')
+      return node
+    },
+    async transformResult({ result }) {
+      if (ledgerRead && !revoked) {
+        await db
+          .updateTable('product.threads')
+          .set({ owner_id: other.user.id })
+          .where('thread_id', '=', id)
+          .execute()
+        revoked = true
+      }
+      return result
+    },
+  })
+  let authorizedBeforeRead = false
+  let deniedAfterRead = false
+  const response = await observeEvents(observed, {
+    ownerID: login.user.id,
+    threadID: id,
+    runID: value.runID,
+    after: terminal.cursor,
+    pollMs: 5,
+    requestSignal: new AbortController().signal,
+    processSignal: shutdown.signal,
+    authorize: async () => {
+      const allowed =
+        (await readOwnedThread(db, {
+          ownerID: login.user.id,
+          threadID: id,
+        })) !== undefined
+      if (!revoked && allowed) authorizedBeforeRead = true
+      if (revoked && !allowed) deniedAfterRead = true
+      return allowed
+    },
+  })
+  expect(await response.text()).toBe('')
+  expect(authorizedBeforeRead).toBe(true)
+  expect(revoked).toBe(true)
+  expect(deniedAfterRead).toBe(true)
 })

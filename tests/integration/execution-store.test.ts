@@ -23,9 +23,18 @@ import { createPiHarness } from '../../apps/agent/src/harness/pi'
 import { openTestDatabase } from './database-fixture'
 
 const { db, close } = openTestDatabase()
-afterAll(close)
+const ownedThreads = new Set<string>()
+afterAll(async () => {
+  try {
+    for (const threadID of ownedThreads)
+      await removeExecutionConversation(threadID)
+  } finally {
+    await close()
+  }
+})
 
 function start(threadID: string = crypto.randomUUID()): StartCommand {
+  ownedThreads.add(threadID.toLowerCase())
   return {
     version: 1,
     kind: 'start',
@@ -139,8 +148,13 @@ function piProviderFixture() {
   return { provider, requests, options, input }
 }
 
-async function removePiConversation(threadID: string) {
+async function removeExecutionConversation(threadID: string) {
   await db.transaction().execute(async (tx) => {
+    await tx
+      .updateTable('execution.conversations')
+      .set({ active_run_id: null, lease_owner: null, lease_until: null })
+      .where('thread_id', '=', threadID)
+      .execute()
     await tx
       .deleteFrom('execution.event_outbox')
       .where('thread_id', '=', threadID)
@@ -169,6 +183,17 @@ test('fresh SQL history starts a Pi turn and persists canonical history for the 
     const lease = await claim()
     expect(lease.runID).toBe(first.runID)
     expect(lease.history).toEqual([])
+    expect(lease).not.toHaveProperty('commandID')
+    expect(lease).not.toHaveProperty('messageID')
+    const retained = await db
+      .selectFrom('execution.runs')
+      .select(['command_id', 'message_id'])
+      .where('run_id', '=', first.runID)
+      .executeTakeFirstOrThrow()
+    expect(retained).toEqual({
+      command_id: first.commandID,
+      message_id: first.input.messageID,
+    })
     const result = await createPiHarness(options).turn({
       ...input,
       text: lease.text,
@@ -201,7 +226,7 @@ test('fresh SQL history starts a Pi turn and persists canonical history for the 
     ).toBe(true)
   } finally {
     try {
-      await removePiConversation(first.threadID)
+      await removeExecutionConversation(first.threadID)
     } finally {
       await provider.stop(true)
     }
@@ -210,50 +235,59 @@ test('fresh SQL history starts a Pi turn and persists canonical history for the 
 
 test('concurrent canonical acceptance has one winner and retains conflicting replay', async () => {
   const command = start()
-  const outcomes = await Promise.all(
-    Array.from({ length: 8 }, () => acceptExecutionCommand(db, command)),
-  )
-  expect(outcomes.filter((outcome) => outcome === 'accepted')).toHaveLength(1)
-  expect(outcomes.filter((outcome) => outcome === 'replay')).toHaveLength(7)
-  expect(
-    await acceptExecutionCommand(db, {
-      ...command,
-      input: { ...command.input, text: 'different' },
-    }),
-  ).toBe('conflict')
-  expect(
-    await acceptExecutionCommand(db, {
-      ...command,
-      commandID: crypto.randomUUID(),
-    }),
-  ).toBe('conflict')
-  const lease = await claim()
-  expect(lease).toMatchObject({
-    runID: command.runID,
-    messageID: command.input.messageID,
-    text: 'Hello',
-    history: [],
-  })
-  expect(await appendExecutionText(db, lease, 'Answer')).toBe(true)
-  expect(
-    await completeExecutionRun(db, lease, {
-      text: 'Answer',
-      history: { private: ['tool-secret'] },
-    }),
-  ).toBe(true)
-  const stored = await storedAssistantID(lease.runID)
-  expect(stored).toBeString()
-  expect(stored).not.toBe(lease.messageID)
-  expect((await events(lease.runID)).slice(1)).toMatchObject([
-    { kind: 'assistant-text', messageID: stored, delta: 'Answer' },
-    { kind: 'run-completed', messageID: stored, text: 'Answer' },
-  ])
-  expect(await acceptExecutionCommand(db, command)).toBe('replay')
-  expect((await events(command.runID)).map((event) => event.kind)).toEqual([
-    'run-started',
-    'assistant-text',
-    'run-completed',
-  ])
+  try {
+    // Join every real admission even on failure; a rejected sibling must not
+    // outlive this test and leave queued work for the next global scheduler.
+    const settled = await Promise.allSettled(
+      Array.from({ length: 8 }, () => acceptExecutionCommand(db, command)),
+    )
+    const outcomes = settled.map((result) => {
+      if (result.status === 'rejected') throw result.reason
+      return result.value
+    })
+    expect(outcomes.filter((outcome) => outcome === 'accepted')).toHaveLength(1)
+    expect(outcomes.filter((outcome) => outcome === 'replay')).toHaveLength(7)
+    expect(
+      await acceptExecutionCommand(db, {
+        ...command,
+        input: { ...command.input, text: 'different' },
+      }),
+    ).toBe('conflict')
+    expect(
+      await acceptExecutionCommand(db, {
+        ...command,
+        commandID: crypto.randomUUID(),
+      }),
+    ).toBe('conflict')
+    const lease = await claim()
+    expect(lease).toMatchObject({
+      runID: command.runID,
+      text: 'Hello',
+      history: [],
+    })
+    expect(await appendExecutionText(db, lease, 'Answer')).toBe(true)
+    expect(
+      await completeExecutionRun(db, lease, {
+        text: 'Answer',
+        history: { private: ['tool-secret'] },
+      }),
+    ).toBe(true)
+    const stored = await storedAssistantID(lease.runID)
+    expect(stored).toBeString()
+    expect(stored).not.toBe(command.input.messageID)
+    expect((await events(lease.runID)).slice(1)).toMatchObject([
+      { kind: 'assistant-text', messageID: stored, delta: 'Answer' },
+      { kind: 'run-completed', messageID: stored, text: 'Answer' },
+    ])
+    expect(await acceptExecutionCommand(db, command)).toBe('replay')
+    expect((await events(command.runID)).map((event) => event.kind)).toEqual([
+      'run-started',
+      'assistant-text',
+      'run-completed',
+    ])
+  } finally {
+    await removeExecutionConversation(command.threadID)
+  }
 })
 
 test('concurrent claim serializes a thread and passes only committed private history to its next run', async () => {
@@ -315,7 +349,7 @@ test('cancel before start is retained and queued cancellation is immediately ter
   ])
 })
 
-test('running cancellation rejects text and completion until worker records cancellation', async () => {
+test('locked completion chooses racing cancellation without committing history', async () => {
   const command = start()
   await acceptExecutionCommand(db, command)
   const lease = await claim()
@@ -328,8 +362,7 @@ test('running cancellation rejects text and completion until worker records canc
       text: 'late',
       history: ['late secret'],
     }),
-  ).toBe(false)
-  expect(await cancelExecutionRun(db, lease)).toBe(true)
+  ).toBe('cancelled')
   expect(await cancelExecutionRun(db, lease)).toBe(false)
   expect(await renewExecutionLease(db, lease, 60000)).toBe('lost')
   expect((await events(command.runID)).map((event) => event.kind)).toEqual([
@@ -470,11 +503,13 @@ test('concurrent different commands cannot reuse a run across threads and confli
 })
 
 function uppercaseStart(): StartCommand {
+  const threadID = 'BCDEFABC-DEFA-4BCD-8EFA-BCDEFABCDEFA'
+  ownedThreads.add(threadID.toLowerCase())
   return {
     version: 1,
     kind: 'start',
     commandID: 'ABCDEFAB-CDEF-4ABC-8DEF-ABCDEFABCDEF',
-    threadID: 'BCDEFABC-DEFA-4BCD-8EFA-BCDEFABCDEFA',
+    threadID,
     runID: 'CDEFABCD-EFAB-4CDE-8FAB-CDEFABCDEFAB',
     input: {
       messageID: 'DEFABCDE-FABC-4DEF-8ABC-DEFABCDEFABC',
@@ -521,9 +556,17 @@ test('UUID case replays canonical and legacy commands without altering owner aut
   expect(lease).toMatchObject({
     runID: lower.runID,
     threadID: lower.threadID,
-    messageID: lower.input.messageID,
-    commandID: lower.commandID,
     ownerID: 'Worker-ABC',
+  })
+  expect(
+    await db
+      .selectFrom('execution.runs')
+      .select(['command_id', 'message_id'])
+      .where('run_id', '=', lease.runID)
+      .executeTakeFirstOrThrow(),
+  ).toEqual({
+    command_id: lower.commandID,
+    message_id: lower.input.messageID,
   })
   expect(
     await renewExecutionLease(db, { ...lease, ownerID: 'worker-abc' }, 60000),
@@ -542,6 +585,7 @@ test('uppercase cancellation of a queued canonical run emits canonical JSON and 
     threadID: 'abcdefab-cdef-4abc-8def-abcdefabcdea',
     runID: 'bcdefabc-defa-4bcd-8efa-bcdefabcdeff',
   }
+  ownedThreads.add(command.threadID)
   await acceptExecutionCommand(db, command)
   const cancel = {
     ...cancellation(command),
@@ -753,4 +797,69 @@ test('late quarantine from a committed old fence blocks active spending but reta
     { kind: 'run-started' },
     { kind: 'run-failed', reason: 'execution-error' },
   ])
+})
+
+test('typed asset replay normalizes property order and UUID case but preserves exact facts', async () => {
+  const base = start()
+  const first = {
+    sha256: 'a'.repeat(64),
+    byteLength: 3,
+    mimeType: 'image/png',
+    name: 'first.png',
+    objectKey: 'allocated/first',
+    assetID: crypto.randomUUID().toUpperCase(),
+  }
+  const second = {
+    ...first,
+    assetID: crypto.randomUUID(),
+    objectKey: 'allocated/second',
+  }
+  const command: StartCommand = {
+    ...base,
+    commandID: base.commandID.toUpperCase(),
+    threadID: base.threadID.toUpperCase(),
+    runID: base.runID.toUpperCase(),
+    input: {
+      messageID: base.input.messageID.toUpperCase(),
+      text: ' exact text ',
+      assets: [first, second],
+    },
+  }
+  try {
+    expect(await acceptExecutionCommand(db, command)).toBe('accepted')
+    const parsed = startCommandSchema.parse(command)
+    expect(await acceptExecutionCommand(db, parsed)).toBe('replay')
+    expect(await acceptExecutionCommand(db, command)).toBe('replay')
+    for (const input of [
+      { ...parsed.input, text: 'exact text' },
+      { ...parsed.input, assets: [second, first] },
+      {
+        ...parsed.input,
+        assets: [{ ...first, objectKey: 'different' }, second],
+      },
+    ]) {
+      expect(await acceptExecutionCommand(db, { ...parsed, input })).toBe(
+        'conflict',
+      )
+    }
+    const conflictingID = crypto.randomUUID()
+    expect(
+      await acceptExecutionCommand(db, { ...parsed, commandID: conflictingID }),
+    ).toBe('conflict')
+    expect(
+      await db
+        .selectFrom('execution.command_inbox')
+        .select('command_id')
+        .where('command_id', '=', conflictingID)
+        .execute(),
+    ).toEqual([])
+    const row = await db
+      .selectFrom('execution.command_inbox')
+      .select('command')
+      .where('command_id', '=', base.commandID)
+      .executeTakeFirstOrThrow()
+    expect(startCommandSchema.parse(row.command)).toEqual(parsed)
+  } finally {
+    await removeExecutionConversation(base.threadID)
+  }
 })

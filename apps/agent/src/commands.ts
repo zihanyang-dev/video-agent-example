@@ -1,6 +1,6 @@
 import type { RedisClientType } from 'redis'
 import {
-  executionCommandSchema,
+  inboundExecutionCommandSchema,
   executionStreams,
   type ExecutionCommand,
 } from '@vid/contract/execution'
@@ -38,21 +38,14 @@ export async function acceptCommandMessages(
   db: Kysely<DB>,
   commands: RedisClientType,
   messages: PendingCommands,
+  options: {
+    signal?: AbortSignal
+  } = {},
 ) {
   let acceptedCount = 0
   for (const entry of messages) {
-    if (entry === null) throw new Error('Deleted pending command payload')
-    const body = entry.message.command
-    if (body === undefined) throw new Error('Missing pending command payload')
-
-    let command: ExecutionCommand
-    try {
-      command = executionCommandSchema.parse(JSON.parse(body))
-    } catch {
-      // Parser diagnostics can include private wire content. Fail-stop without
-      // forwarding it into process logs; no acceptance or ACK has happened.
-      throw new Error('Invalid pending command payload')
-    }
+    if (options.signal?.aborted) break
+    const { command, id } = parseCommand(entry)
 
     const outcome = await acceptExecutionCommand(db, command)
     if (outcome === 'conflict')
@@ -61,7 +54,7 @@ export async function acceptCommandMessages(
     await commands.xAck(
       executionStreams.commands,
       executionStreams.commandGroup,
-      entry.id,
+      id,
     )
     acceptedCount += 1
   }
@@ -90,9 +83,15 @@ export async function acceptCommands(
     if (signal.aborted) return
     if (page.deletedMessages.length)
       throw new Error('Deleted pending command payloads')
-    await acceptCommandMessages(db, commands, page.messages)
+    await acceptCommandMessages(db, commands, page.messages, {
+      signal,
+    })
 
     if (signal.aborted) return
+    await readNewCommands()
+  }
+
+  async function readNewCommands() {
     const streams = await blockingReader.xReadGroup(
       executionStreams.commandGroup,
       consumerID,
@@ -101,6 +100,25 @@ export async function acceptCommands(
     )
     if (signal.aborted) return
     for (const stream of streams ?? [])
-      await acceptCommandMessages(db, commands, stream.messages)
+      await acceptCommandMessages(db, commands, stream.messages, {
+        signal,
+      })
   }
+}
+
+function parseCommand(entry: PendingCommands[number]) {
+  if (entry === null) throw new Error('Deleted pending command payload')
+  const body = entry.message.command
+  if (body === undefined) throw new Error('Missing pending command payload')
+
+  let command: ExecutionCommand
+  try {
+    command = inboundExecutionCommandSchema.parse(JSON.parse(body))
+  } catch {
+    // Parser diagnostics can include private wire content. Fail-stop without
+    // forwarding it into process logs; no acceptance or ACK has happened.
+    throw new Error('Invalid pending command payload')
+  }
+
+  return { command, id: entry.id }
 }

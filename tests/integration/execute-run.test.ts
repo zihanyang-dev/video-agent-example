@@ -24,7 +24,38 @@ import {
 import { openTestDatabase } from './database-fixture'
 
 const { db, close } = openTestDatabase()
-afterAll(close)
+const ownedThreads = new Set<string>()
+afterAll(async () => {
+  try {
+    for (const threadID of ownedThreads) {
+      await db.transaction().execute(async (tx) => {
+        await tx
+          .updateTable('execution.conversations')
+          .set({ active_run_id: null, lease_owner: null, lease_until: null })
+          .where('thread_id', '=', threadID)
+          .execute()
+        await tx
+          .deleteFrom('execution.event_outbox')
+          .where('thread_id', '=', threadID)
+          .execute()
+        await tx
+          .deleteFrom('execution.runs')
+          .where('thread_id', '=', threadID)
+          .execute()
+        await tx
+          .deleteFrom('execution.command_inbox')
+          .where('thread_id', '=', threadID)
+          .execute()
+        await tx
+          .deleteFrom('execution.conversations')
+          .where('thread_id', '=', threadID)
+          .execute()
+      })
+    }
+  } finally {
+    await close()
+  }
+})
 
 function deferred<T>() {
   let resolve!: (value: T) => void
@@ -43,6 +74,7 @@ async function claimFixture(leaseMs: number) {
     runID: crypto.randomUUID(),
     input: { messageID: crypto.randomUUID(), text: 'hello' },
   } as const
+  ownedThreads.add(command.threadID)
   await acceptExecutionCommand(db, command)
   const lease = await claimExecutionRun(db, {
     ownerID: crypto.randomUUID(),
@@ -60,16 +92,12 @@ function pipeline(turnError: boolean) {
   const closed = deferred<void>()
   const sandbox: SandboxSessionPort = {
     nativeRef: { provider: 'e2b', id: 'fixture-native' },
-    renewTimeout: async () => {},
-    files: {
-      readBytes: async () => new Uint8Array(),
-      writeBytes: async () => {},
-    },
-    tools: {
-      execute: async () => ({ stdout: '', stderr: '', exitCode: 0 }),
-      read: async () => '',
-      write: async () => {},
-    },
+
+    readBytes: async () => new Uint8Array(),
+    writeBytes: async () => {},
+    execute: async () => ({ stdout: '', stderr: '', exitCode: 0 }),
+    read: async () => '',
+    write: async () => {},
     close: async () => {
       closing.resolve()
       await closed.promise
@@ -222,7 +250,16 @@ test('cancelled remote cleanup failure records execution-error, not cancellation
 })
 
 test('database cancellation wins over shutdown interruption', async () => {
-  const f = await fixture()
+  const cancelled = deferred<void>()
+  const writes = bindExecutionWrites(db)
+  const f = await fixture(false, {
+    ...writes,
+    renew: async (lease, leaseMs) => {
+      const authority = await writes.renew(lease, leaseMs)
+      if (authority === 'cancel') cancelled.resolve()
+      return authority
+    },
+  })
   f.shutdown.abort()
   await acceptExecutionCommand(db, {
     version: 1,
@@ -232,7 +269,7 @@ test('database cancellation wins over shutdown interruption', async () => {
     runID: f.lease.runID,
   })
   // Observe cancellation while the interrupted harness remains unsettled.
-  await Bun.sleep(100)
+  await cancelled.promise
   f.end.resolve()
   f.closed.resolve()
   expect(await f.run).toBe('cancelled')
@@ -252,7 +289,6 @@ test('true fence loss during cleanup excludes text, history and terminal writes'
     .set({ fence: sql`fence + 1` })
     .where('thread_id', '=', f.lease.threadID)
     .execute()
-  await Bun.sleep(100)
   expect(await renewExecutionLease(db, f.lease, f.leaseMs)).toBe('lost')
   expect(await appendExecutionText(db, f.lease, 'stale')).toBe(false)
   expect(
@@ -352,7 +388,7 @@ test('late old-fence quarantine aborts the new paid turn and keeps its lease thr
   const f = pipeline(false)
   let turns = 0
   let toolCalls = 0
-  f.sandbox.tools.read = async () => {
+  f.sandbox.read = async () => {
     toolCalls++
     return 'unsafe'
   }
@@ -371,6 +407,11 @@ test('late old-fence quarantine aborts the new paid turn and keeps its lease thr
     { leaseMs: 600, pollMs: 25, signal: new AbortController().signal },
   )
   const input = await f.started.promise
+  const aborted = deferred<void>()
+  input.signal.addEventListener('abort', () => aborted.resolve(), {
+    once: true,
+  })
+  if (input.signal.aborted) aborted.resolve()
   try {
     lostAck.resolve()
     expect(await oldRun).toEqual(new Error('completion ACK lost'))
@@ -379,7 +420,7 @@ test('late old-fence quarantine aborts the new paid turn and keeps its lease thr
       { kind: 'run-started' },
       { kind: 'run-completed', text: 'committed' },
     ])
-    await Bun.sleep(150)
+    await aborted.promise
     expect(input.signal.aborted).toBe(true)
     const toolOutcome = await input.tools
       .read({ path: '/unsafe', signal: input.signal })
@@ -419,7 +460,7 @@ test('late old-fence quarantine aborts the new paid turn and keeps its lease thr
   ])
 })
 
-test('unknown reauthorization after SQL rejects completion quarantines the settled run without a second terminal attempt', async () => {
+test('SQL decides racing cancellation once without reauthorization or quarantine', async () => {
   let terminalAttempted = false
   let completions = 0
   let quarantines = 0
@@ -449,20 +490,20 @@ test('unknown reauthorization after SQL rejects completion quarantines the settl
   })
   f.end.resolve()
   f.closed.resolve()
-  expect(await f.run).toBe('failed')
+  expect(await f.run).toBe('cancelled')
   expect(completions).toBe(1)
-  expect(quarantines).toBe(1)
+  expect(quarantines).toBe(0)
   const state = await f.snapshot()
   expect(state.conversation).toEqual({ history: [], active_run_id: null })
-  expect(state.run).toEqual({ status: 'failed', cancel_requested: true })
+  expect(state.run).toEqual({ status: 'cancelled', cancel_requested: true })
   expect(state.events).toMatchObject([
     { kind: 'run-started' },
-    { kind: 'run-failed', reason: 'execution-error' },
+    { kind: 'run-cancelled' },
   ])
   const recovery = await db
     .selectFrom('execution.conversations')
     .select('sandbox_recovery_required')
     .where('thread_id', '=', f.lease.threadID)
     .executeTakeFirstOrThrow()
-  expect(recovery.sandbox_recovery_required).toBe(true)
+  expect(recovery.sandbox_recovery_required).toBe(false)
 })

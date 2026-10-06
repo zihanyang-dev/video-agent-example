@@ -7,7 +7,11 @@ import {
   decideMessageReplay,
 } from '../conversation/submission'
 import type { DB } from '@vid/database/types'
-import { startCommandSchema, type StartCommand } from '@vid/contract/execution'
+import {
+  startCommandSchema,
+  type AssetReference,
+  type StartCommand,
+} from '@vid/contract/execution'
 import { sameFile } from '../assets/files'
 import type { Kysely, Transaction } from 'kysely'
 import type {
@@ -133,7 +137,6 @@ async function acceptedMessage(
   if (message !== undefined && message.owner_id !== intent.ownerID)
     return { kind: 'unavailable' }
   if (message === undefined) return null
-  const assets = await messageAssets(tx, intent.messageID)
   // The retained wire command is a separate untyped boundary. Schema parsing
   // canonicalizes historical UUID case; indexed headers and product input still
   // have to name the same accepted work. Never repair or replace bad history.
@@ -149,34 +152,8 @@ async function acceptedMessage(
   ].every(([wire, indexed]) => wire === indexed)
   if (!matchingHeaders || command.input.text !== message.text)
     return { kind: 'conflict' }
-  const references = command.input.assets ?? []
-  if (
-    references.length !== assets.length ||
-    !references.every((reference, position) => {
-      const asset = assets[position]
-      if (!asset || reference.assetID !== asset.asset_id) return false
-      // File content metadata is immutable. Location is not: rehome may move
-      // the current row while an accepted command retains its old physical key.
-      const validLocation =
-        asset.source === 'upload'
-          ? reference.objectKey ===
-              `materials/${asset.thread_id}/${asset.asset_id}` ||
-            reference.objectKey ===
-              `assets/uploads/${asset.thread_id}/${asset.asset_id}`
-          : new RegExp(
-              `^(artifacts|assets/generated)/${asset.thread_id}/${asset.run_id}/[1-9][0-9]*/${asset.asset_id}$`,
-            ).test(reference.objectKey)
-      return (
-        validLocation &&
-        sameFile(reference, {
-          name: asset.name,
-          mimeType: asset.mime_type,
-          byteLength: asset.byte_length,
-          sha256: asset.sha256,
-        })
-      )
-    })
-  )
+  const assets = await messageAssets(tx, intent.messageID)
+  if (!retainedReferencesMatch(command.input.assets ?? [], assets))
     return { kind: 'conflict' }
   return decideMessageReplay(intent, {
     threadID: message.thread_id,
@@ -185,6 +162,38 @@ async function acceptedMessage(
     assetIDs: assets.map((row) => row.asset_id),
     commandID: message.command_id,
     runID: message.run_id,
+  })
+}
+
+/** Replay compatibility only: old physical keys are immutable evidence, not
+ * current business entities or guest directories. Rehome may move the SQL row,
+ * but cannot rewrite an already-accepted command's location or content facts. */
+function retainedReferencesMatch(
+  references: readonly AssetReference[],
+  assets: Awaited<ReturnType<typeof messageAssets>>,
+): boolean {
+  if (references.length !== assets.length) return false
+  return references.every((reference, position) => {
+    const asset = assets[position]
+    if (!asset || reference.assetID !== asset.asset_id) return false
+    const locationMatches =
+      asset.source === 'upload'
+        ? reference.objectKey ===
+            `materials/${asset.thread_id}/${asset.asset_id}` ||
+          reference.objectKey ===
+            `assets/uploads/${asset.thread_id}/${asset.asset_id}`
+        : new RegExp(
+            `^(artifacts|assets/generated)/${asset.thread_id}/${asset.run_id}/[1-9][0-9]*/${asset.asset_id}$`,
+          ).test(reference.objectKey)
+    return (
+      locationMatches &&
+      sameFile(reference, {
+        name: asset.name,
+        mimeType: asset.mime_type,
+        byteLength: asset.byte_length,
+        sha256: asset.sha256,
+      })
+    )
   })
 }
 

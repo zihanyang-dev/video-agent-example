@@ -118,16 +118,16 @@ describe('owned Embed environment (opt-in)', () => {
         onTimeout: 'kill',
         autoResume: false,
       })
-      await sandbox.tools.write({
+      await sandbox.write({
         path: '/home/user/result.txt',
         content: 'hello',
         signal,
       })
       expect(
-        await sandbox.tools.read({ path: '/home/user/result.txt', signal }),
+        await sandbox.read({ path: '/home/user/result.txt', signal }),
       ).toBe('hello')
       expect(
-        await sandbox.tools.execute({
+        await sandbox.execute({
           command: 'printf output; printf diagnostic >&2; exit 7',
           signal,
         }),
@@ -161,13 +161,13 @@ describe('owned Embed environment (opt-in)', () => {
     })
     const command = `curl --noproxy "*" --max-time 2 -fsS http://${networkHost}:${probe.port}`
     try {
-      const env = await sandbox.tools.execute({ command: 'env', signal })
+      const env = await sandbox.execute({ command: 'env', signal })
       expect(env.stdout).not.toContain(input.apiKey)
       expect(env.stdout).not.toContain('MODEL_API_KEY=')
       expect(env.stdout).not.toContain('DATABASE_URL=')
       expect(env.stdout).not.toContain('TURN_TOKEN_SECRET=')
       expect(
-        (await sandbox.tools.execute({ command: 'command -v curl', signal }))
+        (await sandbox.execute({ command: 'command -v curl', signal }))
           .exitCode,
       ).toBe(0)
       const controlInput = options()
@@ -184,7 +184,7 @@ describe('owned Embed environment (opt-in)', () => {
       } finally {
         await control.kill()
       }
-      const network = await sandbox.tools.execute({
+      const network = await sandbox.execute({
         command,
         signal,
       })
@@ -201,11 +201,10 @@ describe('owned Embed environment (opt-in)', () => {
     const signal = AbortSignal.timeout(15000)
     const sandbox = await openE2BSandbox(input, signal)
     try {
-      if (!sandbox.files) throw new Error('Missing binary workspace IO')
       const bytes = new Uint8Array([0, 255, 128, 13, 10, 0])
-      await sandbox.files.writeBytes('/home/user/binary.bin', bytes, signal)
+      await sandbox.writeBytes('/home/user/binary.bin', bytes, signal)
       expect(
-        await sandbox.files.readBytes('/home/user/binary.bin', signal, 6),
+        await sandbox.readBytes('/home/user/binary.bin', signal, 6),
       ).toEqual(bytes)
     } finally {
       await sandbox.close()
@@ -220,7 +219,7 @@ describe('owned Embed environment (opt-in)', () => {
     const reference = sandbox.nativeRef
     expect(
       (
-        await sandbox.tools.execute({
+        await sandbox.execute({
           command:
             'mkdir -p /home/user/agent-chosen; printf saved > /home/user/agent-chosen/note',
           signal,
@@ -248,18 +247,18 @@ describe('owned Embed environment (opt-in)', () => {
     try {
       expect(next.nativeRef).toEqual(reference)
       expect(
-        await next.tools.read({
+        await next.read({
           path: '/proc/sys/kernel/random/boot_id',
           signal,
         }),
       ).not.toBe(bootID)
       expect(
-        await next.tools.read({ path: '/home/user/agent-chosen/note', signal }),
+        await next.read({ path: '/home/user/agent-chosen/note', signal }),
       ).toBe('saved')
       await Bun.sleep(17000)
       expect(
         (
-          await next.tools.execute({
+          await next.execute({
             command: 'test ! -e /home/user/agent-chosen/continued',
             signal,
           })
@@ -270,35 +269,23 @@ describe('owned Embed environment (opt-in)', () => {
     }
   }, 90000)
 
-  test('foreground cancellation settles PID then saves files without continuing background RAM', async () => {
+  test('foreground cancellation kills the assigned PID and keeps uncertain results isolated', async () => {
     const input = options()
     const owner = new AbortController()
     const sandbox = await openE2BSandbox(input, owner.signal)
-    const reference = sandbox.nativeRef
-    const operation = sandbox.tools.execute({
-      command: 'printf keep > /home/user/cancel-retained; exec sleep 300',
-      signal: owner.signal,
-    })
-    const outcome = operation.catch((error: unknown) => error)
-    const remote = await client.Sandbox.connect(reference.id)
+    const operation = sandbox
+      .execute({
+        command: 'printf keep > /home/user/cancel-retained; exec sleep 300',
+        signal: owner.signal,
+      })
+      .catch((error: unknown) => error)
+    const remote = await client.Sandbox.connect(sandbox.nativeRef.id)
     await waitForStart(remote, '/home/user/cancel-retained')
     owner.abort()
-    expect(await outcome).toBe(owner.signal.reason)
-    await sandbox.close()
-    const next = await openE2BSandbox(
-      { ...input, lease: { ...input.lease, nativeRef: reference } },
-      AbortSignal.timeout(15000),
-    )
-    try {
-      expect(
-        await next.tools.read({
-          path: '/home/user/cancel-retained',
-          signal: AbortSignal.timeout(5000),
-        }),
-      ).toBe('keep')
-    } finally {
-      await next.close()
-    }
+    expect(await operation).toBeInstanceOf(Error)
+    expect(
+      await sandbox.close().catch((error: unknown) => error),
+    ).toBeInstanceOf(Error)
   }, 30000)
 
   test('lost command RPC acknowledgement rejects and isolates the native session without replay', async () => {
@@ -338,7 +325,7 @@ describe('owned Embed environment (opt-in)', () => {
     )
     try {
       expect(
-        await sandbox.tools
+        await sandbox
           .execute({
             command:
               'printf accepted > /home/user/unknown-accepted; exec sleep 300',
@@ -349,7 +336,7 @@ describe('owned Embed environment (opt-in)', () => {
       const remote = await client.Sandbox.connect(sandbox.nativeRef.id)
       await waitForStart(remote, '/home/user/unknown-accepted')
       expect(
-        await sandbox.tools
+        await sandbox
           .execute({ command: 'printf replay', signal })
           .catch((error: unknown) => error),
       ).toBeInstanceOf(Error)
@@ -371,7 +358,7 @@ describe('owned Embed environment (opt-in)', () => {
     const input = options()
     const signal = AbortSignal.timeout(15000)
     const sandbox = await openE2BSandbox({ ...input, timeoutMs: 2000 }, signal)
-    await sandbox.tools.write({
+    await sandbox.write({
       path: '/home/user/timeout-chosen',
       content: 'owned',
       signal,
@@ -500,11 +487,10 @@ for (const binary of [false, true]) {
     const signal = cancellation.signal
     const sandbox = await openE2BSandbox(fixture.options, owner.signal)
     try {
-      if (!sandbox.files) throw new Error('Missing binary workspace IO')
       const bytes = new Uint8Array([0, 255, 128])
       const write = binary
-        ? sandbox.files.writeBytes('/owned', bytes, signal)
-        : sandbox.tools.write({ path: '/owned', content: 'committed', signal })
+        ? sandbox.writeBytes('/owned', bytes, signal)
+        : sandbox.write({ path: '/owned', content: 'committed', signal })
       const outcome = write.catch((error: unknown) => error)
       await fixture.writeReceived.promise
       expect(fixture.writes[0]).toEqual(
@@ -514,7 +500,7 @@ for (const binary of [false, true]) {
       expect(await outcome).toBe(cancellation.signal.reason)
       fixture.writeReceipt.resolve()
       expect(
-        await sandbox.tools
+        await sandbox
           .write({
             path: '/later',
             content: 'unsafe',
@@ -549,7 +535,7 @@ test('native SDK pre-dispatch write cancellation sends no RPC and permits disk-o
   )
   try {
     expect(
-      await sandbox.tools
+      await sandbox
         .write({
           path: '/owned',
           content: 'not sent',
@@ -565,81 +551,21 @@ test('native SDK pre-dispatch write cancellation sends no RPC and permits disk-o
   }
 })
 
-for (const status of [204, 503]) {
-  test(`native SDK close waits for in-flight TTL receipt (${status}) and gates later renewals`, async () => {
-    const fixture = nativeHTTPFixture(status)
-    const sandbox = await openE2BSandbox(
-      fixture.options,
-      new AbortController().signal,
-    )
-    try {
-      if (!sandbox.renewTimeout)
-        throw new Error('Missing native timeout renewal')
-      const renewal = sandbox.renewTimeout().catch((error: unknown) => error)
-      await fixture.timeoutReceived.promise
-      const close = sandbox.close().catch((error: unknown) => error)
-      await sandbox.renewTimeout()
-      // Let the real HTTP transport dispatch any incorrectly overlapping pause.
-      await Bun.sleep(30)
-      expect(
-        fixture.requests.filter((request) => request.path.endsWith('/pause')),
-      ).toHaveLength(0)
-      expect(
-        fixture.requests.filter((request) => request.path.endsWith('/timeout')),
-      ).toEqual([
-        {
-          path: '/sandboxes/owned-http/timeout',
-          method: 'POST',
-          body: { timeout: 120 },
-        },
-      ])
-      fixture.timeoutReceipt.resolve()
-      if (status === 204) {
-        expect(await renewal).toBeUndefined()
-        expect(await close).toBeUndefined()
-      } else {
-        expect(await renewal).toBeInstanceOf(Error)
-        expect(await close).toBeInstanceOf(Error)
-        expect(
-          await sandbox.tools
-            .read({
-              path: '/later',
-              signal: new AbortController().signal,
-            })
-            .catch((error: unknown) => error),
-        ).toBeInstanceOf(Error)
-      }
-      expect(fixture.requests.at(-1)).toEqual({
-        path: '/sandboxes/owned-http/pause',
-        method: 'POST',
-        body: { memory: false },
-      })
-      await sandbox.renewTimeout()
-      expect(
-        fixture.requests.filter((request) => request.path.endsWith('/timeout')),
-      ).toHaveLength(1)
-    } finally {
-      await fixture.stop()
-    }
-  })
-}
-
 for (const binary of [false, true]) {
   test(`native SDK ${binary ? 'binary' : 'text'} write 502 receipt is unknown without replay`, async () => {
     const fixture = nativeHTTPFixture(204, 204, 502)
     const signal = new AbortController().signal
     const sandbox = await openE2BSandbox(fixture.options, signal)
     try {
-      if (!sandbox.files) throw new Error('Missing binary workspace IO')
       fixture.writeReceipt.resolve()
       const outcome = binary
-        ? sandbox.files.writeBytes('/owned', new Uint8Array([0, 255]), signal)
-        : sandbox.tools.write({ path: '/owned', content: 'committed', signal })
+        ? sandbox.writeBytes('/owned', new Uint8Array([0, 255]), signal)
+        : sandbox.write({ path: '/owned', content: 'committed', signal })
       expect(await outcome.catch((error: unknown) => error)).toBeInstanceOf(
         Error,
       )
       expect(
-        await sandbox.tools
+        await sandbox
           .read({ path: '/later', signal })
           .catch((error: unknown) => error),
       ).toBeInstanceOf(Error)
@@ -685,34 +611,6 @@ test('native SDK reconnect uses reboot and already-paused ACK does not establish
       fixture.requests.filter((request) => request.path.endsWith('/pause')),
     ).toHaveLength(1)
     expect(fixture.requests.at(-1)?.body).toEqual({ memory: false })
-  } finally {
-    await fixture.stop()
-  }
-})
-
-test('native SDK renewal registers before immediate close and ignores owner cancellation during cleanup', async () => {
-  const fixture = nativeHTTPFixture()
-  const owner = new AbortController()
-  const sandbox = await openE2BSandbox(fixture.options, owner.signal)
-  try {
-    if (!sandbox.renewTimeout) throw new Error('Missing native timeout renewal')
-    owner.abort()
-    const renewal = sandbox.renewTimeout()
-    const close = sandbox.close()
-    await fixture.timeoutReceived.promise
-    await sandbox.renewTimeout()
-    await Bun.sleep(30)
-    expect(
-      fixture.requests.filter((request) => request.path.endsWith('/pause')),
-    ).toHaveLength(0)
-    fixture.timeoutReceipt.resolve()
-    await renewal
-    await close
-    expect(fixture.requests.map((request) => request.path)).toEqual([
-      '/v2/sandboxes',
-      '/sandboxes/owned-http/timeout',
-      '/sandboxes/owned-http/pause',
-    ])
   } finally {
     await fixture.stop()
   }

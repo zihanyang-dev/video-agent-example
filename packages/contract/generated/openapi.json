@@ -24,15 +24,7 @@
         "type": "string",
         "minLength": 1,
         "maxLength": 255,
-        "pattern": "^(?!\\.{1,2}$)[^/\\\\\\u0000-\\u001f\\u007f]+$",
-        "description": "File name, not a path. Length is measured in UTF-16 code units at runtime; foreign validators may count Unicode code points."
-      },
-      "FileNameInput": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "type": "string",
-        "minLength": 1,
-        "maxLength": 255,
-        "pattern": "^(?!\\.{1,2}$)[^/\\\\\\u0000-\\u001f\\u007f]+$",
+        "pattern": "^(?!\\.{1,2}$)[^/\\\\\\u0000-\\u001f\\u007f]{1,255}$",
         "description": "File name, not a path. Length is measured in UTF-16 code units at runtime; foreign validators may count Unicode code points."
       },
       "MessageSubmission": {
@@ -46,7 +38,8 @@
           },
           "text": {
             "type": "string",
-            "maxLength": 32768
+            "maxLength": 32768,
+            "pattern": "^[^\\u0000\\ud800-\\udfff]*$"
           },
           "assetIDs": {
             "default": [],
@@ -104,7 +97,8 @@
           },
           "text": {
             "type": "string",
-            "maxLength": 32768
+            "maxLength": 32768,
+            "pattern": "^[^\\u0000\\ud800-\\udfff]*$"
           },
           "assetIDs": {
             "default": [],
@@ -163,6 +157,7 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 160,
+            "pattern": "^[^\\u0000\\ud800-\\udfff]*$",
             "description": "Trimmed before validation: 1–160 UTF-16 code units after removing surrounding whitespace. Foreign validators may count Unicode code points instead."
           }
         },
@@ -183,8 +178,13 @@
           },
           "title": {
             "type": "string",
+            "pattern": "^[^\\u0000\\ud800-\\udfff]*$",
             "description": "Trimmed before validation: 1–160 UTF-16 code units after removing surrounding whitespace. Foreign validators may count Unicode code points instead.",
-            "pattern": "^\\s*\\S(?:[\\s\\S]{0,158}\\S)?\\s*$"
+            "allOf": [
+              {
+                "pattern": "^\\s*\\S(?:[\\s\\S]{0,158}\\S)?\\s*$"
+              }
+            ]
           }
         },
         "required": [
@@ -201,6 +201,7 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 160,
+            "pattern": "^[^\\u0000\\ud800-\\udfff]*$",
             "description": "Trimmed before validation: 1–160 UTF-16 code units after removing surrounding whitespace. Foreign validators may count Unicode code points instead."
           }
         },
@@ -215,8 +216,13 @@
         "properties": {
           "title": {
             "type": "string",
+            "pattern": "^[^\\u0000\\ud800-\\udfff]*$",
             "description": "Trimmed before validation: 1–160 UTF-16 code units after removing surrounding whitespace. Foreign validators may count Unicode code points instead.",
-            "pattern": "^\\s*\\S(?:[\\s\\S]{0,158}\\S)?\\s*$"
+            "allOf": [
+              {
+                "pattern": "^\\s*\\S(?:[\\s\\S]{0,158}\\S)?\\s*$"
+              }
+            ]
           }
         },
         "required": [
@@ -267,47 +273,8 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 160,
+            "pattern": "^[^\\u0000\\ud800-\\udfff]*$",
             "description": "Trimmed before validation: 1–160 UTF-16 code units after removing surrounding whitespace. Foreign validators may count Unicode code points instead."
-          },
-          "createdAt": {
-            "type": "string",
-            "format": "date-time",
-            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
-          },
-          "archivedAt": {
-            "anyOf": [
-              {
-                "type": "string",
-                "format": "date-time",
-                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          }
-        },
-        "required": [
-          "threadID",
-          "title",
-          "createdAt",
-          "archivedAt"
-        ],
-        "additionalProperties": false
-      },
-      "PublicThreadInput": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "type": "object",
-        "properties": {
-          "threadID": {
-            "type": "string",
-            "format": "uuid",
-            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-          },
-          "title": {
-            "type": "string",
-            "description": "Trimmed before validation: 1–160 UTF-16 code units after removing surrounding whitespace. Foreign validators may count Unicode code points instead.",
-            "pattern": "^\\s*\\S(?:[\\s\\S]{0,158}\\S)?\\s*$"
           },
           "createdAt": {
             "type": "string",
@@ -337,117 +304,106 @@
       },
       "PublicAsset": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "type": "object",
-        "properties": {
-          "assetID": {
-            "type": "string",
-            "format": "uuid",
-            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "assetID": {
+                "type": "string",
+                "format": "uuid",
+                "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+              },
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 255,
+                "pattern": "^(?!\\.{1,2}$)[^/\\\\\\u0000-\\u001f\\u007f]{1,255}$",
+                "description": "File name, not a path. Length is measured in UTF-16 code units at runtime; foreign validators may count Unicode code points."
+              },
+              "mimeType": {
+                "type": "string"
+              },
+              "byteLength": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "createdAt": {
+                "type": "string",
+                "format": "date-time",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+              },
+              "source": {
+                "type": "string",
+                "const": "upload"
+              }
+            },
+            "required": [
+              "assetID",
+              "name",
+              "mimeType",
+              "byteLength",
+              "createdAt",
+              "source"
+            ],
+            "additionalProperties": false
           },
-          "source": {
-            "type": "string",
-            "enum": [
-              "upload",
-              "generated"
-            ]
-          },
-          "name": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 255,
-            "pattern": "^(?!\\.{1,2}$)[^/\\\\\\u0000-\\u001f\\u007f]+$",
-            "description": "File name, not a path. Length is measured in UTF-16 code units at runtime; foreign validators may count Unicode code points."
-          },
-          "mimeType": {
-            "type": "string"
-          },
-          "byteLength": {
-            "type": "integer",
-            "minimum": 0,
-            "maximum": 9007199254740991
-          },
-          "createdAt": {
-            "type": "string",
-            "format": "date-time",
-            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
-          },
-          "messageID": {
-            "type": "string",
-            "format": "uuid",
-            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-          },
-          "runID": {
-            "type": "string",
-            "format": "uuid",
-            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          {
+            "type": "object",
+            "properties": {
+              "assetID": {
+                "type": "string",
+                "format": "uuid",
+                "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+              },
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 255,
+                "pattern": "^(?!\\.{1,2}$)[^/\\\\\\u0000-\\u001f\\u007f]{1,255}$",
+                "description": "File name, not a path. Length is measured in UTF-16 code units at runtime; foreign validators may count Unicode code points."
+              },
+              "mimeType": {
+                "type": "string"
+              },
+              "byteLength": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "createdAt": {
+                "type": "string",
+                "format": "date-time",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+              },
+              "source": {
+                "type": "string",
+                "const": "generated"
+              },
+              "messageID": {
+                "type": "string",
+                "format": "uuid",
+                "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+              },
+              "runID": {
+                "type": "string",
+                "format": "uuid",
+                "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+              }
+            },
+            "required": [
+              "assetID",
+              "name",
+              "mimeType",
+              "byteLength",
+              "createdAt",
+              "source",
+              "messageID",
+              "runID"
+            ],
+            "additionalProperties": false
           }
-        },
-        "required": [
-          "assetID",
-          "source",
-          "name",
-          "mimeType",
-          "byteLength",
-          "createdAt"
-        ],
-        "additionalProperties": false
-      },
-      "PublicAssetInput": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "type": "object",
-        "properties": {
-          "assetID": {
-            "type": "string",
-            "format": "uuid",
-            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-          },
-          "source": {
-            "type": "string",
-            "enum": [
-              "upload",
-              "generated"
-            ]
-          },
-          "name": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 255,
-            "pattern": "^(?!\\.{1,2}$)[^/\\\\\\u0000-\\u001f\\u007f]+$",
-            "description": "File name, not a path. Length is measured in UTF-16 code units at runtime; foreign validators may count Unicode code points."
-          },
-          "mimeType": {
-            "type": "string"
-          },
-          "byteLength": {
-            "type": "integer",
-            "minimum": 0,
-            "maximum": 9007199254740991
-          },
-          "createdAt": {
-            "type": "string",
-            "format": "date-time",
-            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
-          },
-          "messageID": {
-            "type": "string",
-            "format": "uuid",
-            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-          },
-          "runID": {
-            "type": "string",
-            "format": "uuid",
-            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-          }
-        },
-        "required": [
-          "assetID",
-          "source",
-          "name",
-          "mimeType",
-          "byteLength",
-          "createdAt"
-        ],
-        "additionalProperties": false
+        ]
       },
       "PublicMessage": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -468,156 +424,159 @@
           "assets": {
             "type": "array",
             "items": {
-              "type": "object",
-              "properties": {
-                "assetID": {
-                  "type": "string",
-                  "format": "uuid",
-                  "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+              "oneOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "assetID": {
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                    },
+                    "name": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 255,
+                      "pattern": "^(?!\\.{1,2}$)[^/\\\\\\u0000-\\u001f\\u007f]{1,255}$",
+                      "description": "File name, not a path. Length is measured in UTF-16 code units at runtime; foreign validators may count Unicode code points."
+                    },
+                    "mimeType": {
+                      "type": "string"
+                    },
+                    "byteLength": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "createdAt": {
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                    },
+                    "source": {
+                      "type": "string",
+                      "const": "upload"
+                    }
+                  },
+                  "required": [
+                    "assetID",
+                    "name",
+                    "mimeType",
+                    "byteLength",
+                    "createdAt",
+                    "source"
+                  ],
+                  "additionalProperties": false
                 },
-                "source": {
-                  "type": "string",
-                  "enum": [
-                    "upload",
-                    "generated"
-                  ]
-                },
-                "name": {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 255,
-                  "pattern": "^(?!\\.{1,2}$)[^/\\\\\\u0000-\\u001f\\u007f]+$",
-                  "description": "File name, not a path. Length is measured in UTF-16 code units at runtime; foreign validators may count Unicode code points."
-                },
-                "mimeType": {
-                  "type": "string"
-                },
-                "byteLength": {
-                  "type": "integer",
-                  "minimum": 0,
-                  "maximum": 9007199254740991
-                },
-                "createdAt": {
-                  "type": "string",
-                  "format": "date-time",
-                  "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
-                },
-                "messageID": {
-                  "type": "string",
-                  "format": "uuid",
-                  "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                },
-                "runID": {
-                  "type": "string",
-                  "format": "uuid",
-                  "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                {
+                  "type": "object",
+                  "properties": {
+                    "assetID": {
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                    },
+                    "name": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 255,
+                      "pattern": "^(?!\\.{1,2}$)[^/\\\\\\u0000-\\u001f\\u007f]{1,255}$",
+                      "description": "File name, not a path. Length is measured in UTF-16 code units at runtime; foreign validators may count Unicode code points."
+                    },
+                    "mimeType": {
+                      "type": "string"
+                    },
+                    "byteLength": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "createdAt": {
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                    },
+                    "source": {
+                      "type": "string",
+                      "const": "generated"
+                    },
+                    "messageID": {
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                    },
+                    "runID": {
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                    }
+                  },
+                  "required": [
+                    "assetID",
+                    "name",
+                    "mimeType",
+                    "byteLength",
+                    "createdAt",
+                    "source",
+                    "messageID",
+                    "runID"
+                  ],
+                  "additionalProperties": false
                 }
-              },
-              "required": [
-                "assetID",
-                "source",
-                "name",
-                "mimeType",
-                "byteLength",
-                "createdAt"
-              ],
-              "additionalProperties": false
+              ]
             }
           },
           "text": {
             "type": "string"
           },
-          "createdAt": {
-            "type": "string",
-            "format": "date-time",
-            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
-          }
-        },
-        "required": [
-          "messageID",
-          "role",
-          "text",
-          "createdAt"
-        ],
-        "additionalProperties": false
-      },
-      "PublicMessageInput": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "type": "object",
-        "properties": {
-          "messageID": {
-            "type": "string",
-            "format": "uuid",
-            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-          },
-          "role": {
-            "type": "string",
-            "enum": [
-              "user",
-              "assistant"
-            ]
-          },
-          "assets": {
+          "sources": {
+            "readOnly": true,
+            "maxItems": 15,
             "type": "array",
             "items": {
+              "readOnly": true,
               "type": "object",
               "properties": {
-                "assetID": {
-                  "type": "string",
-                  "format": "uuid",
-                  "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                },
-                "source": {
-                  "type": "string",
-                  "enum": [
-                    "upload",
-                    "generated"
-                  ]
-                },
-                "name": {
+                "title": {
                   "type": "string",
                   "minLength": 1,
-                  "maxLength": 255,
-                  "pattern": "^(?!\\.{1,2}$)[^/\\\\\\u0000-\\u001f\\u007f]+$",
-                  "description": "File name, not a path. Length is measured in UTF-16 code units at runtime; foreign validators may count Unicode code points."
+                  "maxLength": 256,
+                  "pattern": "^(?=.*\\S)[^<>\\p{Cc}\\p{Cf}\\ud800-\\udfff]*$"
                 },
-                "mimeType": {
-                  "type": "string"
-                },
-                "byteLength": {
-                  "type": "integer",
-                  "minimum": 0,
-                  "maximum": 9007199254740991
-                },
-                "createdAt": {
+                "url": {
                   "type": "string",
-                  "format": "date-time",
-                  "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
-                },
-                "messageID": {
-                  "type": "string",
-                  "format": "uuid",
-                  "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                },
-                "runID": {
-                  "type": "string",
-                  "format": "uuid",
-                  "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  "maxLength": 2048,
+                  "pattern": "^https:\\/\\/(?!(?:[^/?#]*\\.)?(?:localhost|local|internal|lan|home|test|invalid|localdomain|intranet|corp|onion)(?:[/?#]|$))(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}(?:\\/(?![^?#]*%(?:0[0-9a-fA-F]|1[0-9a-fA-F]|7[fF]|[cC]2%[89][0-9a-fA-F]))[^\\s<>\\\\?#\\p{Cc}\\p{Cf}\\ud800-\\udfff]*)?(?:\\?(?![^#]*(?:key|token|secret|password|credential|signature|authorization|auth|session|jwt|sig))[a-z0-9&=_.~+/-]*)?$"
                 }
               },
               "required": [
-                "assetID",
-                "source",
-                "name",
-                "mimeType",
-                "byteLength",
-                "createdAt"
+                "title",
+                "url"
               ],
               "additionalProperties": false
             }
           },
-          "text": {
-            "type": "string"
+          "runOutcome": {
+            "type": "object",
+            "properties": {
+              "runID": {
+                "type": "string",
+                "format": "uuid",
+                "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "completed",
+                  "cancelled"
+                ]
+              }
+            },
+            "required": [
+              "runID",
+              "status"
+            ],
+            "additionalProperties": false
           },
           "createdAt": {
             "type": "string",
@@ -663,67 +622,7 @@
         ],
         "additionalProperties": false
       },
-      "ActiveRunInput": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "type": "object",
-        "properties": {
-          "runID": {
-            "type": "string",
-            "format": "uuid",
-            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-          },
-          "messageID": {
-            "type": "string",
-            "format": "uuid",
-            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-          },
-          "status": {
-            "type": "string",
-            "enum": [
-              "accepted",
-              "running",
-              "stopping"
-            ]
-          }
-        },
-        "required": [
-          "runID",
-          "messageID",
-          "status"
-        ],
-        "additionalProperties": false
-      },
       "FailedRun": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "type": "object",
-        "properties": {
-          "runID": {
-            "type": "string",
-            "format": "uuid",
-            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-          },
-          "messageID": {
-            "type": "string",
-            "format": "uuid",
-            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-          },
-          "reason": {
-            "type": "string",
-            "enum": [
-              "execution-error",
-              "interrupted",
-              "sandbox-recovery-required"
-            ]
-          }
-        },
-        "required": [
-          "runID",
-          "messageID",
-          "reason"
-        ],
-        "additionalProperties": false
-      },
-      "FailedRunInput": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",
         "properties": {
@@ -800,53 +699,6 @@
         ],
         "additionalProperties": false
       },
-      "SessionResponseInput": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "type": "object",
-        "properties": {
-          "user": {
-            "anyOf": [
-              {
-                "type": "object",
-                "properties": {
-                  "userID": {
-                    "type": "string",
-                    "minLength": 1
-                  },
-                  "name": {
-                    "type": "string"
-                  },
-                  "email": {
-                    "type": "string",
-                    "format": "email",
-                    "pattern": "^(?:[A-Za-z0-9_'+\\-]+\\.)*[A-Za-z0-9_'+\\-]*[A-Za-z0-9_+-]@(?:[A-Za-z0-9][A-Za-z0-9\\-]*\\.)+[A-Za-z]{2,}$"
-                  },
-                  "image": {
-                    "type": [
-                      "string",
-                      "null"
-                    ]
-                  }
-                },
-                "required": [
-                  "userID",
-                  "name",
-                  "email",
-                  "image"
-                ],
-                "additionalProperties": false
-              },
-              {
-                "type": "null"
-              }
-            ]
-          }
-        },
-        "required": [
-          "user"
-        ],
-        "additionalProperties": false
-      },
       "ThreadsResponse": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",
@@ -865,59 +717,8 @@
                   "type": "string",
                   "minLength": 1,
                   "maxLength": 160,
+                  "pattern": "^[^\\u0000\\ud800-\\udfff]*$",
                   "description": "Trimmed before validation: 1–160 UTF-16 code units after removing surrounding whitespace. Foreign validators may count Unicode code points instead."
-                },
-                "createdAt": {
-                  "type": "string",
-                  "format": "date-time",
-                  "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
-                },
-                "archivedAt": {
-                  "anyOf": [
-                    {
-                      "type": "string",
-                      "format": "date-time",
-                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                }
-              },
-              "required": [
-                "threadID",
-                "title",
-                "createdAt",
-                "archivedAt"
-              ],
-              "additionalProperties": false
-            }
-          }
-        },
-        "required": [
-          "threads"
-        ],
-        "additionalProperties": false
-      },
-      "ThreadsResponseInput": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "type": "object",
-        "properties": {
-          "threads": {
-            "type": "array",
-            "items": {
-              "type": "object",
-              "properties": {
-                "threadID": {
-                  "type": "string",
-                  "format": "uuid",
-                  "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                },
-                "title": {
-                  "type": "string",
-                  "description": "Trimmed before validation: 1–160 UTF-16 code units after removing surrounding whitespace. Foreign validators may count Unicode code points instead.",
-                  "pattern": "^\\s*\\S(?:[\\s\\S]{0,158}\\S)?\\s*$"
                 },
                 "createdAt": {
                   "type": "string",
@@ -968,56 +769,8 @@
                 "type": "string",
                 "minLength": 1,
                 "maxLength": 160,
+                "pattern": "^[^\\u0000\\ud800-\\udfff]*$",
                 "description": "Trimmed before validation: 1–160 UTF-16 code units after removing surrounding whitespace. Foreign validators may count Unicode code points instead."
-              },
-              "createdAt": {
-                "type": "string",
-                "format": "date-time",
-                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
-              },
-              "archivedAt": {
-                "anyOf": [
-                  {
-                    "type": "string",
-                    "format": "date-time",
-                    "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              }
-            },
-            "required": [
-              "threadID",
-              "title",
-              "createdAt",
-              "archivedAt"
-            ],
-            "additionalProperties": false
-          }
-        },
-        "required": [
-          "thread"
-        ],
-        "additionalProperties": false
-      },
-      "ThreadResponseInput": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "type": "object",
-        "properties": {
-          "thread": {
-            "type": "object",
-            "properties": {
-              "threadID": {
-                "type": "string",
-                "format": "uuid",
-                "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-              },
-              "title": {
-                "type": "string",
-                "description": "Trimmed before validation: 1–160 UTF-16 code units after removing surrounding whitespace. Foreign validators may count Unicode code points instead.",
-                "pattern": "^\\s*\\S(?:[\\s\\S]{0,158}\\S)?\\s*$"
               },
               "createdAt": {
                 "type": "string",
@@ -1075,234 +828,159 @@
                 "assets": {
                   "type": "array",
                   "items": {
-                    "type": "object",
-                    "properties": {
-                      "assetID": {
-                        "type": "string",
-                        "format": "uuid",
-                        "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                    "oneOf": [
+                      {
+                        "type": "object",
+                        "properties": {
+                          "assetID": {
+                            "type": "string",
+                            "format": "uuid",
+                            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                          },
+                          "name": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 255,
+                            "pattern": "^(?!\\.{1,2}$)[^/\\\\\\u0000-\\u001f\\u007f]{1,255}$",
+                            "description": "File name, not a path. Length is measured in UTF-16 code units at runtime; foreign validators may count Unicode code points."
+                          },
+                          "mimeType": {
+                            "type": "string"
+                          },
+                          "byteLength": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          "createdAt": {
+                            "type": "string",
+                            "format": "date-time",
+                            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                          },
+                          "source": {
+                            "type": "string",
+                            "const": "upload"
+                          }
+                        },
+                        "required": [
+                          "assetID",
+                          "name",
+                          "mimeType",
+                          "byteLength",
+                          "createdAt",
+                          "source"
+                        ],
+                        "additionalProperties": false
                       },
-                      "source": {
-                        "type": "string",
-                        "enum": [
-                          "upload",
-                          "generated"
-                        ]
-                      },
-                      "name": {
-                        "type": "string",
-                        "minLength": 1,
-                        "maxLength": 255,
-                        "pattern": "^(?!\\.{1,2}$)[^/\\\\\\u0000-\\u001f\\u007f]+$",
-                        "description": "File name, not a path. Length is measured in UTF-16 code units at runtime; foreign validators may count Unicode code points."
-                      },
-                      "mimeType": {
-                        "type": "string"
-                      },
-                      "byteLength": {
-                        "type": "integer",
-                        "minimum": 0,
-                        "maximum": 9007199254740991
-                      },
-                      "createdAt": {
-                        "type": "string",
-                        "format": "date-time",
-                        "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
-                      },
-                      "messageID": {
-                        "type": "string",
-                        "format": "uuid",
-                        "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                      },
-                      "runID": {
-                        "type": "string",
-                        "format": "uuid",
-                        "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                      {
+                        "type": "object",
+                        "properties": {
+                          "assetID": {
+                            "type": "string",
+                            "format": "uuid",
+                            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                          },
+                          "name": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 255,
+                            "pattern": "^(?!\\.{1,2}$)[^/\\\\\\u0000-\\u001f\\u007f]{1,255}$",
+                            "description": "File name, not a path. Length is measured in UTF-16 code units at runtime; foreign validators may count Unicode code points."
+                          },
+                          "mimeType": {
+                            "type": "string"
+                          },
+                          "byteLength": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          "createdAt": {
+                            "type": "string",
+                            "format": "date-time",
+                            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                          },
+                          "source": {
+                            "type": "string",
+                            "const": "generated"
+                          },
+                          "messageID": {
+                            "type": "string",
+                            "format": "uuid",
+                            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                          },
+                          "runID": {
+                            "type": "string",
+                            "format": "uuid",
+                            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                          }
+                        },
+                        "required": [
+                          "assetID",
+                          "name",
+                          "mimeType",
+                          "byteLength",
+                          "createdAt",
+                          "source",
+                          "messageID",
+                          "runID"
+                        ],
+                        "additionalProperties": false
                       }
-                    },
-                    "required": [
-                      "assetID",
-                      "source",
-                      "name",
-                      "mimeType",
-                      "byteLength",
-                      "createdAt"
-                    ],
-                    "additionalProperties": false
+                    ]
                   }
                 },
                 "text": {
                   "type": "string"
                 },
-                "createdAt": {
-                  "type": "string",
-                  "format": "date-time",
-                  "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
-                }
-              },
-              "required": [
-                "messageID",
-                "role",
-                "text",
-                "createdAt"
-              ],
-              "additionalProperties": false
-            }
-          },
-          "activeRuns": {
-            "type": "array",
-            "items": {
-              "type": "object",
-              "properties": {
-                "runID": {
-                  "type": "string",
-                  "format": "uuid",
-                  "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                },
-                "messageID": {
-                  "type": "string",
-                  "format": "uuid",
-                  "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                },
-                "status": {
-                  "type": "string",
-                  "enum": [
-                    "accepted",
-                    "running",
-                    "stopping"
-                  ]
-                }
-              },
-              "required": [
-                "runID",
-                "messageID",
-                "status"
-              ],
-              "additionalProperties": false
-            }
-          },
-          "failedRuns": {
-            "type": "array",
-            "items": {
-              "type": "object",
-              "properties": {
-                "runID": {
-                  "type": "string",
-                  "format": "uuid",
-                  "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                },
-                "messageID": {
-                  "type": "string",
-                  "format": "uuid",
-                  "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                },
-                "reason": {
-                  "type": "string",
-                  "enum": [
-                    "execution-error",
-                    "interrupted",
-                    "sandbox-recovery-required"
-                  ]
-                }
-              },
-              "required": [
-                "runID",
-                "messageID",
-                "reason"
-              ],
-              "additionalProperties": false
-            }
-          }
-        },
-        "required": [
-          "messages",
-          "activeRuns",
-          "failedRuns"
-        ],
-        "additionalProperties": false
-      },
-      "MessagesResponseInput": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "type": "object",
-        "properties": {
-          "messages": {
-            "type": "array",
-            "items": {
-              "type": "object",
-              "properties": {
-                "messageID": {
-                  "type": "string",
-                  "format": "uuid",
-                  "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                },
-                "role": {
-                  "type": "string",
-                  "enum": [
-                    "user",
-                    "assistant"
-                  ]
-                },
-                "assets": {
+                "sources": {
+                  "readOnly": true,
+                  "maxItems": 15,
                   "type": "array",
                   "items": {
+                    "readOnly": true,
                     "type": "object",
                     "properties": {
-                      "assetID": {
-                        "type": "string",
-                        "format": "uuid",
-                        "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                      },
-                      "source": {
-                        "type": "string",
-                        "enum": [
-                          "upload",
-                          "generated"
-                        ]
-                      },
-                      "name": {
+                      "title": {
                         "type": "string",
                         "minLength": 1,
-                        "maxLength": 255,
-                        "pattern": "^(?!\\.{1,2}$)[^/\\\\\\u0000-\\u001f\\u007f]+$",
-                        "description": "File name, not a path. Length is measured in UTF-16 code units at runtime; foreign validators may count Unicode code points."
+                        "maxLength": 256,
+                        "pattern": "^(?=.*\\S)[^<>\\p{Cc}\\p{Cf}\\ud800-\\udfff]*$"
                       },
-                      "mimeType": {
-                        "type": "string"
-                      },
-                      "byteLength": {
-                        "type": "integer",
-                        "minimum": 0,
-                        "maximum": 9007199254740991
-                      },
-                      "createdAt": {
+                      "url": {
                         "type": "string",
-                        "format": "date-time",
-                        "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
-                      },
-                      "messageID": {
-                        "type": "string",
-                        "format": "uuid",
-                        "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                      },
-                      "runID": {
-                        "type": "string",
-                        "format": "uuid",
-                        "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                        "maxLength": 2048,
+                        "pattern": "^https:\\/\\/(?!(?:[^/?#]*\\.)?(?:localhost|local|internal|lan|home|test|invalid|localdomain|intranet|corp|onion)(?:[/?#]|$))(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}(?:\\/(?![^?#]*%(?:0[0-9a-fA-F]|1[0-9a-fA-F]|7[fF]|[cC]2%[89][0-9a-fA-F]))[^\\s<>\\\\?#\\p{Cc}\\p{Cf}\\ud800-\\udfff]*)?(?:\\?(?![^#]*(?:key|token|secret|password|credential|signature|authorization|auth|session|jwt|sig))[a-z0-9&=_.~+/-]*)?$"
                       }
                     },
                     "required": [
-                      "assetID",
-                      "source",
-                      "name",
-                      "mimeType",
-                      "byteLength",
-                      "createdAt"
+                      "title",
+                      "url"
                     ],
                     "additionalProperties": false
                   }
                 },
-                "text": {
-                  "type": "string"
+                "runOutcome": {
+                  "type": "object",
+                  "properties": {
+                    "runID": {
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "completed",
+                        "cancelled"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "runID",
+                    "status"
+                  ],
+                  "additionalProperties": false
                 },
                 "createdAt": {
                   "type": "string",
@@ -1418,55 +1096,7 @@
         ],
         "additionalProperties": false
       },
-      "MessageAcceptedInput": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "type": "object",
-        "properties": {
-          "messageID": {
-            "type": "string",
-            "format": "uuid",
-            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-          },
-          "commandID": {
-            "type": "string",
-            "format": "uuid",
-            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-          },
-          "runID": {
-            "type": "string",
-            "format": "uuid",
-            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-          }
-        },
-        "required": [
-          "messageID",
-          "commandID",
-          "runID"
-        ],
-        "additionalProperties": false
-      },
       "CancellationAccepted": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "type": "object",
-        "properties": {
-          "commandID": {
-            "type": "string",
-            "format": "uuid",
-            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-          },
-          "runID": {
-            "type": "string",
-            "format": "uuid",
-            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-          }
-        },
-        "required": [
-          "commandID",
-          "runID"
-        ],
-        "additionalProperties": false
-      },
-      "CancellationAcceptedInput": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",
         "properties": {
@@ -1492,126 +1122,106 @@
         "type": "object",
         "properties": {
           "asset": {
-            "type": "object",
-            "properties": {
-              "assetID": {
-                "type": "string",
-                "format": "uuid",
-                "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "assetID": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 255,
+                    "pattern": "^(?!\\.{1,2}$)[^/\\\\\\u0000-\\u001f\\u007f]{1,255}$",
+                    "description": "File name, not a path. Length is measured in UTF-16 code units at runtime; foreign validators may count Unicode code points."
+                  },
+                  "mimeType": {
+                    "type": "string"
+                  },
+                  "byteLength": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "createdAt": {
+                    "type": "string",
+                    "format": "date-time",
+                    "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                  },
+                  "source": {
+                    "type": "string",
+                    "const": "upload"
+                  }
+                },
+                "required": [
+                  "assetID",
+                  "name",
+                  "mimeType",
+                  "byteLength",
+                  "createdAt",
+                  "source"
+                ],
+                "additionalProperties": false
               },
-              "source": {
-                "type": "string",
-                "enum": [
-                  "upload",
-                  "generated"
-                ]
-              },
-              "name": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 255,
-                "pattern": "^(?!\\.{1,2}$)[^/\\\\\\u0000-\\u001f\\u007f]+$",
-                "description": "File name, not a path. Length is measured in UTF-16 code units at runtime; foreign validators may count Unicode code points."
-              },
-              "mimeType": {
-                "type": "string"
-              },
-              "byteLength": {
-                "type": "integer",
-                "minimum": 0,
-                "maximum": 9007199254740991
-              },
-              "createdAt": {
-                "type": "string",
-                "format": "date-time",
-                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
-              },
-              "messageID": {
-                "type": "string",
-                "format": "uuid",
-                "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-              },
-              "runID": {
-                "type": "string",
-                "format": "uuid",
-                "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+              {
+                "type": "object",
+                "properties": {
+                  "assetID": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 255,
+                    "pattern": "^(?!\\.{1,2}$)[^/\\\\\\u0000-\\u001f\\u007f]{1,255}$",
+                    "description": "File name, not a path. Length is measured in UTF-16 code units at runtime; foreign validators may count Unicode code points."
+                  },
+                  "mimeType": {
+                    "type": "string"
+                  },
+                  "byteLength": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "createdAt": {
+                    "type": "string",
+                    "format": "date-time",
+                    "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                  },
+                  "source": {
+                    "type": "string",
+                    "const": "generated"
+                  },
+                  "messageID": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "runID": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  }
+                },
+                "required": [
+                  "assetID",
+                  "name",
+                  "mimeType",
+                  "byteLength",
+                  "createdAt",
+                  "source",
+                  "messageID",
+                  "runID"
+                ],
+                "additionalProperties": false
               }
-            },
-            "required": [
-              "assetID",
-              "source",
-              "name",
-              "mimeType",
-              "byteLength",
-              "createdAt"
-            ],
-            "additionalProperties": false
-          }
-        },
-        "required": [
-          "asset"
-        ],
-        "additionalProperties": false
-      },
-      "AssetResponseInput": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "type": "object",
-        "properties": {
-          "asset": {
-            "type": "object",
-            "properties": {
-              "assetID": {
-                "type": "string",
-                "format": "uuid",
-                "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-              },
-              "source": {
-                "type": "string",
-                "enum": [
-                  "upload",
-                  "generated"
-                ]
-              },
-              "name": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 255,
-                "pattern": "^(?!\\.{1,2}$)[^/\\\\\\u0000-\\u001f\\u007f]+$",
-                "description": "File name, not a path. Length is measured in UTF-16 code units at runtime; foreign validators may count Unicode code points."
-              },
-              "mimeType": {
-                "type": "string"
-              },
-              "byteLength": {
-                "type": "integer",
-                "minimum": 0,
-                "maximum": 9007199254740991
-              },
-              "createdAt": {
-                "type": "string",
-                "format": "date-time",
-                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
-              },
-              "messageID": {
-                "type": "string",
-                "format": "uuid",
-                "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-              },
-              "runID": {
-                "type": "string",
-                "format": "uuid",
-                "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-              }
-            },
-            "required": [
-              "assetID",
-              "source",
-              "name",
-              "mimeType",
-              "byteLength",
-              "createdAt"
-            ],
-            "additionalProperties": false
+            ]
           }
         },
         "required": [
@@ -1626,129 +1236,106 @@
           "assets": {
             "type": "array",
             "items": {
-              "type": "object",
-              "properties": {
-                "assetID": {
-                  "type": "string",
-                  "format": "uuid",
-                  "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+              "oneOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "assetID": {
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                    },
+                    "name": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 255,
+                      "pattern": "^(?!\\.{1,2}$)[^/\\\\\\u0000-\\u001f\\u007f]{1,255}$",
+                      "description": "File name, not a path. Length is measured in UTF-16 code units at runtime; foreign validators may count Unicode code points."
+                    },
+                    "mimeType": {
+                      "type": "string"
+                    },
+                    "byteLength": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "createdAt": {
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                    },
+                    "source": {
+                      "type": "string",
+                      "const": "upload"
+                    }
+                  },
+                  "required": [
+                    "assetID",
+                    "name",
+                    "mimeType",
+                    "byteLength",
+                    "createdAt",
+                    "source"
+                  ],
+                  "additionalProperties": false
                 },
-                "source": {
-                  "type": "string",
-                  "enum": [
-                    "upload",
-                    "generated"
-                  ]
-                },
-                "name": {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 255,
-                  "pattern": "^(?!\\.{1,2}$)[^/\\\\\\u0000-\\u001f\\u007f]+$",
-                  "description": "File name, not a path. Length is measured in UTF-16 code units at runtime; foreign validators may count Unicode code points."
-                },
-                "mimeType": {
-                  "type": "string"
-                },
-                "byteLength": {
-                  "type": "integer",
-                  "minimum": 0,
-                  "maximum": 9007199254740991
-                },
-                "createdAt": {
-                  "type": "string",
-                  "format": "date-time",
-                  "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
-                },
-                "messageID": {
-                  "type": "string",
-                  "format": "uuid",
-                  "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                },
-                "runID": {
-                  "type": "string",
-                  "format": "uuid",
-                  "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                {
+                  "type": "object",
+                  "properties": {
+                    "assetID": {
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                    },
+                    "name": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 255,
+                      "pattern": "^(?!\\.{1,2}$)[^/\\\\\\u0000-\\u001f\\u007f]{1,255}$",
+                      "description": "File name, not a path. Length is measured in UTF-16 code units at runtime; foreign validators may count Unicode code points."
+                    },
+                    "mimeType": {
+                      "type": "string"
+                    },
+                    "byteLength": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "createdAt": {
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                    },
+                    "source": {
+                      "type": "string",
+                      "const": "generated"
+                    },
+                    "messageID": {
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                    },
+                    "runID": {
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                    }
+                  },
+                  "required": [
+                    "assetID",
+                    "name",
+                    "mimeType",
+                    "byteLength",
+                    "createdAt",
+                    "source",
+                    "messageID",
+                    "runID"
+                  ],
+                  "additionalProperties": false
                 }
-              },
-              "required": [
-                "assetID",
-                "source",
-                "name",
-                "mimeType",
-                "byteLength",
-                "createdAt"
-              ],
-              "additionalProperties": false
-            }
-          }
-        },
-        "required": [
-          "assets"
-        ],
-        "additionalProperties": false
-      },
-      "AssetsResponseInput": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "type": "object",
-        "properties": {
-          "assets": {
-            "type": "array",
-            "items": {
-              "type": "object",
-              "properties": {
-                "assetID": {
-                  "type": "string",
-                  "format": "uuid",
-                  "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                },
-                "source": {
-                  "type": "string",
-                  "enum": [
-                    "upload",
-                    "generated"
-                  ]
-                },
-                "name": {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 255,
-                  "pattern": "^(?!\\.{1,2}$)[^/\\\\\\u0000-\\u001f\\u007f]+$",
-                  "description": "File name, not a path. Length is measured in UTF-16 code units at runtime; foreign validators may count Unicode code points."
-                },
-                "mimeType": {
-                  "type": "string"
-                },
-                "byteLength": {
-                  "type": "integer",
-                  "minimum": 0,
-                  "maximum": 9007199254740991
-                },
-                "createdAt": {
-                  "type": "string",
-                  "format": "date-time",
-                  "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
-                },
-                "messageID": {
-                  "type": "string",
-                  "format": "uuid",
-                  "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                },
-                "runID": {
-                  "type": "string",
-                  "format": "uuid",
-                  "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                }
-              },
-              "required": [
-                "assetID",
-                "source",
-                "name",
-                "mimeType",
-                "byteLength",
-                "createdAt"
-              ],
-              "additionalProperties": false
+              ]
             }
           }
         },
@@ -1770,19 +1357,6 @@
         "additionalProperties": false
       },
       "ErrorResponse": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "type": "object",
-        "properties": {
-          "error": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "error"
-        ],
-        "additionalProperties": false
-      },
-      "ErrorResponseInput": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",
         "properties": {
@@ -1826,8 +1400,17 @@
           "403": {
             "description": "Untrusted origin"
           },
+          "408": {
+            "description": "Request body timed out; retry same request"
+          },
+          "413": {
+            "description": "Request body exceeds byte limit"
+          },
           "415": {
             "description": "Expected JSON"
+          },
+          "503": {
+            "description": "Collection stopped or transport failed"
           }
         }
       }
@@ -1881,8 +1464,14 @@
           "404": {
             "description": "Not found (including foreign identifiers)"
           },
+          "408": {
+            "description": "Request body timed out; retry same request"
+          },
           "409": {
             "description": "Conflicting intent or archived thread"
+          },
+          "413": {
+            "description": "Request body exceeds byte limit"
           },
           "415": {
             "description": "Expected JSON request"
@@ -1932,8 +1521,14 @@
           "404": {
             "description": "Not found (including foreign identifiers)"
           },
+          "408": {
+            "description": "Request body timed out; retry same request"
+          },
           "409": {
             "description": "Conflicting intent or archived thread"
+          },
+          "413": {
+            "description": "Request body exceeds byte limit"
           },
           "415": {
             "description": "Expected JSON request"
@@ -1985,8 +1580,14 @@
           "404": {
             "description": "Not found (including foreign identifiers)"
           },
+          "408": {
+            "description": "Request body timed out; retry same request"
+          },
           "409": {
             "description": "Conflicting intent or archived thread"
+          },
+          "413": {
+            "description": "Request body exceeds byte limit"
           },
           "415": {
             "description": "Expected JSON request"
@@ -2036,8 +1637,14 @@
           "404": {
             "description": "Not found (including foreign identifiers)"
           },
+          "408": {
+            "description": "Request body timed out; retry same request"
+          },
           "409": {
             "description": "Conflicting intent or archived thread"
+          },
+          "413": {
+            "description": "Request body exceeds byte limit"
           },
           "415": {
             "description": "Expected JSON request"
@@ -2099,8 +1706,14 @@
           "404": {
             "description": "Not found (including foreign identifiers)"
           },
+          "408": {
+            "description": "Request body timed out; retry same request"
+          },
           "409": {
             "description": "Conflicting intent or archived thread"
+          },
+          "413": {
+            "description": "Request body exceeds byte limit"
           },
           "415": {
             "description": "Expected JSON request"
@@ -2162,8 +1775,14 @@
           "404": {
             "description": "Not found (including foreign identifiers)"
           },
+          "408": {
+            "description": "Request body timed out; retry same request"
+          },
           "409": {
             "description": "Conflicting intent or archived thread"
+          },
+          "413": {
+            "description": "Request body exceeds byte limit"
           },
           "415": {
             "description": "Expected JSON request"
@@ -2213,8 +1832,14 @@
           "404": {
             "description": "Not found (including foreign identifiers)"
           },
+          "408": {
+            "description": "Request body timed out; retry same request"
+          },
           "409": {
             "description": "Conflicting intent or archived thread"
+          },
+          "413": {
+            "description": "Request body exceeds byte limit"
           },
           "415": {
             "description": "Expected JSON request"
@@ -2276,8 +1901,14 @@
           "404": {
             "description": "Not found (including foreign identifiers)"
           },
+          "408": {
+            "description": "Request body timed out; retry same request"
+          },
           "409": {
             "description": "Conflicting intent or archived thread"
+          },
+          "413": {
+            "description": "Request body exceeds byte limit"
           },
           "415": {
             "description": "Expected JSON request"
@@ -2329,9 +1960,7 @@
             "description": "Official AG-UI SSE, beginning with RUN_STARTED on every reconnect; event IDs are durable public cursors",
             "content": {
               "text/event-stream": {
-                "schema": {
-                  "type": "string"
-                }
+                "schema": {}
               }
             }
           },
@@ -2347,8 +1976,14 @@
           "404": {
             "description": "Not found (including foreign identifiers)"
           },
+          "408": {
+            "description": "Request body timed out; retry same request"
+          },
           "409": {
             "description": "Conflicting intent or archived thread"
+          },
+          "413": {
+            "description": "Request body exceeds byte limit"
           },
           "415": {
             "description": "Expected JSON request"
@@ -2429,8 +2064,14 @@
           "404": {
             "description": "Not found (including foreign identifiers)"
           },
+          "408": {
+            "description": "Request body timed out; retry same request"
+          },
           "409": {
             "description": "Conflicting intent or archived thread"
+          },
+          "413": {
+            "description": "Request body exceeds byte limit"
           },
           "415": {
             "description": "Expected JSON request"
@@ -2490,11 +2131,14 @@
           "404": {
             "description": "Not found (including foreign identifiers)"
           },
+          "408": {
+            "description": "Upload body timed out; retry same ID and bytes"
+          },
           "409": {
             "description": "Conflicting intent or archived thread"
           },
           "413": {
-            "description": "Upload too large or timed out"
+            "description": "Upload exceeds byte limit"
           },
           "415": {
             "description": "Invalid file"
@@ -2528,9 +2172,29 @@
               "type": "string"
             },
             "description": "Percent-encoded UTF-8 file name"
+          },
+          {
+            "in": "header",
+            "name": "Content-Type",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "text/plain",
+                "application/json",
+                "image/png",
+                "image/jpeg",
+                "image/gif",
+                "image/webp",
+                "audio/wav",
+                "video/mp4",
+                "application/pdf"
+              ]
+            },
+            "description": "Exact supported MIME type; bytes are verified independently"
           }
         ],
-        "description": "Raw bounded file bytes. Retry unknown receipts with the identical ID and bytes. Accepted file names exclude control characters; media bytes are verified.",
+        "description": "Raw bounded file bytes with an explicit allowlisted Content-Type header. Retry unknown receipts with the identical ID and bytes. Accepted file names exclude control characters; media bytes are verified.",
         "requestBody": {
           "required": true,
           "content": {
@@ -2602,57 +2266,9 @@
         ],
         "responses": {
           "200": {
-            "description": "Verified attachment; private, no-store; nosniff; sandbox CSP",
+            "description": "Binary attachment of any stored MIME type, including generated files outside the upload allowlist; private, no-store; nosniff; sandbox CSP",
             "content": {
-              "text/plain": {
-                "schema": {
-                  "type": "string",
-                  "format": "binary"
-                }
-              },
-              "application/json": {
-                "schema": {
-                  "type": "string",
-                  "format": "binary"
-                }
-              },
-              "image/png": {
-                "schema": {
-                  "type": "string",
-                  "format": "binary"
-                }
-              },
-              "image/jpeg": {
-                "schema": {
-                  "type": "string",
-                  "format": "binary"
-                }
-              },
-              "image/gif": {
-                "schema": {
-                  "type": "string",
-                  "format": "binary"
-                }
-              },
-              "image/webp": {
-                "schema": {
-                  "type": "string",
-                  "format": "binary"
-                }
-              },
-              "audio/wav": {
-                "schema": {
-                  "type": "string",
-                  "format": "binary"
-                }
-              },
-              "video/mp4": {
-                "schema": {
-                  "type": "string",
-                  "format": "binary"
-                }
-              },
-              "application/pdf": {
+              "*/*": {
                 "schema": {
                   "type": "string",
                   "format": "binary"
@@ -2671,6 +2287,9 @@
           },
           "404": {
             "description": "Not found (including foreign identifiers)"
+          },
+          "408": {
+            "description": "Request body timed out; retry same request"
           },
           "409": {
             "description": "Conflicting intent or archived thread"

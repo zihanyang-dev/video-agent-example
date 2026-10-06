@@ -1,11 +1,13 @@
 import { afterAll, expect, test } from 'bun:test'
 import type { ExecutionEvent } from '@vid/contract/execution'
-import { sql } from 'kysely'
+import { sql, type KyselyPlugin } from 'kysely'
 import {
   acceptExecutionEvent,
   readPublicEvents,
 } from '../../apps/server/src/db/execution-events'
 import { acceptMessageIntent } from '../../apps/server/src/db/submissions'
+import { cancelRun } from '../../apps/server/src/db/cancellations'
+import { snapshotOwnedMessages } from '../../apps/server/src/db/conversations'
 import { seedTestUser, openTestDatabase } from './database-fixture'
 
 const { db, close } = openTestDatabase()
@@ -94,6 +96,62 @@ test('typed uppercase receipts replay canonically without duplicate public messa
   expect(messages).toEqual([
     { message_id: event.messageID, text: 'Canonical answer' },
   ])
+})
+
+test('durable completion outcome survives reload even when ordinal replay has a gap', async () => {
+  const f = await fixture()
+  const event: ExecutionEvent = {
+    ...f.start,
+    kind: 'run-completed',
+    messageID: crypto.randomUUID(),
+    text: 'Final answer',
+  }
+  expect(await acceptExecutionEvent(db, { ordinal: 3, event })).toBe('accepted')
+  expect(await readPublicEvents(db, f)).toEqual([])
+  for (let reload = 0; reload < 2; reload++) {
+    const snapshot = await snapshotOwnedMessages(db, f)
+    expect(
+      snapshot?.messages.find(
+        (message) => message.messageID === event.messageID,
+      ),
+    ).toMatchObject({
+      text: 'Final answer',
+      runOutcome: { runID: f.runID, status: 'completed' },
+    })
+    expect(
+      snapshot?.messages.find((message) => message.messageID === f.messageID),
+    ).not.toHaveProperty('runOutcome')
+    expect(snapshot?.activeRuns).toEqual([])
+  }
+  expect(
+    await snapshotOwnedMessages(db, { ...f, ownerID: 'foreign' }),
+  ).toBeNull()
+})
+
+test('accepted cancellation cannot fabricate a cancelled outcome before the durable terminal', async () => {
+  const f = await fixture()
+  expect(await cancelRun(db, { ...f, commandID: crypto.randomUUID() })).toBe(
+    'accepted',
+  )
+  const stopping = await snapshotOwnedMessages(db, f)
+  expect(stopping?.activeRuns[0]?.status).toBe('stopping')
+  expect(stopping?.messages[0]).not.toHaveProperty('runOutcome')
+  expect(
+    await acceptExecutionEvent(db, {
+      ordinal: 2,
+      event: { ...f.start, kind: 'run-cancelled' },
+    }),
+  ).toBe('accepted')
+  for (let reload = 0; reload < 2; reload++) {
+    const snapshot = await snapshotOwnedMessages(db, f)
+    expect(snapshot?.messages[0]).toMatchObject({
+      messageID: f.messageID,
+      role: 'user',
+      runOutcome: { runID: f.runID, status: 'cancelled' },
+    })
+    expect(snapshot?.activeRuns).toEqual([])
+    expect(snapshot?.failedRuns).toEqual([])
+  }
 })
 
 test('unknown run creates neither receipt nor final message', async () => {
@@ -344,6 +402,115 @@ async function expectCanonicalMessage(messageID: string) {
       .execute(),
   ).toEqual([{ role: 'assistant', text: 'canonical' }])
 }
+
+test('receipt intake transfers only new facts rather than rereading the run payload history', async () => {
+  const f = await fixture()
+  let historicalPayloads = 0
+  const transfers: KyselyPlugin = {
+    transformQuery: ({ node }) => node,
+    async transformResult({ result }) {
+      historicalPayloads += result.rows.filter((row) =>
+        Object.hasOwn(row, 'payload'),
+      ).length
+      return result
+    },
+  }
+  const observed = db.withPlugin(transfers)
+  const messageID = crypto.randomUUID()
+  expect(
+    await acceptExecutionEvent(observed, { event: f.start, ordinal: 1 }),
+  ).toBe('accepted')
+  for (let ordinal = 2; ordinal <= 33; ordinal++)
+    expect(
+      await acceptExecutionEvent(observed, {
+        ordinal,
+        event: {
+          ...f.start,
+          kind: 'assistant-text',
+          eventID: crypto.randomUUID(),
+          messageID,
+          delta: String(ordinal),
+        },
+      }),
+    ).toBe('accepted')
+  expect(historicalPayloads).toBeLessThanOrEqual(33)
+  const replay = await readPublicEvents(db, {
+    ownerID: f.ownerID,
+    threadID: f.threadID,
+  })
+  expect(replay?.map((row) => row.ordinal)).toEqual(
+    Array.from({ length: 33 }, (_, i) => i + 1),
+  )
+  expect(
+    replay?.map((row) => ('delta' in row.event ? row.event.delta : '')),
+  ).toEqual(['', ...Array.from({ length: 32 }, (_, i) => String(i + 2))])
+})
+
+test('closing a large receipt gap publishes the entire contiguous suffix in ordinal order', async () => {
+  const f = await fixture()
+  const messageID = crypto.randomUUID()
+  for (let ordinal = 65; ordinal >= 2; ordinal--)
+    expect(
+      await acceptExecutionEvent(db, {
+        ordinal,
+        event: {
+          ...f.start,
+          kind: 'assistant-text',
+          eventID: crypto.randomUUID(),
+          messageID,
+          delta: String(ordinal),
+        },
+      }),
+    ).toBe('accepted')
+  expect(
+    await readPublicEvents(db, { ownerID: f.ownerID, threadID: f.threadID }),
+  ).toEqual([])
+  expect(await acceptExecutionEvent(db, { event: f.start, ordinal: 1 })).toBe(
+    'accepted',
+  )
+  const replay = await readPublicEvents(db, {
+    ownerID: f.ownerID,
+    threadID: f.threadID,
+  })
+  expect(replay?.map((row) => row.ordinal)).toEqual(
+    Array.from({ length: 65 }, (_, i) => i + 1),
+  )
+  expect(
+    replay?.map((row) => ('delta' in row.event ? row.event.delta : '')),
+  ).toEqual(['', ...Array.from({ length: 64 }, (_, i) => String(i + 2))])
+  expect(new Set(replay?.map((row) => row.cursor)).size).toBe(65)
+})
+
+test('an earlier arriving ordinal cannot change the already accepted assistant identity', async () => {
+  const f = await fixture()
+  const messageID = crypto.randomUUID()
+  const text: ExecutionEvent = {
+    ...f.start,
+    kind: 'assistant-text',
+    eventID: crypto.randomUUID(),
+    messageID,
+    delta: 'retained',
+  }
+  expect(await acceptExecutionEvent(db, { event: text, ordinal: 3 })).toBe(
+    'accepted',
+  )
+  expect(
+    await acceptExecutionEvent(db, {
+      ordinal: 2,
+      event: {
+        ...text,
+        eventID: crypto.randomUUID(),
+        messageID: crypto.randomUUID(),
+      },
+    }),
+  ).toBe('conflict')
+  expect(await acceptExecutionEvent(db, { event: f.start, ordinal: 1 })).toBe(
+    'accepted',
+  )
+  expect(
+    await readPublicEvents(db, { ownerID: f.ownerID, threadID: f.threadID }),
+  ).toHaveLength(1)
+})
 
 test('receipt authority requires indexed start headers to match the durable wire command', async () => {
   const f = await fixture()

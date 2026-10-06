@@ -3,10 +3,10 @@ import {
   assetReferenceSchema,
   type AssetReference,
 } from '@vid/contract/execution'
-import type {
-  ExecutionLease,
-  FileTools,
-  SandboxSessionPort,
+import {
+  type ExecutionLease,
+  type FileTools,
+  type SandboxFiles,
 } from '../execute-run'
 
 const exportMetadataSchema = assetReferenceSchema
@@ -25,7 +25,7 @@ type FileLimits = Readonly<{
 export function assignFileTools(objects: ObjectStore, limits: FileLimits) {
   return (
     lease: ExecutionLease,
-    sandbox: SandboxSessionPort,
+    sandbox: SandboxFiles,
     stopSpending: () => void,
   ): FileTools => {
     const assigned = lease.assets ?? []
@@ -33,11 +33,16 @@ export function assignFileTools(objects: ObjectStore, limits: FileLimits) {
     let count = 0
     let byteLength = 0
     let unknownOutcome = false
-    function reserve(bytes: number) {
-      count++
-      byteLength += bytes
-      if (count > limits.maxFiles || byteLength > limits.maxBytes)
+    // Failed actions consume their reservation; no retries reclaim remote IO.
+    function reserveFile() {
+      if (count >= limits.maxFiles || byteLength >= limits.maxBytes)
         throw new Error('Asset IO budget exceeded')
+      count++
+    }
+    function reserveBytes(bytes: number) {
+      if (bytes > limits.maxBytes - byteLength)
+        throw new Error('Asset IO budget exceeded')
+      byteLength += bytes
     }
     function bounded(signal: AbortSignal) {
       return AbortSignal.any([signal, AbortSignal.timeout(limits.timeoutMs)])
@@ -52,19 +57,23 @@ export function assignFileTools(objects: ObjectStore, limits: FileLimits) {
         )
         if (asset === undefined)
           throw new Error('Asset was not assigned to this run')
-        reserve(asset.byteLength)
+        reserveFile()
+        reserveBytes(asset.byteLength)
+        const deadline = bounded(signal)
+        deadline.throwIfAborted()
         const bytes = await objects.read(
           asset.objectKey,
           asset.byteLength,
-          bounded(signal),
+          deadline,
         )
         if (
           bytes.byteLength !== asset.byteLength ||
           sha256(bytes) !== asset.sha256
         )
           throw new Error('Assigned asset digest mismatch')
+        deadline.throwIfAborted()
         try {
-          await sandbox.files.writeBytes(path, bytes, bounded(signal))
+          await sandbox.writeBytes(path, bytes, deadline)
         } catch (error) {
           unknownOutcome = true
           stopSpending()
@@ -77,22 +86,19 @@ export function assignFileTools(objects: ObjectStore, limits: FileLimits) {
         const assetID = crypto.randomUUID()
         const objectKey = `assets/generated/${lease.threadID}/${lease.runID}/${lease.fence}/${assetID}`
         const metadata = exportMetadataSchema.parse({ name, mimeType })
-        const bytes = await sandbox.files
-          .readBytes(path, bounded(signal), limits.maxBytes - byteLength)
-          .catch((error: unknown) => {
-            unknownOutcome = true
-            stopSpending()
-            throw error
-          })
-        reserve(bytes.byteLength)
+        reserveFile()
+        const deadline = bounded(signal)
+        deadline.throwIfAborted()
+        const bytes = await sandbox.readBytes(
+          path,
+          deadline,
+          limits.maxBytes - byteLength,
+        )
+        reserveBytes(bytes.byteLength)
+        deadline.throwIfAborted()
         let digest
         try {
-          digest = await objects.put(
-            objectKey,
-            bytes,
-            mimeType,
-            bounded(signal),
-          )
+          digest = await objects.put(objectKey, bytes, mimeType, deadline)
         } catch (error) {
           unknownOutcome = true
           stopSpending()

@@ -1,3 +1,4 @@
+import { failedRunSchema } from './http'
 import { describe, expect, test } from 'bun:test'
 import {
   cancelCommandSchema,
@@ -294,4 +295,32 @@ test('asset wire references reject caller source and completion retains absence 
     input: { ...commandStart.input, assets: [asset] },
   })
   expect(Reflect.set(parsed.input.assets!, '0', asset)).toBe(false)
+})
+
+test('every closed public failure category is accepted by terminal and snapshot schemas only', () => {
+  for (const reason of [
+    'execution-error',
+    'interrupted',
+    'sandbox-recovery-required',
+    'provider-secret',
+  ]) {
+    const valid = reason !== 'provider-secret'
+    expect(
+      failedRunSchema.safeParse({
+        runID: commandStart.runID,
+        messageID: commandStart.runID,
+        reason,
+      }).success,
+    ).toBe(valid)
+    expect(
+      executionEventSchema.safeParse({
+        version: 1,
+        kind: 'run-failed',
+        eventID: commandStart.runID,
+        threadID: commandStart.runID,
+        runID: commandStart.runID,
+        reason,
+      }).success,
+    ).toBe(valid)
+  }
 })

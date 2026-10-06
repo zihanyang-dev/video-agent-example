@@ -19,7 +19,7 @@ export const legacyAssignmentsSchema = z
 
 /** Administrative, never called by login or product HTTP. The table lock keeps
  * the reviewed set fixed; user share locks prevent deletion before assignment.
- * Reject incomplete/unknown/conflicting mappings before any row is changed.
+ * Reject unknown/conflicting mappings before any row is changed.
  * Original legacy owners remain audit evidence, not a second business entity. */
 export async function assignLegacyThreads(
   db: Kysely<DB>,
@@ -40,6 +40,12 @@ export async function assignLegacyThreads(
         assignment.userID,
       ]),
     )
+    const legacyOwners = new Set(
+      threads.map((thread) => thread.legacy_owner_id),
+    )
+    for (const legacyOwnerID of reviewed.keys())
+      if (!legacyOwners.has(legacyOwnerID))
+        throw new Error('Assignment references an unknown legacy owner')
     const users = await tx
       .selectFrom('auth.user')
       .select('id')
@@ -53,8 +59,7 @@ export async function assignLegacyThreads(
       throw new Error('Assignment references an unknown authentication user')
     for (const thread of threads) {
       const ownerID = reviewed.get(thread.legacy_owner_id!)
-      if (!ownerID)
-        throw new Error('Assignment does not cover every legacy owner')
+      if (!ownerID) continue
       if (thread.owner_id !== null && thread.owner_id !== ownerID)
         throw new Error('Assignment conflicts with a previously reviewed owner')
     }

@@ -11,11 +11,6 @@ cleanup() {
   status=$?
   trap - EXIT HUP INT TERM
   failed=0
-  if [ -n "$client" ]; then
-    kill "$client" 2>/dev/null || :
-    settle_cleanup "$client" 2>/dev/null || failed=1
-    client=''
-  fi
   if [ "$create_attempted" -eq 1 ]; then remove_owned container "$container" || failed=1; fi
   rm -rf "$staging" || failed=1
   if [ "$failed" -ne 0 ]; then echo "Cleanup incomplete for owned container $container" >&2; fi
@@ -27,11 +22,14 @@ trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-run_stage "$setup_timeout" docker build --quiet -f "$root/deploy/docker/checks.Dockerfile" "$root" > "$staging/image"
-image=$(cat "$staging/image")
+image=${VID_CHECK_IMAGE:-}
+if [ -z "$image" ]; then
+  run_stage "$setup_timeout" docker build --quiet -f "$root/deploy/docker/checks.Dockerfile" "$root" > "$staging/image"
+  image=$(cat "$staging/image")
+fi
 if [ "$#" -eq 0 ]; then set -- run check; fi
 
-# Claim before create: an error or cancellation can lose an acknowledged ID.
+# Record the owned name before creation so cancellation still cleans up.
 create_attempted=1
 run_stage "$setup_timeout" docker create --name "$container" --label "vid.check.owner=$owner" "$image" bun "$@" >/dev/null
 # Use the filtered image only; mounting the checkout would expose operator secrets.

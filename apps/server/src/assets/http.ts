@@ -1,4 +1,4 @@
-import { collectRequestBody } from '../request-body'
+import { collectRequestBody, requestBodyRejection } from '../request-body'
 import { publicUUIDSchema, type AssetResponse } from '@vid/contract/http'
 import { sha256 } from '@vid/object-storage'
 import type { Kysely } from 'kysely'
@@ -30,11 +30,10 @@ export async function uploadAsset(
   let bytes: Uint8Array
   try {
     bytes = await collectRequestBody(request.body, io.maxAssetBytes, signal)
-  } catch {
-    return Response.json(
-      { error: 'Upload too large or timed out' },
-      { status: 413 },
-    )
+  } catch (cause) {
+    const rejection = requestBodyRejection(cause)
+    if (rejection) return rejection
+    throw cause
   }
   if (!validateFile(metadata.name, metadata.mimeType, bytes))
     return Response.json({ error: 'Invalid file' }, { status: 415 })

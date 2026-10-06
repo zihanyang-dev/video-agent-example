@@ -1,7 +1,8 @@
+import { WEB_SOURCES_PER_TURN, type WebSource } from '@vid/contract/web-source'
 import {
   InMemoryCredentialStore,
   Type,
-  type ImageContent,
+  type AssistantMessageEvent,
 } from '@earendil-works/pi-ai'
 import {
   createAgentSession,
@@ -14,8 +15,9 @@ import {
   type ResourceLoader,
 } from '@earendil-works/pi-coding-agent'
 import type { AgentHarness, SandboxTools } from '../execute-run.ts'
-import { fileToolDefinitions } from './file-tools'
-import { restorePiHistory } from './pi-history.ts'
+import { fileToolDefinitions } from './file-tools.ts'
+import { webSearchTool, type WebSearchConfig } from './web-search.ts'
+import { admitPiHistory, restorePiHistory } from './pi-history.ts'
 
 export type PiHarnessOptions = Readonly<{
   baseURL: string
@@ -26,6 +28,7 @@ export type PiHarnessOptions = Readonly<{
   reasoning: boolean
   input: readonly ('text' | 'image')[]
   systemPrompt: string
+  webSearch?: WebSearchConfig
 }>
 
 async function assignedModel(options: PiHarnessOptions) {
@@ -87,15 +90,17 @@ function executeTool(tools: SandboxTools, signal: AbortSignal) {
     name: 'execute',
     label: 'Execute',
     description: 'Execute a command in the assigned sandbox.',
-    parameters: Type.Object({ command: Type.String() }),
+    parameters: Type.Object({ command: Type.String({ maxLength: 16 * 1024 }) }),
     async execute(_id, params, sdkSignal) {
+      signal.throwIfAborted()
+      sdkSignal?.throwIfAborted()
       const result = await tools.execute({
         command: params.command,
         signal: sdkSignal ?? signal,
       })
       return {
         content: [{ type: 'text', text: JSON.stringify(result) }],
-        details: result,
+        details: {},
       }
     },
   })
@@ -106,8 +111,10 @@ function readTool(tools: SandboxTools, signal: AbortSignal) {
     name: 'read',
     label: 'Read',
     description: 'Read a file in the assigned sandbox.',
-    parameters: Type.Object({ path: Type.String() }),
+    parameters: Type.Object({ path: Type.String({ maxLength: 4 * 1024 }) }),
     async execute(_id, params, sdkSignal) {
+      signal.throwIfAborted()
+      sdkSignal?.throwIfAborted()
       const content = await tools.read({
         path: params.path,
         signal: sdkSignal ?? signal,
@@ -117,16 +124,23 @@ function readTool(tools: SandboxTools, signal: AbortSignal) {
   })
 }
 
-function writeTool(tools: SandboxTools, signal: AbortSignal) {
+function writeTool(
+  tools: SandboxTools,
+  signal: AbortSignal,
+  onLimit: () => never,
+) {
   return defineTool({
     name: 'write',
     label: 'Write',
     description: 'Write a file in the assigned sandbox.',
     parameters: Type.Object({
-      path: Type.String(),
-      content: Type.String(),
+      path: Type.String({ maxLength: 4 * 1024 }),
+      content: Type.String({ maxLength: 256 * 1024 }),
     }),
     async execute(_id, params, sdkSignal) {
+      signal.throwIfAborted()
+      sdkSignal?.throwIfAborted()
+      if (Buffer.byteLength(params.content) > 256 * 1024) onLimit()
       await tools.write({
         path: params.path,
         content: params.content,
@@ -146,6 +160,13 @@ async function assignedSession(
   options: PiHarnessOptions,
   manager: SessionManager,
   { tools, signal, fileTools }: TurnInput,
+  {
+    onSources,
+    onLimit,
+  }: {
+    onSources: (sources: readonly WebSource[]) => void
+    onLimit: () => never
+  },
 ) {
   const { runtime, model } = await assignedModel(options)
   const { session } = await createAgentSession({
@@ -164,61 +185,88 @@ async function assignedSession(
       'execute',
       'read',
       'write',
+      ...(options.webSearch === undefined ? [] : ['web_search']),
       ...(fileTools === undefined ? [] : ['import_file', 'export_file']),
     ],
     customTools: [
       executeTool(tools, signal),
       readTool(tools, signal),
-      writeTool(tools, signal),
+      writeTool(tools, signal, onLimit),
+      ...(options.webSearch === undefined
+        ? []
+        : [webSearchTool(options.webSearch, signal, onSources)]),
       ...(fileTools === undefined
         ? []
         : fileToolDefinitions(
             fileTools,
             signal,
             options.input.includes('image'),
+            onLimit,
           )),
     ],
   })
   return session
 }
 
-function encodePromptImages(
-  images: NonNullable<TurnInput['images']>,
-): ImageContent[] {
-  return images.map((image) => ({
-    type: 'image',
-    data: Buffer.from(image.bytes).toString('base64'),
-    mimeType: image.mimeType,
-  }))
-}
-
 async function runTurn(
-  session: AgentSession,
+  options: PiHarnessOptions,
   manager: SessionManager,
-  { text: prompt, signal, onText, images, fileTools }: TurnInput,
+  input: TurnInput,
+  onSources: (sources: readonly WebSource[]) => void,
 ) {
-  let text = ''
-  let failed = false
-  const unsubscribe = session.subscribe((event) => {
-    if (event.type === 'message_end' && event.message.role === 'assistant') {
-      failed ||=
-        event.message.stopReason === 'error' ||
-        event.message.stopReason === 'aborted'
-    }
-    if (
-      event.type === 'message_update' &&
-      event.assistantMessageEvent.type === 'text_delta'
-    ) {
-      const delta = event.assistantMessageEvent.delta
-      text += delta
-      onText(delta)
-    }
-  })
+  const { text: prompt, signal, onText, fileTools } = input
+  // Byte bounds follow native parsing/retention, not transport frames or peak RSS.
+  let budgetError: Error | undefined
   let aborting: Promise<void> | undefined
+  let session: AgentSession
   const abort = () => {
     aborting ??= session.abort()
+    void aborting.catch(() => {})
   }
+  const refuse = () => {
+    budgetError ??= new Error('Pi turn budget exceeded')
+    abort()
+  }
+  const onLimit = (): never => {
+    refuse()
+    throw budgetError
+  }
+  session = await assignedSession(options, manager, input, {
+    onSources,
+    onLimit,
+  })
+  let iterations = 0
+  let deltas = 0
+  let failed = false
+  const admitDelta = (delta: AssistantMessageEvent) => {
+    if (
+      delta.type !== 'text_delta' &&
+      delta.type !== 'thinking_delta' &&
+      delta.type !== 'toolcall_delta'
+    )
+      return
+    const bytes = Buffer.byteLength(delta.delta)
+    deltas += bytes
+    if (deltas > 2 * 1024 * 1024) refuse()
+  }
+  const unsubscribe = session.subscribe((event) => {
+    // Subscribers are synchronous. Retain abort's idle receipt; never await it here.
+    if (event.type === 'turn_start') {
+      if (++iterations > 16) refuse()
+      return
+    }
+    if (event.type === 'message_end') {
+      if (event.message.role === 'assistant')
+        failed ||= ['error', 'aborted'].includes(event.message.stopReason)
+      return
+    }
+    if (event.type !== 'message_update') return
+    admitDelta(event.assistantMessageEvent)
+    if (!budgetError && event.assistantMessageEvent.type === 'text_delta')
+      onText(event.assistantMessageEvent.delta)
+  })
   signal.addEventListener('abort', abort, { once: true })
+  let rejectPrompt: (() => void) | undefined
   try {
     // Abort may have arrived during asynchronous session construction.
     signal.throwIfAborted()
@@ -228,32 +276,67 @@ async function runTurn(
         : `${prompt}
 Assigned assets (import_file by assetID to a path you choose):
 ${JSON.stringify(fileTools.assigned.map(({ assetID, name, mimeType }) => ({ assetID, name, mimeType })))}`
-    await session.prompt(
-      inputText,
-      images === undefined ? undefined : { images: encodePromptImages(images) },
-    )
-    await session.waitForIdle()
+    const prompting = session
+      .prompt(inputText)
+      .then(() => session.waitForIdle())
+    void prompting.catch(() => {})
+    await Promise.race([
+      prompting,
+      new Promise<never>((_, reject) => {
+        rejectPrompt = () => reject(signal.reason)
+        signal.addEventListener('abort', rejectPrompt, { once: true })
+        if (signal.aborted) rejectPrompt()
+      }),
+    ])
     signal.throwIfAborted()
+    if (budgetError) throw budgetError
     if (failed) {
       throw new Error('Pi model execution failed')
     }
+    // Streaming may include tool-turn narration. The canonical answer is only
+    // the final native assistant message; preserve its exact text, not the SDK
+    // convenience getter's trimming. Thinking and tool blocks remain private.
+    const answer = session.messages.findLast(
+      (message) => message.role === 'assistant',
+    )
+    const history = {
+      header: manager.getHeader(),
+      entries: manager.getEntries(),
+      leafID: manager.getLeafId(),
+    }
+    admitPiHistory(history)
     return {
-      text,
-      history: structuredClone({
-        header: manager.getHeader(),
-        entries: manager.getEntries(),
-        leafID: manager.getLeafId(),
-      }),
+      text:
+        answer?.content
+          .flatMap((block) => (block.type === 'text' ? [block.text] : []))
+          .join('') ?? '',
+      history: structuredClone(history),
     }
   } finally {
     // prompt/abort settling owns tool lifetime; agent_end alone is not completion.
     signal.removeEventListener('abort', abort)
-    // In the pinned SDK abort uses native controllers and an idle waiter that
-    // only resolves. No extensions, retry, compaction or warming hooks are enabled
-    // here; do not invent a second cancellation timeout that detaches real tools.
-    await (aborting ?? session.abort())
-    unsubscribe()
-    session.dispose()
+    if (rejectPrompt !== undefined)
+      signal.removeEventListener('abort', rejectPrompt)
+    // Abort is supported by Pi; bound our wait, without claiming the SDK joins
+    // every remote operation. The rejected receipt remains supervised.
+    const cleanup = aborting ?? session.abort()
+    void cleanup.catch(() => {})
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      await Promise.race([
+        cleanup,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(
+            () => reject(new Error('Pi cancellation deadline exceeded')),
+            10000,
+          )
+        }),
+      ])
+    } finally {
+      clearTimeout(timer)
+      unsubscribe()
+      session.dispose()
+    }
   }
 }
 
@@ -261,13 +344,21 @@ export function createPiHarness(options: PiHarnessOptions): AgentHarness {
   return {
     async turn(input) {
       input.signal.throwIfAborted()
+      // Fresh provenance for this assigned invocation, never restored from Pi
+      // history or inferred from model text. Found does not mean read or cited.
+      const sources: WebSource[] = []
+      const urls = new Set<string>()
+      const onSources = (found: readonly WebSource[]) => {
+        for (const source of found) {
+          if (sources.length === WEB_SOURCES_PER_TURN) break
+          if (urls.has(source.url)) continue
+          urls.add(source.url)
+          sources.push(source)
+        }
+      }
       const manager = restorePiHistory(input.history)
-      const session = await assignedSession(options, manager, input)
-      // Text-only assignments receive file paths, never a pretend image modality.
-      if (options.input.includes('image'))
-        return await runTurn(session, manager, input)
-      const { images: _images, ...textInput } = input
-      return await runTurn(session, manager, textInput)
+      const result = await runTurn(options, manager, input, onSources)
+      return { ...result, sources }
     },
   }
 }

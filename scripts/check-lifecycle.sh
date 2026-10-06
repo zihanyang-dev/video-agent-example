@@ -1,47 +1,28 @@
-# Shared Docker/SSH client lifecycle for check runners (sourced, not executable).
-# Call only direct CLI processes: their remote resources require separate cleanup.
-client=''
-setup_timeout=${VID_SETUP_TIMEOUT:-120}
-run_timeout=${VID_RUN_TIMEOUT:-300}
-
-settle_cleanup() {
-  cleanup_attempt=0
-  while kill -0 "$1" 2>/dev/null; do
-    cleanup_attempt=$((cleanup_attempt + 1))
-    if [ "$cleanup_attempt" -ge 50 ]; then
-      echo 'Cleanup timed out; owned resources may require operator removal' >&2
-      kill -KILL "$1" 2>/dev/null || :
-      wait "$1" 2>/dev/null || :
-      return 1
-    fi
-    sleep 0.1
-  done
-  wait "$1"
-}
-
+# Shared native timeout and exact-label cleanup for isolated check runners.
+setup_timeout=${VID_SETUP_TIMEOUT:-600}
+run_timeout=${VID_RUN_TIMEOUT:-600}
+ready_timeout=${VID_READY_TIMEOUT:-60}
+if command -v timeout >/dev/null 2>&1; then
+  timeout_bin=timeout
+elif command -v gtimeout >/dev/null 2>&1; then
+  timeout_bin=gtimeout
+else
+  echo 'GNU timeout is required (brew install coreutils on macOS)' >&2
+  return 2
+fi
+for deadline in "$setup_timeout" "$run_timeout" "$ready_timeout"; do
+  case "$deadline" in
+    ''|0*|*[!0-9]*|?????*) echo 'Invalid check deadline: require 1..3600 seconds' >&2; return 2 ;;
+  esac
+  [ "$deadline" -le 3600 ] || return 2
+done
 run_stage() {
   stage_limit=$1
   shift
-  "$@" <&0 &
-  client=$!
-  stage_end=$(($(date +%s) + stage_limit))
-  while kill -0 "$client" 2>/dev/null; do
-    if [ "$(date +%s)" -ge "$stage_end" ]; then
-      echo "Stage timed out: $*" >&2
-      kill "$client" 2>/dev/null || :
-      settle_cleanup "$client" 2>/dev/null || :
-      client=''
-      return 124
-    fi
-    sleep 0.1
-  done
-  stage_status=0
-  wait "$client" || stage_status=$?
-  client=''
-  return "$stage_status"
+  "$timeout_bin" --signal=TERM --kill-after=10s "$stage_limit" "$@"
 }
 
-# Name alone is not deletion authority, including after create loses its ACK.
+# A matching name is not authority to delete someone else's resource.
 remove_owned() {
   resource=$1
   resource_name=$2
@@ -50,14 +31,12 @@ remove_owned() {
   else
     label_format='{{.Id}} {{ index .Labels "vid.check.owner" }}'
   fi
-  docker "$resource" inspect --format "$label_format" "$resource_name" > "$staging/owner" 2>/dev/null &
-  settle_cleanup "$!" || return 1
+  run_stage 10 docker "$resource" inspect --format "$label_format" "$resource_name" > "$staging/owner" || return 1
   read -r owned_id owned_label < "$staging/owner" || return 1
   [ "$owned_label" = "$owner" ] || return 1
   if [ "$resource" = container ]; then
-    docker rm -f -v "$owned_id" >/dev/null &
+    run_stage 10 docker rm -f -v "$owned_id" >/dev/null
   else
-    docker network rm "$owned_id" >/dev/null &
+    run_stage 10 docker network rm "$owned_id" >/dev/null
   fi
-  settle_cleanup "$!"
 }

@@ -20,41 +20,12 @@ export async function acceptExecutionCommand(
   db: Kysely<DB>,
   input: ExecutionCommand,
 ) {
-  const command = canonicalCommand(input)
+  const command = executionCommandSchema.parse(input)
   try {
     return await db.transaction().execute((tx) => acceptCommand(tx, command))
   } catch (error) {
     if (error === commandConflict) return 'conflict' as const
     throw error
-  }
-}
-
-function canonicalCommand(command: ExecutionCommand): ExecutionCommand {
-  const identities = {
-    commandID: command.commandID.toLowerCase(),
-    threadID: command.threadID.toLowerCase(),
-    runID: command.runID.toLowerCase(),
-  }
-  if (command.kind === 'cancel') {
-    return { version: command.version, kind: 'cancel', ...identities }
-  }
-
-  return {
-    version: command.version,
-    kind: 'start',
-    ...identities,
-    input: {
-      messageID: command.input.messageID.toLowerCase(),
-      text: command.input.text,
-      ...(command.input.assets === undefined
-        ? {}
-        : {
-            assets: command.input.assets.map((asset) => ({
-              ...asset,
-              assetID: asset.assetID.toLowerCase(),
-            })),
-          }),
-    },
   }
 }
 
@@ -69,7 +40,9 @@ async function acceptCommand(tx: Transaction<DB>, command: ExecutionCommand) {
       kind: command.kind,
       command: sql`${JSON.stringify(command)}::jsonb`,
     })
-    .onConflict((conflict) => conflict.column('command_id').doNothing())
+    // The composite FK target is also unique. Concurrent exact deliveries can
+    // conflict through either index; replay below still checks the full body.
+    .onConflict((conflict) => conflict.doNothing())
     .returning('command_id')
     .executeTakeFirst()
   if (inserted === undefined) return await replayCommand(tx, command)
@@ -88,7 +61,7 @@ async function acceptCommand(tx: Transaction<DB>, command: ExecutionCommand) {
 
   const existing = await tx
     .selectFrom('execution.runs')
-    .select(['thread_id', 'status'])
+    .select('thread_id')
     .where('run_id', '=', command.runID)
     .executeTakeFirst()
   if (

@@ -2,89 +2,118 @@ import { EventType, type Event } from '@ag-ui/core'
 import type { ExecutionEvent } from '@vid/contract/execution'
 
 export type PublicRunState = Readonly<{
-  started: boolean
-  terminal: boolean
+  phase: 'unopened' | 'open' | 'terminal'
   messages: ReadonlyMap<string, string>
 }>
 
-// Each subscription reconstructs from canonical facts. No state is shared across
-// readers, and transitions never mutate the caller's previous replay state.
-export function mapPublicRunEvent(
+// Each reader folds canonical facts independently. Reconstruction needs only
+// this state, never discarded protocol frames or a second set of transition rules.
+export function foldPublicRunEvent(
   state: PublicRunState,
   fact: ExecutionEvent,
-): {
-  state: PublicRunState
-  frames: Event[]
-} {
-  const messages = new Map(state.messages)
+): PublicRunState {
+  if (state.phase === 'terminal')
+    throw new Error('Cannot fold a fact after a terminal run')
+  switch (fact.kind) {
+    case 'run-started':
+      return { ...state, phase: 'open' }
+    case 'assistant-text': {
+      const messages = new Map(state.messages)
+      messages.set(
+        fact.messageID,
+        (messages.get(fact.messageID) ?? '') + fact.delta,
+      )
+      return { phase: 'open', messages }
+    }
+    case 'run-completed': {
+      const messages = new Map(state.messages)
+      messages.set(fact.messageID, fact.text)
+      return { phase: 'terminal', messages }
+    }
+    case 'run-cancelled':
+    case 'run-failed':
+      return { ...state, phase: 'terminal' }
+    default:
+      return assertNever(fact)
+  }
+}
+
+/** Live delivery folds once and projects once. Terminal reconnects project the
+ * already-folded canonical state without applying its terminal a second time. */
+export function mapPublicRunEvent(state: PublicRunState, fact: ExecutionEvent) {
+  const next = foldPublicRunEvent(state, fact)
+  return { state: next, frames: projectPublicRunEvent(state, fact) }
+}
+
+export function projectPublicRunEvent(
+  state: PublicRunState,
+  fact: ExecutionEvent,
+): Event[] {
   const frames: Event[] = []
-  if (!state.started)
+  if (state.phase === 'unopened')
     frames.push({
       type: EventType.RUN_STARTED,
       threadId: fact.threadID,
       runId: fact.runID,
     })
+  if ('messageID' in fact) frames.push(...textFrames(state.messages, fact))
+  if (fact.kind !== 'run-started' && fact.kind !== 'assistant-text')
+    frames.push(...terminalFrames(state.messages, fact))
+  return frames.map((frame) => ({
+    ...frame,
+    metadata: {
+      mappingVersion: 'ag-ui-1.0.1-v1',
+      eventID: `${fact.eventID}:${frame.type}:${'messageId' in frame ? frame.messageId : ''}`,
+      factID: fact.eventID,
+    },
+  }))
+}
 
-  let terminal = state.terminal
+function terminalFrames(
+  messages: ReadonlyMap<string, string>,
+  fact: Extract<
+    ExecutionEvent,
+    { kind: 'run-completed' | 'run-cancelled' | 'run-failed' }
+  >,
+): Event[] {
+  const messageIDs =
+    fact.kind === 'run-completed' ? [fact.messageID] : [...messages.keys()]
+  const ends: Event[] = messageIDs.map((messageId) => ({
+    type: EventType.TEXT_MESSAGE_END,
+    messageId,
+  }))
   switch (fact.kind) {
-    case 'run-started':
-      break
-    case 'assistant-text':
-      frames.push(...textFrames(messages, fact))
-      messages.set(
-        fact.messageID,
-        (messages.get(fact.messageID) ?? '') + fact.delta,
-      )
-      break
-    case 'run-completed': {
-      frames.push(...textFrames(messages, fact))
-      messages.set(fact.messageID, fact.text)
-      frames.push(
-        { type: EventType.TEXT_MESSAGE_END, messageId: fact.messageID },
+    case 'run-completed':
+      return [
+        ...ends,
         {
           type: EventType.RUN_FINISHED,
           threadId: fact.threadID,
           runId: fact.runID,
           outcome: { type: 'success' },
         },
-      )
-      terminal = true
-      break
-    }
+      ]
     case 'run-cancelled':
+      return [
+        ...ends,
+        {
+          type: EventType.RUN_FINISHED,
+          threadId: fact.threadID,
+          runId: fact.runID,
+          outcome: { type: 'cancelled' },
+        },
+      ]
     case 'run-failed':
-      for (const messageId of messages.keys())
-        frames.push({ type: EventType.TEXT_MESSAGE_END, messageId })
-      frames.push(
-        fact.kind === 'run-cancelled'
-          ? {
-              type: EventType.RUN_FINISHED,
-              threadId: fact.threadID,
-              runId: fact.runID,
-              outcome: { type: 'cancelled' },
-            }
-          : {
-              type: EventType.RUN_ERROR,
-              code: fact.reason,
-              message: failureMessage(fact.reason),
-            },
-      )
-      terminal = true
-      break
+      return [
+        ...ends,
+        {
+          type: EventType.RUN_ERROR,
+          code: fact.reason,
+          message: failureMessage(fact.reason),
+        },
+      ]
     default:
-      assertNever(fact)
-  }
-
-  return {
-    state: { started: true, terminal, messages },
-    frames: frames.map((frame) => ({
-      ...frame,
-      metadata: {
-        mappingVersion: 'ag-ui-1.0.1-v1',
-        eventID: `${fact.eventID}:${frame.type}:${'messageId' in frame ? frame.messageId : ''}`,
-        factID: fact.eventID,
-      },
-    })),
+      return assertNever(fact)
   }
 }
 

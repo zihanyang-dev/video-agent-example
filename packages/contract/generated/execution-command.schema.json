@@ -59,7 +59,8 @@
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 255,
-                    "pattern": "^(?!\\.{1,2}$)(?!.*[/\\\\])[\\x20-\\x7e\\u0080-\\uffff]+$"
+                    "pattern": "^(?!\\.{1,2}$)[^/\\\\\\u0000-\\u001f\\u007f]{1,255}$",
+                    "description": "File name, not a path. Length is measured in UTF-16 code units at runtime; foreign validators may count Unicode code points."
                   },
                   "mimeType": {
                     "type": "string",

@@ -1,7 +1,5 @@
-import { readMigrationEnv } from '@vid/config'
-import type { DB } from '@vid/database/types'
-import { Kysely, PostgresDialect } from 'kysely'
-import { Pool } from 'pg'
+import { readAdministrationEnv, type AdministrationEnv } from '@vid/config'
+import { openDatabase } from '@vid/database/connection'
 import {
   assignLegacyThreads,
   legacyAssignmentsSchema,
@@ -9,19 +7,35 @@ import {
 
 // Explicit administrator input only. No DDL, user creation, deletion, or first
 // login claim. Run against the reviewed database with an administrative role.
-const path = process.argv[2]
-if (!path || process.argv.length !== 3)
-  throw new Error(
-    'Usage: bun scripts/assign-legacy-threads.ts reviewed-assignments.json',
-  )
-const assignments = legacyAssignmentsSchema.parse(await Bun.file(path).json())
-const db = new Kysely<DB>({
-  dialect: new PostgresDialect({
-    pool: new Pool({ connectionString: readMigrationEnv().DATABASE_URL }),
-  }),
-})
-try {
-  console.log(await assignLegacyThreads(db, assignments))
-} finally {
-  await db.destroy()
+export async function assignReviewedLegacyThreads(
+  path: string,
+  connections: AdministrationEnv,
+) {
+  const assignments = legacyAssignmentsSchema.parse(await Bun.file(path).json())
+  const failures: unknown[] = []
+  const db = openDatabase(connections, (cause) => failures.push(cause))
+  const [operation] = await Promise.allSettled([
+    assignLegacyThreads(db, assignments),
+  ])
+  const [cleanup] = await Promise.allSettled([db.destroy()])
+  if (operation.status === 'rejected') failures.unshift(operation.reason)
+  if (cleanup.status === 'rejected') failures.push(cleanup.reason)
+  const causes = [...new Set(failures)]
+  if (causes.length > 1)
+    throw new AggregateError(
+      causes,
+      'Legacy assignment or database settlement failed',
+    )
+  if (operation.status === 'rejected') throw operation.reason
+  if (causes.length === 1) throw causes[0]
+  return operation.value
+}
+
+if (import.meta.main) {
+  const path = process.argv[2]
+  if (!path || process.argv.length !== 3)
+    throw new Error(
+      'Usage: bun scripts/assign-legacy-threads.ts reviewed-assignments.json',
+    )
+  console.log(await assignReviewedLegacyThreads(path, readAdministrationEnv()))
 }

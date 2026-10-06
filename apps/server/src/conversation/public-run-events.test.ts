@@ -4,8 +4,7 @@ import { EventSchema } from '@ag-ui/core/schemas'
 import { mapPublicRunEvent, type PublicRunState } from './public-run-events'
 
 const initial: PublicRunState = {
-  started: false,
-  terminal: false,
+  phase: 'unopened',
   messages: new Map(),
 }
 const base = {
@@ -47,7 +46,7 @@ test('completion suffix does not append already streamed text twice', () => {
   expect(
     events.filter((event) => event.type === EventType.TEXT_MESSAGE_START),
   ).toHaveLength(1)
-  expect(last.state.terminal).toBe(true)
+  expect(last.state.phase).toBe('terminal')
   expect(first.state.messages.get(messageID)).toBe('Hello')
   expect(initial.messages.size).toBe(0)
 })
@@ -89,7 +88,7 @@ test.each(['run-cancelled', 'run-failed'] as const)(
     )
     for (const frame of mapped.frames)
       expect(EventSchema.safeParse(frame).success).toBe(true)
-    expect(mapped.state.terminal).toBe(true)
+    expect(mapped.state.phase).toBe('terminal')
   },
 )
 
@@ -127,6 +126,57 @@ test('non-prefix completion does not append a conflicting canonical answer', () 
   expect(final.state.messages.get(messageID)).toBe('Final')
 })
 
+test('a terminal run cannot fold another durable fact', () => {
+  const completed = mapPublicRunEvent(initial, {
+    ...base,
+    kind: 'run-completed',
+    messageID,
+    text: 'Final',
+  })
+  expect(() =>
+    mapPublicRunEvent(completed.state, {
+      ...base,
+      eventID: crypto.randomUUID(),
+      kind: 'assistant-text',
+      messageID,
+      delta: 'late',
+    }),
+  ).toThrow('terminal')
+  expect(completed.state.messages.get(messageID)).toBe('Final')
+})
+
+test('cancel closes every opened message without changing prior text', () => {
+  const secondMessageID = crypto.randomUUID()
+  const first = mapPublicRunEvent(initial, {
+    ...base,
+    kind: 'assistant-text',
+    messageID,
+    delta: 'first',
+  })
+  const second = mapPublicRunEvent(first.state, {
+    ...base,
+    kind: 'assistant-text',
+    messageID: secondMessageID,
+    delta: 'second',
+  })
+  const cancelled = mapPublicRunEvent(second.state, {
+    ...base,
+    kind: 'run-cancelled',
+  })
+  expect(cancelled.frames.map((frame) => frame.type)).toEqual([
+    EventType.TEXT_MESSAGE_END,
+    EventType.TEXT_MESSAGE_END,
+    EventType.RUN_FINISHED,
+  ])
+  expect(cancelled.frames.slice(0, 2)).toMatchObject([
+    { messageId: messageID },
+    { messageId: secondMessageID },
+  ])
+  expect([...second.state.messages.values()]).toEqual(['first', 'second'])
+  for (const frame of cancelled.frames)
+    expect(EventSchema.safeParse(frame).success).toBe(true)
+})
+
 test('content dedup identity is independent of reconstructed lifecycle frames', () => {
   const fact = {
     ...base,
@@ -139,8 +189,7 @@ test('content dedup identity is independent of reconstructed lifecycle frames', 
   )
   const resumed = mapPublicRunEvent(
     {
-      started: true,
-      terminal: false,
+      phase: 'open',
       messages: new Map([[messageID, 'prior']]),
     },
     fact,

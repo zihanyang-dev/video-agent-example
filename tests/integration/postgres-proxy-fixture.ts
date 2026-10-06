@@ -71,6 +71,6 @@ export async function postgresProxy(databaseURL: string) {
 }
 
 export async function eventually(condition: () => boolean, timeoutMs = 2000) {
-  const deadline = Date.now() + timeoutMs
-  while (!condition() && Date.now() < deadline) await Bun.sleep(10)
+  const deadline = performance.now() + timeoutMs
+  while (!condition() && performance.now() < deadline) await Bun.sleep(10)
 }

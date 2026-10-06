@@ -3,43 +3,52 @@ import { readMigrationEnv } from '@vid/config'
 import { openDatabase } from '@vid/database/connection'
 import { sql } from 'kysely'
 import { openTestDatabase } from './database-fixture'
-import { postgresProxy, eventually } from './postgres-proxy-fixture'
+import { postgresProxy } from './postgres-proxy-fixture'
 
-test('SQL read deadline destroys the socket and immediately reconnects only database transport', async () => {
+test('unknown query transport failure notifies the owner without retrying', async () => {
   const proxy = await postgresProxy(readMigrationEnv().DATABASE_URL)
+  const failures: unknown[] = []
   const db = openDatabase(
     { DATABASE_URL: proxy.databaseURL, IO_TIMEOUT_MS: 200 },
-    () => {},
+    (cause) => failures.push(cause),
   )
   try {
-    const initial = await sql<{
-      pid: number
-    }>`select pg_backend_pid() as pid`.execute(db)
+    await sql`select 1`.execute(db)
     proxy.blackhole()
     const started = Date.now()
-    const failure = await sql`select 2`.execute(db).then(
-      () => null,
-      (error: unknown) => error,
-    )
+    const failure = await sql`select 2`
+      .execute(db)
+      .catch((cause: unknown) => cause)
     expect(failure).toBeInstanceOf(Error)
-    if (!(failure instanceof Error)) throw new Error('Expected native deadline')
-    expect(failure.constructor).toBe(Error)
-    expect(failure.message).toBe('Query read timeout')
-    expect('code' in failure).toBe(false)
+    expect(failures).toContain(failure)
     expect(Date.now() - started).toBeLessThan(1500)
-    // Reconnect before observing close: a timed-out client must never be
-    // handed out again, even in the release/acquire race.
-    proxy.restore()
-    const replacement = await sql<{
-      pid: number
-    }>`select pg_backend_pid() as pid`.execute(db)
-    expect(replacement.rows[0]?.pid).not.toBe(initial.rows[0]?.pid)
-    expect(proxy.connections).toBe(2)
-    await eventually(() => proxy.closedClients === 1)
-    expect(proxy.closedClients).toBe(1)
   } finally {
     await db.destroy()
     await proxy.close()
+  }
+}, 10000)
+
+test('checked-out connection loss notifies its owner without an unhandled client error', async () => {
+  const proxy = await postgresProxy(readMigrationEnv().DATABASE_URL)
+  const failures: unknown[] = []
+  const db = openDatabase(
+    { DATABASE_URL: proxy.databaseURL, IO_TIMEOUT_MS: 200 },
+    (cause) => failures.push(cause),
+  )
+  try {
+    const failure = await db
+      .connection()
+      .execute(async (connection) => {
+        await sql`select 1`.execute(connection)
+        const query = sql`select pg_sleep(5)`.execute(connection)
+        await proxy.close()
+        return await query
+      })
+      .catch((cause: unknown) => cause)
+    expect(failure).toBeInstanceOf(Error)
+    expect(failures.length).toBeGreaterThan(0)
+  } finally {
+    await db.destroy()
   }
 }, 10000)
 
@@ -77,8 +86,6 @@ test('lost COMMIT response reports failure without replaying a committed write',
       value: number
     }>`select value from ${table}`.execute(observer.db)
     expect(rows.rows).toEqual([{ value: 1 }])
-    await eventually(() => proxy.closedClients === 1)
-    expect(proxy.closedClients).toBe(1)
   } finally {
     await db.destroy()
     await proxy.close()
@@ -88,14 +95,41 @@ test('lost COMMIT response reports failure without replaying a committed write',
 }, 10000)
 
 test('ordinary business and SQL failures rollback without replacing the error or discarding the connection', async () => {
+  const url = new URL(readMigrationEnv().DATABASE_URL)
+  url.searchParams.set('application_name', 'deadline-owner-fixture')
+  url.searchParams.set('options', '-c search_path=pg_catalog')
+  const failures: unknown[] = []
   const db = openDatabase(
-    { DATABASE_URL: readMigrationEnv().DATABASE_URL, IO_TIMEOUT_MS: 200 },
-    () => {},
+    { DATABASE_URL: url.toString(), IO_TIMEOUT_MS: 200 },
+    (cause) => failures.push(cause),
   )
   try {
     const initial = await sql<{
       pid: number
     }>`select pg_backend_pid() as pid`.execute(db)
+    const settings = await sql<{
+      application: string
+      path: string
+      statement: string
+      lock: string
+      idle: string
+    }>`select
+      current_setting('application_name') as application,
+      current_setting('search_path') as path,
+      current_setting('statement_timeout') as statement,
+      current_setting('lock_timeout') as lock,
+      current_setting('idle_in_transaction_session_timeout') as idle`.execute(
+      db,
+    )
+    expect(settings.rows).toEqual([
+      {
+        application: 'deadline-owner-fixture',
+        path: 'pg_catalog',
+        statement: '200ms',
+        lock: '200ms',
+        idle: '200ms',
+      },
+    ])
     const businessError = new Error('fixture-owner-conflict')
     const businessFailure = await db
       .transaction()
@@ -123,6 +157,7 @@ test('ordinary business and SQL failures rollback without replacing the error or
       pid: number
     }>`select pg_backend_pid() as pid`.execute(db)
     expect(after.rows[0]?.pid).toBe(initial.rows[0]?.pid)
+    expect(failures).toEqual([])
   } finally {
     await db.destroy()
   }

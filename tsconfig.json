@@ -1,7 +1,6 @@
 {
   "compilerOptions": {
     "target": "ESNext",
-    "jsx": "react-jsx",
     "module": "Preserve",
     "moduleResolution": "Bundler",
     "lib": ["ESNext", "DOM", "DOM.Iterable"],
@@ -21,8 +20,7 @@
     "noUnusedParameters": true,
     "skipLibCheck": true,
     "paths": {
-      "@vid/config": ["./packages/config/src/index.ts"],
-      "@vid/config/*": ["./packages/config/src/*"],
+      "@vid/config": ["./packages/config/src/env.ts"],
       "@vid/contract/http": ["./packages/contract/src/http.ts"],
       "@vid/contract/execution": ["./packages/contract/src/execution.ts"],
       "@vid/database/types": ["./packages/database/generated/db.ts"],
@@ -31,17 +29,10 @@
   },
   "include": [
     "apps/**/*.ts",
-    "apps/**/*.tsx",
     "packages/**/*.ts",
     "tests/**/*.ts",
     "scripts/**/*.ts",
     "deploy/**/*.ts"
   ],
-  "exclude": [
-    "node_modules",
-    "dist",
-    "coverage",
-    "**/generated/**",
-    "**/vendor/**"
-  ]
+  "exclude": ["node_modules", "dist", "coverage", "**/generated/**"]
 }

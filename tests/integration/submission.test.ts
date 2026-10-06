@@ -342,11 +342,22 @@ for (const header of [
         .deleteFrom('product.command_outbox')
         .where('message_id', '=', other.messageID)
         .execute()
-    await db
+    const mutation = db
       .updateTable('product.command_outbox')
       .set({ [header]: value })
       .where('command_id', '=', accepted.commandID)
-      .execute()
+    if (header === 'thread_id' || header === 'message_id') {
+      const before = await savedAcceptance(input.threadID)
+      const rejected = await mutation.execute().catch((cause: unknown) => cause)
+      expect(rejected).toMatchObject({
+        code: '23503',
+        constraint: 'command_outbox_message_identity',
+      })
+      expect(await savedAcceptance(input.threadID)).toEqual(before)
+      expect(await submitMessage(db, input)).toEqual(accepted)
+      return
+    }
+    await mutation.execute()
     const before = await savedAcceptance(input.threadID)
     const otherBefore = await savedAcceptance(other.threadID)
     expect(await submitMessage(db, input)).toEqual({ kind: 'conflict' })
@@ -477,7 +488,7 @@ test('historical asset command keys remain replayable after current asset rehome
 })
 
 for (const foreignScope of [false, true]) {
-  test(`replay rejects coherent wire/indexed ${foreignScope ? 'foreign' : 'other owned'} thread headers attached to the original message`, async () => {
+  test(`cross-thread ${foreignScope ? 'foreign' : 'other owned'} indexed transfer is refused; wire-only corruption still conflicts`, async () => {
     const input = await inputForThread()
     const first = await submitMessage(db, input)
     if (first.kind !== 'accepted') throw new Error('Expected acceptance')
@@ -493,10 +504,21 @@ for (const foreignScope of [false, true]) {
     const command = startCommandSchema.parse(
       (await savedAcceptance(input.threadID)).commands[0]?.command,
     )
+    const original = await savedAcceptance(input.threadID)
+    const rejected = await db
+      .updateTable('product.command_outbox')
+      .set({ thread_id: other.threadID })
+      .where('command_id', '=', first.commandID)
+      .execute()
+      .catch((cause: unknown) => cause)
+    expect(rejected).toMatchObject({
+      code: '23503',
+      constraint: 'command_outbox_message_identity',
+    })
+    expect(await savedAcceptance(input.threadID)).toEqual(original)
     await db
       .updateTable('product.command_outbox')
       .set({
-        thread_id: other.threadID,
         command: sql`${JSON.stringify({ ...command, threadID: other.threadID })}::jsonb`,
       })
       .where('command_id', '=', first.commandID)

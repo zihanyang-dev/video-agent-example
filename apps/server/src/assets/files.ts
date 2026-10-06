@@ -1,4 +1,4 @@
-import { publicFileNameSchema } from '@vid/contract/http'
+import { publicFileNameSchema, type UploadMimeType } from '@vid/contract/http'
 import {
   ASSET_MAX_OUTPUT_FILES,
   assetReferenceSchema,
@@ -13,30 +13,27 @@ export function validateFile(
   bytes: Uint8Array,
 ): boolean {
   if (!publicFileNameSchema.safeParse(name).success) return false
-  return signatureMatches(mimeType, bytes)
-}
-// The actual byte verifiers also define the documented accepted media types.
-export const fileSignatures: Readonly<
-  Record<string, (bytes: Uint8Array) => boolean>
-> = {
-  'text/plain': (bytes) => validText(bytes, false),
-  'application/json': (bytes) => validText(bytes, true),
-  'image/png': (bytes) => prefix(bytes, [137, 80, 78, 71, 13, 10, 26, 10]),
-  'image/jpeg': (bytes) =>
-    prefix(bytes, [255, 216, 255]) &&
-    bytes[bytes.length - 2] === 255 &&
-    bytes[bytes.length - 1] === 217,
-  'image/gif': (bytes) =>
-    ascii(bytes, 0, 'GIF87a') || ascii(bytes, 0, 'GIF89a'),
-  'image/webp': (bytes) => ascii(bytes, 0, 'RIFF') && ascii(bytes, 8, 'WEBP'),
-  'audio/wav': (bytes) => ascii(bytes, 0, 'RIFF') && ascii(bytes, 8, 'WAVE'),
-  'video/mp4': (bytes) => bytes.length >= 12 && ascii(bytes, 4, 'ftyp'),
-  'application/pdf': (bytes) => ascii(bytes, 0, '%PDF-'),
-}
-function signatureMatches(mimeType: string, bytes: Uint8Array): boolean {
+  if (!Object.hasOwn(fileSignatures, mimeType)) return false
   const verify = fileSignatures[mimeType]
   return verify === undefined ? false : verify(bytes)
 }
+// The actual byte verifiers also define the documented accepted media types.
+const fileSignatures: Readonly<Record<string, (bytes: Uint8Array) => boolean>> =
+  {
+    'text/plain': (bytes) => validText(bytes, false),
+    'application/json': (bytes) => validText(bytes, true),
+    'image/png': (bytes) => prefix(bytes, [137, 80, 78, 71, 13, 10, 26, 10]),
+    'image/jpeg': (bytes) =>
+      prefix(bytes, [255, 216, 255]) &&
+      bytes[bytes.length - 2] === 255 &&
+      bytes[bytes.length - 1] === 217,
+    'image/gif': (bytes) =>
+      ascii(bytes, 0, 'GIF87a') || ascii(bytes, 0, 'GIF89a'),
+    'image/webp': (bytes) => ascii(bytes, 0, 'RIFF') && ascii(bytes, 8, 'WEBP'),
+    'audio/wav': (bytes) => ascii(bytes, 0, 'RIFF') && ascii(bytes, 8, 'WAVE'),
+    'video/mp4': (bytes) => bytes.length >= 12 && ascii(bytes, 4, 'ftyp'),
+    'application/pdf': (bytes) => ascii(bytes, 0, '%PDF-'),
+  } satisfies Record<UploadMimeType, (bytes: Uint8Array) => boolean>
 function prefix(bytes: Uint8Array, values: number[]) {
   return values.every((value, index) => bytes[index] === value)
 }
@@ -46,7 +43,7 @@ function ascii(bytes: Uint8Array, offset: number, value: string) {
     .every((char, index) => bytes[offset + index] === char.charCodeAt(0))
 }
 
-export type FileFacts = Readonly<{
+type FileFacts = Readonly<{
   name: string
   mimeType: string
   byteLength: number
@@ -88,7 +85,6 @@ export function validGeneratedAssets(
   )
   const validFiles = assets.every((file) => {
     if (!assetReferenceSchema.safeParse(file).success) return false
-    if (!publicFileNameSchema.safeParse(file.name).success) return false
     const key = runKey.exec(file.objectKey)
     if (!key || key[2] !== file.assetID) return false
     // Legacy GET-only keys retain the old SQL per-file limit. This is metadata

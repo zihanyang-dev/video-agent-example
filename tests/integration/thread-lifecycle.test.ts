@@ -2,6 +2,8 @@ import { afterAll, expect, test } from 'bun:test'
 import { sql } from 'kysely'
 import { assetBudgetDefaults } from '@vid/config'
 import { createHTTP } from '../../apps/server/src/http'
+import { publishUpload } from '../../apps/server/src/assets/uploads'
+import { sha256 } from '@vid/object-storage'
 import { acceptExecutionEvent } from '../../apps/server/src/db/execution-events'
 import { archiveThread } from '../../apps/server/src/db/cancellations'
 import { acceptMessageIntent } from '../../apps/server/src/db/submissions'
@@ -10,12 +12,30 @@ import {
   snapshotOwnedMessages,
 } from '../../apps/server/src/db/conversations'
 import { assignLegacyThreads } from '../../apps/server/src/db/legacy-thread-ownership'
-import { openTestDatabase } from './database-fixture'
+import { openTestDatabase, settleTestCleanup } from './database-fixture'
 import { signedTestIdentity } from './authentication-fixture'
 
 const { db, close } = openTestDatabase(8)
-const login = await signedTestIdentity(db)
-const foreign = await signedTestIdentity(db)
+const login = await signedTestIdentity(db).catch(async (cause: unknown) => {
+  try {
+    await close()
+  } catch (cleanup) {
+    throw new AggregateError([cause, cleanup], 'Test identity setup failed', {
+      cause,
+    })
+  }
+  throw cause
+})
+const foreign = await signedTestIdentity(db).catch(async (cause: unknown) => {
+  try {
+    await close()
+  } catch (cleanup) {
+    throw new AggregateError([cause, cleanup], 'Test identity setup failed', {
+      cause,
+    })
+  }
+  throw cause
+})
 const shutdown = new AbortController()
 const route = createHTTP(db, {
   authentication: login.authentication,
@@ -27,20 +47,26 @@ const route = createHTTP(db, {
 const threadIDs: string[] = []
 afterAll(async () => {
   shutdown.abort()
-  for (const table of [
-    'product.execution_events',
-    'product.command_outbox',
-    'product.messages',
-    'product.threads',
-  ] as const) {
-    if (threadIDs.length)
-      await db.deleteFrom(table).where('thread_id', 'in', threadIDs).execute()
-  }
-  await db
-    .deleteFrom('auth.user')
-    .where('id', 'in', [login.user.id, foreign.user.id])
-    .execute()
-  await close()
+  await settleTestCleanup([
+    ...(
+      [
+        'product.execution_events',
+        'product.command_outbox',
+        'product.messages',
+        'product.assets',
+        'product.threads',
+      ] as const
+    ).map((table) => async () => {
+      if (threadIDs.length)
+        await db.deleteFrom(table).where('thread_id', 'in', threadIDs).execute()
+    }),
+    () =>
+      db
+        .deleteFrom('auth.user')
+        .where('id', 'in', [login.user.id, foreign.user.id])
+        .execute(),
+    close,
+  ])
 })
 function request(
   path: string,
@@ -163,6 +189,73 @@ test('archive requests stopping and keeps durable accepted work active until a r
   expect((await snapshotOwnedMessages(db, query))?.activeRuns).toEqual([])
 })
 
+test('successful upload and ready replay need no storage GET; uncertain PUT still reconciles bytes', async () => {
+  const query = await ownedThread()
+  const bytes = new TextEncoder().encode('immutable upload')
+  const upload = {
+    assetID: crypto.randomUUID(),
+    name: 'file.txt',
+    mimeType: 'text/plain',
+    bytes,
+  }
+  const stored = new Map<string, Uint8Array>()
+  const io = {
+    signal: shutdown.signal,
+    timeoutMs: 1000,
+    maxAssetBytes: 1024,
+    objects: {
+      async put(key: string, value: Uint8Array) {
+        stored.set(key, value)
+        return { byteLength: value.length, sha256: sha256(value) }
+      },
+      async read(): Promise<Uint8Array> {
+        throw new Error('GET unavailable')
+      },
+      close() {},
+    },
+  }
+  expect((await publishUpload(db, query, upload, io))?.created).toBe(true)
+  expect((await publishUpload(db, query, upload, io))?.created).toBe(false)
+  await Promise.resolve(
+    expect(
+      publishUpload(db, query, { ...upload, bytes: new Uint8Array([65]) }, io),
+    ).rejects.toThrow('Thread conflict'),
+  )
+  const uncertain = { ...upload, assetID: crypto.randomUUID() }
+  const recoveryIO = {
+    ...io,
+    objects: {
+      ...io.objects,
+      async put(key: string, value: Uint8Array): Promise<never> {
+        stored.set(key, value)
+        throw new Error('Lost PUT receipt')
+      },
+      async read(key: string) {
+        const value = stored.get(key)
+        if (!value) throw new Error('Missing object')
+        return value
+      },
+    },
+  }
+  expect((await publishUpload(db, query, uncertain, recoveryIO))?.created).toBe(
+    true,
+  )
+  expect(
+    await publishUpload(
+      db,
+      query,
+      { ...upload, assetID: crypto.randomUUID() },
+      {
+        ...recoveryIO,
+        objects: {
+          ...recoveryIO.objects,
+          read: async () => new Uint8Array([65]),
+        },
+      },
+    ),
+  ).toBeNull()
+})
+
 async function threadBarrier(threadID: string) {
   let release!: () => void
   let entered!: () => void
@@ -277,9 +370,34 @@ test('legacy assignment rejects unknown users atomically without changing IDs or
   const submission = intent(query)
   await acceptMessageIntent(db, submission)
   await restoreUnmappedLegacyFixture(query.threadID, legacyOwnerID)
+  const other = await ownedThread()
+  const otherLegacyOwner = crypto.randomUUID()
+  await restoreUnmappedLegacyFixture(other.threadID, otherLegacyOwner)
   try {
     expect((await request('/session')).status).toBe(200)
-    expect((await request('/threads')).status).toBe(503)
+    expect((await request('/threads')).status).toBe(200)
+    expect((await request(`/threads/${query.threadID}`)).status).toBe(404)
+    expect((await request(`/threads/${query.threadID}/messages`)).status).toBe(
+      404,
+    )
+    const active = await ownedThread()
+    expect(
+      (
+        await request(
+          `/threads/${active.threadID}`,
+          { title: 'Available' },
+          'PATCH',
+        )
+      ).status,
+    ).toBe(200)
+    expect(
+      (
+        await request(`/threads/${active.threadID}/messages`, {
+          messageID: crypto.randomUUID(),
+          text: 'Still available',
+        })
+      ).status,
+    ).toBe(202)
     const rejected = await assignLegacyThreads(db, [
       { legacyOwnerID, userID: 'not-a-library-user' },
     ]).then(
@@ -296,6 +414,23 @@ test('legacy assignment rejects unknown users atomically without changing IDs or
           .executeTakeFirstOrThrow()
       ).owner_id,
     ).toBeNull()
+    const extraOwner = await assignLegacyThreads(db, [
+      { legacyOwnerID, userID: login.user.id },
+      { legacyOwnerID: 'not-a-retained-legacy-owner', userID: login.user.id },
+    ]).then(
+      () => null,
+      (cause: unknown) => cause,
+    )
+    expect(String(extraOwner)).toContain('unknown legacy owner')
+    expect(
+      (
+        await db
+          .selectFrom('product.threads')
+          .select('owner_id')
+          .where('thread_id', '=', query.threadID)
+          .executeTakeFirstOrThrow()
+      ).owner_id,
+    ).toBeNull()
     expect(
       await assignLegacyThreads(db, [{ legacyOwnerID, userID: login.user.id }]),
     ).toEqual({ assigned: 1 })
@@ -303,6 +438,16 @@ test('legacy assignment rejects unknown users atomically without changing IDs or
       await assignLegacyThreads(db, [{ legacyOwnerID, userID: login.user.id }]),
     ).toEqual({ assigned: 0 })
     expect((await request(`/threads/${query.threadID}`)).status).toBe(200)
+    expect((await request(`/threads/${other.threadID}`)).status).toBe(404)
+    expect(
+      (
+        await db
+          .selectFrom('product.threads')
+          .select('owner_id')
+          .where('thread_id', '=', other.threadID)
+          .executeTakeFirstOrThrow()
+      ).owner_id,
+    ).toBeNull()
     expect(
       (await snapshotOwnedMessages(db, query))?.messages[0]?.messageID,
     ).toBe(submission.messageID)
@@ -313,7 +458,7 @@ test('legacy assignment rejects unknown users atomically without changing IDs or
     await db
       .updateTable('product.threads')
       .set({ owner_id: login.user.id })
-      .where('thread_id', '=', query.threadID)
+      .where('thread_id', 'in', [query.threadID, other.threadID])
       .execute()
   }
 })

@@ -1,4 +1,4 @@
-import { expect, test } from 'bun:test'
+import { expect, expectTypeOf, test } from 'bun:test'
 import Ajv from 'ajv/dist/2020'
 import addFormats from 'ajv-formats'
 import {
@@ -8,9 +8,13 @@ import {
   publicAssetSchema,
   messageSubmissionSchema,
   threadCreationSchema,
+  threadUpdateSchema,
   threadResponseSchema,
   messagesResponseSchema,
   sessionResponseSchema,
+  type PublicMessage,
+  type PublicAsset,
+  type MessagesResponse,
 } from './http'
 
 const id = 'A4C9C419-1C7F-4F87-863D-4261C6089985'
@@ -22,6 +26,48 @@ test('public creation canonicalizes retry identity and trims the thread title', 
     threadID: id.toLowerCase(),
     title: 'Film',
   })
+})
+
+test.each(['hello\u0000world', '\u0000', '\ud800', '\udc00'])(
+  'public input rejects unrepresentable persisted text %j',
+  (text) => {
+    const ajv = new Ajv({ strict: false })
+    addFormats(ajv)
+    const schemas = publicJSONSchemas()
+    for (const [schema, document, input] of [
+      [
+        messageSubmissionSchema,
+        schemas.MessageSubmissionInput!,
+        { messageID: id, text },
+      ],
+      [
+        threadCreationSchema,
+        schemas.ThreadCreationInput!,
+        { threadID: id, title: text },
+      ],
+      [threadUpdateSchema, schemas.ThreadUpdateInput!, { title: text }],
+    ] as const) {
+      expect(schema.safeParse(input).success).toBe(false)
+      expect(ajv.compile(document)(input)).toBe(false)
+    }
+  },
+)
+
+test('public persisted text preserves valid Unicode without lossy replacement', () => {
+  const text = '  Film 🎬 电影 𝄞\n  '
+  expect(messageSubmissionSchema.parse({ messageID: id, text }).text).toBe(text)
+  expect(threadCreationSchema.parse({ threadID: id, title: text }).title).toBe(
+    text.trim(),
+  )
+  const ajv = new Ajv({ strict: false })
+  addFormats(ajv)
+  const schemas = publicJSONSchemas()
+  expect(
+    ajv.compile(schemas.MessageSubmissionInput!)({ messageID: id, text }),
+  ).toBe(true)
+  expect(
+    ajv.compile(schemas.ThreadCreationInput!)({ threadID: id, title: text }),
+  ).toBe(true)
 })
 
 test('public requests cannot supply an authenticated actor or ownership', () => {
@@ -119,16 +165,22 @@ test('public file DTOs reject private allocation authority and accepted results 
   expect(
     cancellationAcceptedSchema.parse({ commandID: id, runID: id }).runID,
   ).toBe(id.toLowerCase())
-  expect(
-    publicAssetSchema.safeParse({
-      assetID: id,
-      name: 'file.txt',
-      mimeType: 'text/plain',
-      byteLength: 1,
-      createdAt: '2026-10-04T00:00:00.000Z',
-      objectKey: 'private',
-    }).success,
-  ).toBe(false)
+  const asset = {
+    assetID: id,
+    source: 'upload',
+    name: 'file.txt',
+    mimeType: 'text/plain',
+    byteLength: 1,
+    createdAt: '2026-10-04T00:00:00.000Z',
+  }
+  expect(publicAssetSchema.safeParse(asset).success).toBe(true)
+  for (const privateField of [
+    { objectKey: 'private' },
+    { sha256: 'a'.repeat(64) },
+  ])
+    expect(
+      publicAssetSchema.safeParse({ ...asset, ...privateField }).success,
+    ).toBe(false)
   expect(
     messageSubmissionSchema.safeParse({
       messageID: id,
@@ -136,6 +188,22 @@ test('public file DTOs reject private allocation authority and accepted results 
       assets: [{ objectKey: 'private', sha256: 'fake', mimeType: 'image/png' }],
     }).success,
   ).toBe(false)
+})
+
+test('native DTOs preserve optional snapshots, readonly sources and defaulted output', () => {
+  expectTypeOf<PublicMessage['sources']>().toEqualTypeOf<
+    ReadonlyArray<Readonly<{ title: string; url: string }>> | undefined
+  >()
+  expectTypeOf<PublicMessage['assets']>().toEqualTypeOf<
+    PublicAsset[] | undefined
+  >()
+  expectTypeOf<MessagesResponse['messages']>().toEqualTypeOf<PublicMessage[]>()
+  const submission = messageSubmissionSchema.parse({
+    messageID: id,
+    text: 'hello',
+  })
+  expectTypeOf(submission.assetIDs).toEqualTypeOf<string[]>()
+  expect(submission.assetIDs).toEqual([])
 })
 
 test('native JSON Schema input accepts trim-aware titles and preserves default direction', () => {
@@ -226,4 +294,59 @@ test('message snapshots expose only public-safe failure reasons with accepted me
     expect(messagesResponseSchema.safeParse(unsafe).success).toBe(false)
     expect(validate(unsafe)).toBe(false)
   }
+})
+
+test('public assets discriminate upload from original generated message and run identity', () => {
+  const base = {
+    assetID: id,
+    name: 'clip.bin',
+    mimeType: 'application/octet-stream',
+    byteLength: 0,
+    createdAt: '2026-10-04T00:00:00.000Z',
+  }
+  const ajv = new Ajv({ strict: false })
+  addFormats(ajv)
+  const validate = ajv.compile(publicJSONSchemas().PublicAsset!)
+  for (const [extra, valid] of [
+    [{ source: 'upload' }, true],
+    [{ source: 'generated', messageID: id, runID: id }, true],
+    [{ source: 'generated' }, false],
+    [{ source: 'generated', messageID: id }, false],
+    [{ source: 'generated', runID: id }, false],
+    [{ source: 'upload', messageID: id, runID: id }, false],
+    [{ source: 'upload', messageID: id }, false],
+    [{ source: 'upload', runID: id }, false],
+  ] as const) {
+    expect(publicAssetSchema.safeParse({ ...base, ...extra }).success).toBe(
+      valid,
+    )
+    expect(validate({ ...base, ...extra })).toBe(valid)
+  }
+})
+
+test('only actual public request boundaries export input mirrors', () => {
+  expect(
+    Object.keys(publicJSONSchemas())
+      .filter((name) => name.endsWith('Input'))
+      .sort(),
+  ).toEqual([
+    'EmptyRequestInput',
+    'MessageSubmissionInput',
+    'RunCancellationInput',
+    'ThreadCreationInput',
+    'ThreadUpdateInput',
+    'UUIDInput',
+  ])
+})
+
+test('public asset metadata requires an explicit source independently of private-field rejection', () => {
+  expect(
+    publicAssetSchema.safeParse({
+      assetID: id,
+      name: 'file.txt',
+      mimeType: 'text/plain',
+      byteLength: 1,
+      createdAt: '2026-10-04T00:00:00.000Z',
+    }).success,
+  ).toBe(false)
 })

@@ -9,19 +9,21 @@ import type {
 
 function controlledHarness() {
   const release = Promise.withResolvers<void>()
+  const saturated = Promise.withResolvers<void>()
   let active = 0
   let peak = 0
   const harness: AgentHarness = {
     async turn({ signal }) {
       active += 1
       peak = Math.max(peak, active)
+      if (active === 2) saturated.resolve()
       await release.promise
       active -= 1
       signal.throwIfAborted()
       return { text: 'answer', history: [] }
     },
   }
-  return { harness, release, peak: () => peak }
+  return { harness, release, saturated, peak: () => peak }
 }
 
 function recordingWrites() {
@@ -69,21 +71,17 @@ function queuedClaims() {
 function unusedTools(): SandboxSessionPort {
   return {
     nativeRef: { provider: 'e2b', id: 'fixture-native' },
-    renewTimeout: async () => {},
-    files: {
-      readBytes: async () => new Uint8Array(),
-      writeBytes: async () => {},
+
+    readBytes: async () => new Uint8Array(),
+    writeBytes: async () => {},
+    execute: async () => {
+      throw new Error('Unexpected execute')
     },
-    tools: {
-      execute: async () => {
-        throw new Error('Unexpected execute')
-      },
-      read: async () => {
-        throw new Error('Unexpected read')
-      },
-      write: async () => {
-        throw new Error('Unexpected write')
-      },
+    read: async () => {
+      throw new Error('Unexpected read')
+    },
+    write: async () => {
+      throw new Error('Unexpected write')
     },
     close: async () => {},
   }
@@ -91,7 +89,7 @@ function unusedTools(): SandboxSessionPort {
 
 function fixture() {
   const controller = new AbortController()
-  const { harness, release, peak } = controlledHarness()
+  const { harness, release, saturated, peak } = controlledHarness()
   const { writes, completed, interrupted } = recordingWrites()
   const { claim, accepted } = queuedClaims()
   const deps = {
@@ -110,6 +108,7 @@ function fixture() {
   return {
     controller,
     release,
+    saturated,
     deps,
     options,
     accepted,
@@ -132,7 +131,7 @@ test('worker bounds claims and waits for owned runs during shutdown', async () =
     },
   )
   try {
-    await Bun.sleep(20)
+    await f.saturated.promise
     expect(f.accepted).toEqual(['run-0', 'run-1'])
     expect(f.peak()).toBe(2)
     f.controller.abort()
@@ -151,17 +150,21 @@ test('a claim failure aborts and settles active runs before rejecting the worker
   const f = fixture()
   const failure = new Error('Database unavailable')
   const claim = f.deps.claim
+  const failed = Promise.withResolvers<void>()
   let attempts = 0
   f.deps.claim = async (options) => {
     attempts += 1
-    if (attempts === 3) throw failure
+    if (attempts === 3) {
+      failed.resolve()
+      throw failure
+    }
     return await claim(options)
   }
   f.options.concurrency = 3
   const worker = runWorker(f.deps, f.options)
   const observed = worker.catch((error: unknown) => error)
   try {
-    await Bun.sleep(20)
+    await failed.promise
   } finally {
     f.release.resolve()
   }
@@ -173,14 +176,16 @@ test('a claim failure aborts and settles active runs before rejecting the worker
 test('a claim returning after shutdown is settled without inference', async () => {
   const f = fixture()
   const gate = Promise.withResolvers<void>()
+  const claiming = Promise.withResolvers<void>()
   const claim = f.deps.claim
   f.deps.claim = async (options) => {
+    claiming.resolve()
     await gate.promise
     return await claim(options)
   }
   const worker = runWorker(f.deps, f.options)
   try {
-    await Bun.sleep(20)
+    await claiming.promise
     f.controller.abort()
   } finally {
     gate.resolve()

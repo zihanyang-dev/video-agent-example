@@ -15,6 +15,7 @@ type WorkerOptions = Readonly<{
   concurrency: number
   leaseMs: number
   pollMs: number
+  runTimeoutMs?: number
   signal: AbortSignal
 }>
 
@@ -34,6 +35,9 @@ export async function runWorker(
         leaseMs: options.leaseMs,
         pollMs: options.pollMs,
         signal,
+        ...(options.runTimeoutMs === undefined
+          ? {}
+          : { runTimeoutMs: options.runTimeoutMs }),
       })
     } catch (error) {
       failures.push(error)
@@ -43,28 +47,36 @@ export async function runWorker(
     }
   }
 
-  while (!signal.aborted) {
-    if (active.size >= options.concurrency) {
-      await waitForPoll(options.pollMs, signal)
-      continue
+  async function schedule() {
+    while (!signal.aborted) {
+      if (active.size >= options.concurrency) {
+        await waitForPoll(options.pollMs, signal)
+        continue
+      }
+      let lease: ExecutionLease | null
+      try {
+        lease = await deps.claim({
+          ownerID: options.ownerID,
+          leaseMs: options.leaseMs,
+        })
+      } catch (error) {
+        failures.push(error)
+        break
+      }
+      if (lease === null) {
+        await waitForPoll(options.pollMs, signal)
+        continue
+      }
+      // A claim can finish after shutdown. Supervision still settles that
+      // capability as interrupted without starting new inference.
+      active.set(lease.runID, superviseRun(lease))
     }
-    let lease: ExecutionLease | null
-    try {
-      lease = await deps.claim({
-        ownerID: options.ownerID,
-        leaseMs: options.leaseMs,
-      })
-    } catch (error) {
-      failures.push(error)
-      break
-    }
-    if (lease === null) {
-      await waitForPoll(options.pollMs, signal)
-      continue
-    }
-    // A claim can finish after shutdown. Supervision still settles that
-    // capability as interrupted without starting new inference.
-    active.set(lease.runID, superviseRun(lease))
+  }
+
+  try {
+    await schedule()
+  } catch (error) {
+    failures.push(error)
   }
   stop.abort()
   await Promise.all(active.values())

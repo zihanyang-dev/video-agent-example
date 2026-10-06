@@ -116,7 +116,21 @@ function validateAcyclic(byID: Map<string, SessionEntry>): void {
   }
 }
 
+export class HistoryLimitError extends Error {}
+
+// Logical admission: serialization allocates; this is not a transport/RSS cap.
+export function admitPiHistory(history: unknown): void {
+  const serialized = JSON.stringify(history)
+  if (
+    serialized !== undefined &&
+    Buffer.byteLength(serialized) > 4 * 1024 * 1024
+  ) {
+    throw new HistoryLimitError('Private history size limit exceeded')
+  }
+}
+
 export function restorePiHistory(history: unknown): SessionManager {
+  admitPiHistory(history)
   // SQL's empty-array default is a fresh-session sentinel, not a session tree.
   if (
     history === null ||

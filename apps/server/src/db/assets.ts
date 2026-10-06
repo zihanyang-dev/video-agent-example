@@ -9,18 +9,25 @@ import { sameFile } from '../assets/files'
 
 type AssetRow = Selectable<ProductAssets>
 export function publicAsset(row: AssetRow): PublicAsset {
-  return {
+  const asset = {
     assetID: row.asset_id,
-    source: row.source === 'upload' ? 'upload' : 'generated',
-    ...(row.message_id === null ? {} : { messageID: row.message_id }),
-    ...(row.run_id === null ? {} : { runID: row.run_id }),
     name: row.name,
     mimeType: row.mime_type,
     byteLength: row.byte_length,
     createdAt: row.created_at.toISOString(),
   }
+  // SQL's source check requires both identities for generated assets and
+  // forbids both for uploads. Preserve that union; do not revalidate DB rows.
+  return row.source === 'upload'
+    ? { ...asset, source: 'upload' }
+    : {
+        ...asset,
+        source: 'generated',
+        messageID: row.message_id!,
+        runID: row.run_id!,
+      }
 }
-export function allocatedAsset(row: AssetRow): AssetReference {
+function allocatedAsset(row: AssetRow): AssetReference {
   return {
     assetID: row.asset_id,
     name: row.name,
@@ -78,7 +85,7 @@ export async function completeAsset(
   db: Kysely<DB>,
   query: OwnedThread,
   assetID: string,
-  confirmedObjectKey?: string,
+  confirmedObjectKey: string,
 ) {
   return await db.transaction().execute(async (tx) => {
     await lockThread(tx, query, 'write')
@@ -98,13 +105,13 @@ export async function completeAsset(
       .updateTable('product.assets')
       .set({
         ready_at: sql<Date>`clock_timestamp()`,
-        object_key: confirmedObjectKey ?? reserved.object_key,
+        object_key: confirmedObjectKey,
       })
       .where('asset_id', '=', assetID)
       .where('thread_id', '=', query.threadID)
       .returningAll()
       .executeTakeFirstOrThrow()
-    return { asset: publicAsset(row), created: reserved.ready_at === null }
+    return { asset: publicAsset(row), created: true }
   })
 }
 export async function ownedAsset(

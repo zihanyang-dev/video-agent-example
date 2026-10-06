@@ -3,12 +3,12 @@ import { EventEncoder } from '@ag-ui/encoder'
 import type { DB } from '@vid/database/types'
 import type { Kysely } from 'kysely'
 import { readPublicEvents } from '../db/execution-events'
-import { mapPublicRunEvent, type PublicRunState } from './public-run-events'
-
-export type EventSubscription = Readonly<{ close: () => Promise<void> }>
-export type RegisterSubscription = (
-  subscription: EventSubscription,
-) => () => void
+import {
+  foldPublicRunEvent,
+  mapPublicRunEvent,
+  projectPublicRunEvent,
+  type PublicRunState,
+} from './public-run-events'
 
 type Observation = Readonly<{
   ownerID: string
@@ -18,8 +18,8 @@ type Observation = Readonly<{
   pollMs: number
   requestSignal: AbortSignal
   processSignal: AbortSignal
-  registerSubscription?: RegisterSubscription
   authorize: () => Promise<boolean>
+  ownRead?: (pending: Promise<void>) => void
 }>
 type Fact = NonNullable<Awaited<ReturnType<typeof readPublicEvents>>>[number]
 
@@ -32,11 +32,10 @@ export async function observeEvents(
 }
 
 // A Response settles before its asynchronous pulls do. This instance owns both
-// the stream and outstanding DB work, and is registered before reconstruction.
+// the stream and outstanding DB work. Native HTTP cancellation closes the stream.
 class PublicEventSubscription {
   private events: PublicRunState = {
-    started: false,
-    terminal: false,
+    phase: 'unopened',
     messages: new Map(),
   }
   private readonly abort = new AbortController()
@@ -44,11 +43,19 @@ class PublicEventSubscription {
   private controller: ReadableStreamDefaultController<Uint8Array> | undefined
   private pending: Promise<unknown> = Promise.resolve()
   private closed = false
-  private unregister: (() => void) | undefined
   private cursor: string
   private readonly openedMessages = new Set<string>()
   private initialFrames: Event[] = []
   private readonly utf8 = new TextEncoder()
+  private stage: 'authority' | 'read' | 'fold' = 'authority'
+
+  private diagnose(cause: unknown) {
+    console.error('Public event read failed', {
+      stage: this.stage,
+      rejectedType: typeof cause,
+      isError: cause instanceof Error,
+    })
+  }
 
   constructor(
     private readonly db: Kysely<DB>,
@@ -58,7 +65,6 @@ class PublicEventSubscription {
   }
 
   async open(): Promise<Response> {
-    this.unregister = this.query.registerSubscription?.(this)
     this.query.requestSignal.addEventListener('abort', this.stop, {
       once: true,
     })
@@ -70,6 +76,7 @@ class PublicEventSubscription {
     try {
       await rebuilding
     } catch (cause) {
+      this.diagnose(cause)
       await this.close()
       throw cause
     }
@@ -87,6 +94,7 @@ class PublicEventSubscription {
         pull: (controller) => {
           const pending = this.readNext(controller)
           this.pending = pending
+          this.query.ownRead?.(pending)
           return pending
         },
         cancel: () => {
@@ -106,8 +114,19 @@ class PublicEventSubscription {
   }
 
   private async reconstructObservation() {
-    const rebuilt = await reconstruct(this.db, this.query, this.events)
-    this.events = { ...rebuilt.state, started: true }
+    const rebuilt = await reconstruct(
+      this.db,
+      this.query,
+      this.events,
+      (stage) => {
+        this.stage = stage
+      },
+    )
+    this.stage = 'fold'
+    this.events =
+      rebuilt.state.phase === 'unopened'
+        ? { ...rebuilt.state, phase: 'open' }
+        : rebuilt.state
     this.initialFrames = [
       {
         type: EventType.RUN_STARTED,
@@ -121,7 +140,7 @@ class PublicEventSubscription {
       // the durable terminal's actual cursor, never the requested offset.
       this.cursor = rebuilt.terminalFact.cursor
       this.initialFrames.push(
-        ...mapPublicRunEvent(this.events, rebuilt.terminalFact.event).frames,
+        ...projectPublicRunEvent(this.events, rebuilt.terminalFact.event),
       )
     }
   }
@@ -134,8 +153,6 @@ class PublicEventSubscription {
       // Read failures have already been reported by open/readNext. Closing owns
       // settlement, not a second diagnostic or a replacement recovery outcome.
     })
-    this.unregister?.()
-    this.unregister = undefined
   }
 
   private stop = () => {
@@ -147,31 +164,22 @@ class PublicEventSubscription {
     }
     this.controller?.close()
     this.controller = undefined
-    void this.pending.then(this.releaseIfClosed, this.releaseIfClosed)
-  }
-
-  private releaseIfClosed = () => {
-    if (!this.closed) return
-    this.unregister?.()
-    this.unregister = undefined
   }
 
   private async readNext(
     controller: ReadableStreamDefaultController<Uint8Array>,
   ) {
+    if (this.closed) return
     try {
       const chunk = await this.readNextFact()
       if (this.closed) return
       if (chunk) controller.enqueue(chunk)
-      if (!chunk || this.events.terminal) this.stop()
+      if (!chunk || this.events.phase === 'terminal') this.stop()
     } catch (cause) {
       if (this.closed) return
       // Keep diagnostics classified: the query's private parameters and driver
       // error text are not public stream prose or log fields.
-      console.error('Public event read failed', {
-        classification: 'database-read',
-        cause: cause instanceof Error ? cause.name : typeof cause,
-      })
+      this.diagnose(cause)
       controller.error(
         new Error('Event stream unavailable. Reconnect to try again.'),
       )
@@ -208,26 +216,33 @@ class PublicEventSubscription {
   }
 
   private async readInitialFrames(): Promise<Uint8Array | null> {
+    this.stage = 'authority'
     if (!(await this.query.authorize())) return null
+    this.stage = 'fold'
     const frames = this.lifecycleFrames(this.initialFrames)
     this.initialFrames = []
-    const encoded = this.events.terminal
-      ? encodeFact(this.cursor, frames, this.encoder)
-      : frames.map((frame) => this.encoder.encodeSSE(frame)).join('')
+    const encoded =
+      this.events.phase === 'terminal'
+        ? encodeFact(this.cursor, frames, this.encoder)
+        : frames.map((frame) => this.encoder.encodeSSE(frame)).join('')
     return this.utf8.encode(encoded)
   }
 
   private async readNextFact(): Promise<Uint8Array | null> {
     if (this.initialFrames.length) return await this.readInitialFrames()
-    while (!this.abort.signal.aborted && !this.events.terminal) {
+    while (!this.abort.signal.aborted && this.events.phase !== 'terminal') {
+      this.stage = 'authority'
       if (!(await this.query.authorize())) return null
+      this.stage = 'read'
       const facts = await readPublicEvents(this.db, {
         ownerID: this.query.ownerID,
         threadID: this.query.threadID,
+        runID: this.query.runID,
         after: this.cursor,
         limit: 1,
       })
       if (this.abort.signal.aborted || facts === null) return null
+      this.stage = 'authority'
       if (!(await this.query.authorize())) return null
       const fact = facts[0]
       if (!fact) {
@@ -236,6 +251,7 @@ class PublicEventSubscription {
       }
       this.cursor = fact.cursor
       if (fact.event.runID !== this.query.runID) continue
+      this.stage = 'fold'
       const mapped = mapPublicRunEvent(this.events, fact.event)
       this.events = mapped.state
       return this.utf8.encode(
@@ -260,23 +276,29 @@ async function reconstruct(
   db: Kysely<DB>,
   query: Observation,
   state: PublicRunState,
+  observeStage: (stage: 'authority' | 'read' | 'fold') => void,
 ) {
   let replay: ReplayState = { state, cursor: '0', terminalFact: undefined }
   const boundary = BigInt(query.after)
   while (BigInt(replay.cursor) < boundary) {
     if (query.requestSignal.aborted || query.processSignal.aborted)
       return replay
+    observeStage('authority')
     if (!(await query.authorize())) return replay
+    observeStage('read')
     const facts = await readPublicEvents(db, {
       ownerID: query.ownerID,
       threadID: query.threadID,
+      runID: query.runID,
       after: replay.cursor,
       limit: 100,
     })
     if (query.requestSignal.aborted || query.processSignal.aborted)
       return replay
+    observeStage('authority')
     if (!(await query.authorize())) return replay
     if (!facts?.length) return replay
+    observeStage('fold')
     replay = foldReplayBatch(facts, query.runID, boundary, replay)
   }
   return replay
@@ -295,7 +317,7 @@ function foldReplayBatch(
     cursor = fact.cursor
     if (BigInt(cursor) > boundary) break
     if (fact.event.runID !== runID) continue
-    state = mapPublicRunEvent(state, fact.event).state
+    state = foldPublicRunEvent(state, fact.event)
     if (
       fact.event.kind === 'run-completed' ||
       fact.event.kind === 'run-cancelled' ||

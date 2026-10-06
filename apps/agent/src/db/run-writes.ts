@@ -6,12 +6,13 @@ import type {
   ExecutionWrites,
   ExecutionCompletion,
   ExecutionFailure,
-  NativeSandboxReference,
 } from '../execute-run'
+import type { NativeSandboxReference } from '../sandbox/reference'
 import {
   lockLease,
   releaseConversation,
   renewExecutionLease,
+  historyByteLimit,
 } from './execution-leases'
 import { enqueueEvent, eventIdentities } from './event-outbox'
 
@@ -46,7 +47,7 @@ export async function completeExecutionRun(
 ) {
   return await db
     .transaction()
-    .execute((tx) => completeRun(tx, lease, completion))
+    .execute((tx) => finishRun(tx, lease, { completion }))
 }
 
 export async function failExecutionRun(
@@ -55,10 +56,12 @@ export async function failExecutionRun(
   reason: ExecutionFailure,
 ) {
   return await db.transaction().execute((tx) =>
-    finishLease(tx, lease, {
-      ...eventIdentities(lease),
-      kind: 'run-failed',
-      reason,
+    finishRun(tx, lease, {
+      event: {
+        ...eventIdentities(lease),
+        kind: 'run-failed',
+        reason,
+      },
     }),
   )
 }
@@ -67,12 +70,12 @@ export async function cancelExecutionRun(
   db: Kysely<DB>,
   lease: ExecutionLease,
 ) {
-  return await db.transaction().execute((tx) =>
-    finishLease(tx, lease, {
-      ...eventIdentities(lease),
-      kind: 'run-cancelled',
+  const result = await db.transaction().execute((tx) =>
+    finishRun(tx, lease, {
+      event: { ...eventIdentities(lease), kind: 'run-cancelled' },
     }),
   )
+  return result === 'cancelled' ? true : result
 }
 
 async function appendText(
@@ -99,61 +102,81 @@ async function appendText(
   return true
 }
 
-async function completeRun(
+async function finishRun(
+  tx: Transaction<DB>,
+  lease: ExecutionLease,
+  decision:
+    | { completion: ExecutionCompletion }
+    | {
+        event: Extract<ExecutionEvent, { kind: 'run-failed' | 'run-cancelled' }>
+      },
+) {
+  // One locked decision owns cancellation, terminal state, history and outbox.
+  // lockLease checks owner/run/fence and post-lock database time.
+  const run = await lockLease(tx, lease)
+  if (run === undefined) return false
+  const failure =
+    'event' in decision &&
+    decision.event.kind === 'run-failed' &&
+    decision.event.reason === 'execution-error'
+  if (run.sandbox_recovery_required && !failure) return false
+  if (run.cancel_requested && !failure) {
+    await recordTerminal(tx, {
+      ...eventIdentities(lease),
+      kind: 'run-cancelled',
+    })
+    return 'cancelled' as const
+  }
+  if ('event' in decision) {
+    await recordTerminal(tx, decision.event)
+    return true
+  }
+  return await persistCompletion(
+    tx,
+    lease,
+    decision.completion,
+    run.assistant_message_id!,
+  )
+}
+
+async function persistCompletion(
   tx: Transaction<DB>,
   lease: ExecutionLease,
   input: ExecutionCompletion,
+  messageID: string,
 ) {
-  const run = await lockLease(tx, lease)
-  if (
-    run === undefined ||
-    run.cancel_requested ||
-    run.sandbox_recovery_required
-  ) {
-    return false
-  }
-  // History is opaque JSON owned by execution. Never interpret it as product messages,
-  // and never include it in the event outbox or accept it from browser submissions.
-  await tx
+  // Keep history private and unchanged if it exceeds the reasonable input limit.
+  const stored = await tx
+    .with('completed_history', (query) =>
+      query.selectNoFrom(
+        sql`${JSON.stringify(input.history)}::jsonb`.as('value'),
+      ),
+    )
     .updateTable('execution.conversations')
-    .set({
-      history: sql`${JSON.stringify(input.history)}::jsonb`,
-    })
+    .from('completed_history')
+    .set({ history: sql`completed_history.value` })
     .where('thread_id', '=', lease.threadID)
-    .execute()
+    .where(
+      sql<boolean>`octet_length(completed_history.value::text) <= ${historyByteLimit}`,
+    )
+    .returning('thread_id')
+    .executeTakeFirst()
+  if (stored === undefined) {
+    await recordTerminal(tx, {
+      ...eventIdentities(lease),
+      kind: 'run-failed',
+      reason: 'execution-error',
+    })
+    return 'failed' as const
+  }
   await recordTerminal(tx, {
     ...eventIdentities(lease),
     kind: 'run-completed',
-    // Claim assigns this identity atomically with running status. It is read
-    // under lease authority, never supplied by a streaming or terminal caller.
-    messageID: run.assistant_message_id!,
+    messageID,
     text: input.text,
+    ...(input.sources === undefined ? {} : { sources: input.sources }),
     ...(input.assets === undefined ? {} : { assets: [...input.assets] }),
   })
-  return true
-}
-
-async function finishLease(
-  tx: Transaction<DB>,
-  lease: ExecutionLease,
-  event: Extract<ExecutionEvent, { kind: 'run-failed' | 'run-cancelled' }>,
-) {
-  const run = await lockLease(tx, lease)
-  if (run === undefined) return false
-  if (
-    run.sandbox_recovery_required &&
-    (event.kind !== 'run-failed' || event.reason !== 'execution-error')
-  )
-    return false
-  // Cleanup/execution failure outranks cancellation; shutdown interruption does
-  // not. The locked lease still fences both outcomes against stale workers.
-  if (
-    run.cancel_requested &&
-    event.kind === 'run-failed' &&
-    event.reason !== 'execution-error'
-  )
-    return false
-  await recordTerminal(tx, event)
   return true
 }
 

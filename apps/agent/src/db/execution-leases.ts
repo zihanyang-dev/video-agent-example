@@ -7,6 +7,10 @@ import { enqueueEvent, eventIdentities } from './event-outbox'
 
 type ClaimOptions = Readonly<{ ownerID: string; leaseMs: number }>
 
+// PostgreSQL-rendered UTF8 JSON, not compressed TOAST storage. Oversize history
+// remains private recovery evidence; it is never truncated or paid-compacted.
+export const historyByteLimit = 4 * 1024 * 1024
+
 /** Lock a conversation before selecting its queued run and advancing the fence.
  * Expired spending is interrupted in this same transaction, never requeued.
  */
@@ -46,12 +50,33 @@ async function claimRun(
     conversation.sandbox_recovery_required ||
     conversation.active_run_id !== null
   ) {
-    await rejectRecoveryBlockedRuns(tx, conversation.thread_id)
+    await rejectQueuedRuns(
+      tx,
+      conversation.thread_id,
+      'sandbox-recovery-required',
+    )
+    return null
+  }
+  // Read after the conversation lock, and do not transfer oversized JSON into
+  // the worker. Refuse before issuing any lease/allocation/inference capability.
+  const retained = await tx
+    .selectFrom('execution.conversations')
+    .select([
+      sql<unknown>`case when octet_length(history::text) <= ${historyByteLimit}
+        then history else 'null'::jsonb end`.as('history'),
+      sql<boolean>`octet_length(history::text) > ${historyByteLimit}`.as(
+        'history_rejected',
+      ),
+    ])
+    .where('thread_id', '=', conversation.thread_id)
+    .executeTakeFirstOrThrow()
+  if (retained.history_rejected) {
+    await rejectQueuedRuns(tx, conversation.thread_id, 'execution-error')
     return null
   }
   const run = await tx
     .selectFrom('execution.runs')
-    .select(['run_id', 'command_id', 'message_id', 'text'])
+    .select(['run_id', 'command_id', 'text'])
     .where('thread_id', '=', conversation.thread_id)
     .where('status', '=', 'queued')
     .orderBy('created_at')
@@ -81,12 +106,10 @@ async function claimRun(
   const lease = Object.freeze({
     runID: run.run_id,
     threadID: conversation.thread_id,
-    commandID: run.command_id,
-    messageID: run.message_id,
     text: run.text,
     ownerID: options.ownerID,
     fence: claimed.fence,
-    history: conversation.history,
+    history: retained.history,
     ...(input.assets === undefined ? {} : { assets: input.assets }),
     ...(nativeRef === undefined ? {} : { nativeRef }),
   })
@@ -110,11 +133,9 @@ async function lockClaimableConversation(tx: Transaction<DB>) {
     .selectFrom('execution.conversations as conversation')
     .select([
       'conversation.thread_id',
-      'conversation.history',
       'conversation.native_sandbox',
       'conversation.sandbox_recovery_required',
       'conversation.active_run_id',
-      'conversation.fence',
     ])
     .where(
       sql<boolean>`
@@ -223,9 +244,10 @@ export async function releaseConversation(
 }
 
 /** Already accepted work must receive a durable explicit terminal, not sit queued. */
-async function rejectRecoveryBlockedRuns(
+async function rejectQueuedRuns(
   tx: Transaction<DB>,
   threadID: string,
+  reason: 'execution-error' | 'sandbox-recovery-required',
 ) {
   const runs = await tx
     .updateTable('execution.runs')
@@ -238,6 +260,6 @@ async function rejectRecoveryBlockedRuns(
     await enqueueEvent(tx, {
       ...eventIdentities({ threadID, runID: run.run_id }),
       kind: 'run-failed',
-      reason: 'sandbox-recovery-required',
+      reason,
     })
 }

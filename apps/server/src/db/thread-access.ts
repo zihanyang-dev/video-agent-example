@@ -6,10 +6,6 @@ import {
 } from '../conversation/submission'
 export const threadUnavailable = new Error('Thread unavailable')
 export const threadConflict = new Error('Thread conflict')
-export const legacyOwnershipUnmapped = new Error(
-  'Legacy thread ownership requires administrator assignment',
-)
-
 /** Every writer locks the same existing thread before checking ownership and
  * archive state. Missing and foreign IDs deliberately have identical recovery.
  * Reads may observe archived history; cancellation may still request a stop. */

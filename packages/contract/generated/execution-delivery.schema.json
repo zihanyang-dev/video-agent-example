@@ -117,6 +117,31 @@
               "type": "string",
               "const": "run-completed"
             },
+            "sources": {
+              "maxItems": 15,
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "title": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256,
+                    "pattern": "^(?=.*\\S)[^<>\\p{Cc}\\p{Cf}\\ud800-\\udfff]*$"
+                  },
+                  "url": {
+                    "type": "string",
+                    "maxLength": 2048,
+                    "pattern": "^https:\\/\\/(?!(?:[^/?#]*\\.)?(?:localhost|local|internal|lan|home|test|invalid|localdomain|intranet|corp|onion)(?:[/?#]|$))(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}(?:\\/(?![^?#]*%(?:0[0-9a-fA-F]|1[0-9a-fA-F]|7[fF]|[cC]2%[89][0-9a-fA-F]))[^\\s<>\\\\?#\\p{Cc}\\p{Cf}\\ud800-\\udfff]*)?(?:\\?(?![^#]*(?:key|token|secret|password|credential|signature|authorization|auth|session|jwt|sig))[a-z0-9&=_.~+/-]*)?$"
+                  }
+                },
+                "required": [
+                  "title",
+                  "url"
+                ],
+                "additionalProperties": false
+              }
+            },
             "messageID": {
               "type": "string",
               "format": "uuid",
@@ -145,7 +170,8 @@
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 255,
-                    "pattern": "^(?!\\.{1,2}$)(?!.*[/\\\\])[\\x20-\\x7e\\u0080-\\uffff]+$"
+                    "pattern": "^(?!\\.{1,2}$)[^/\\\\\\u0000-\\u001f\\u007f]{1,255}$",
+                    "description": "File name, not a path. Length is measured in UTF-16 code units at runtime; foreign validators may count Unicode code points."
                   },
                   "mimeType": {
                     "type": "string",

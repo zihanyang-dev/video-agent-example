@@ -7,38 +7,88 @@ import { openDatabase } from '@vid/database/connection'
 import { createClient, type RedisClientType } from 'redis'
 import { createAuthentication } from './identity/authentication'
 import { createHTTP } from './http'
-import type { EventSubscription } from './conversation/event-stream'
 import { consumeEventBatch } from './conversation/execution-events'
 import { publishPendingCommands } from './conversation/command-publication'
 
-/** One process owns HTTP requests, subscriptions, Redis tasks and connections. */
-export class Server {
-  private readonly shutdown = new AbortController()
-  private readonly objects: ObjectStore
-  private readonly db: Kysely<DB>
-  private readonly commands: RedisClientType
-  private readonly blockingReader: RedisClientType
-  private fileRequests = 0
-  private readonly requests = new Set<Promise<Response>>()
-  private readonly subscriptions = new Set<EventSubscription>()
-  private eventAcceptance: Promise<void> = Promise.resolve()
-  private commandPublication: Promise<void> = Promise.resolve()
-  private readonly failures: unknown[] = []
-  private server: ReturnType<typeof Bun.serve> | undefined
-  private closing: Promise<void> | undefined
+/** One owner for construction, HTTP, subscriptions, background work and release. */
+export async function startServer(
+  env: ServerEnv,
+  options: { port?: number; signal?: AbortSignal } = {},
+) {
+  const shutdown = new AbortController()
+  const requests = new Map<Promise<unknown>, boolean>()
+  const background: Promise<void>[] = []
+  const failures: unknown[] = []
+  // Partial construction is real: cleanup owns every handle already allocated.
+  let objectStore: ObjectStore | undefined
+  let database: Kysely<DB> | undefined
+  let commandClient: RedisClientType | undefined
+  let eventReader: RedisClientType | undefined
+  let server: ReturnType<typeof Bun.serve> | undefined
+  let closing: Promise<void> | undefined
+  const abort = () => shutdown.abort()
+  const fail = (
+    stage:
+      | 'dbtransport'
+      | 'rediscommand'
+      | 'redisread'
+      | 'eventreceipt'
+      | 'commandpublication'
+      | 'httphandler',
+    cause: unknown,
+  ) => {
+    failures.push(cause)
+    // Classify failures without logging private text or native driver parameters.
+    console.error('Server process failed', {
+      stage,
+      rejectedType: typeof cause,
+      isError: cause instanceof Error,
+    })
+    abort()
+  }
+  async function settle(tasks: readonly Promise<unknown>[]) {
+    const settled = await Promise.allSettled(tasks)
+    for (const task of settled)
+      if (task.status === 'rejected') failures.push(task.reason)
+  }
+  function close(): Promise<void> {
+    // Install the shared receipt before abort or native cleanup can reenter.
+    closing ??= Promise.resolve().then(async () => {
+      options.signal?.removeEventListener('abort', abort)
+      await settle([Promise.resolve().then(() => server?.stop(true))])
+      await settle([...requests.keys()])
+      await settle(background)
+      // Synchronous failures also become receipts; no sibling is skipped.
+      await settle([
+        Promise.resolve().then(() => eventReader?.destroy()),
+        Promise.resolve().then(() => commandClient?.destroy()),
+        Promise.resolve().then(() => objectStore?.close()),
+        Promise.resolve().then(() => database?.destroy()),
+      ])
+      if (failures.length)
+        throw new AggregateError(
+          failures,
+          'Server process failed; unaccepted deliveries remain pending',
+        )
+    })
+    abort()
+    return closing
+  }
 
-  constructor(
-    private readonly env: ServerEnv,
-    private readonly externalSignal?: AbortSignal,
-  ) {
-    this.objects = connectObjects({
+  options.signal?.addEventListener('abort', abort, { once: true })
+  try {
+    options.signal?.throwIfAborted()
+    shutdown.signal.throwIfAborted()
+    const objects = (objectStore = connectObjects({
       endpoint: env.OBJECT_STORAGE_URL,
       region: env.OBJECT_STORAGE_REGION,
       bucket: env.OBJECT_STORAGE_BUCKET,
       accessKeyID: env.OBJECT_STORAGE_ACCESS_KEY_ID,
       secretAccessKey: env.OBJECT_STORAGE_SECRET_ACCESS_KEY,
-    })
-    this.db = openDatabase(env, this.fail)
+    }))
+    const db = (database = openDatabase(env, (cause) =>
+      fail('dbtransport', cause),
+    ))
     const redisOptions = {
       url: env.REDIS_URL,
       disableOfflineQueue: true,
@@ -49,234 +99,175 @@ export class Server {
         reconnectStrategy: false as const,
       },
     }
-    this.commands = createClient(redisOptions)
-    this.blockingReader = createClient(redisOptions)
-    this.commands.on('error', this.fail)
-    this.blockingReader.on('error', this.fail)
-  }
-
-  async start(port: number) {
-    this.externalSignal?.addEventListener('abort', this.abort, { once: true })
-    if (this.externalSignal?.aborted) this.abort()
-    this.shutdown.signal.throwIfAborted()
-    await this.connectRedis()
-    try {
-      await this.commands.xGroupCreate(
+    const commands = (commandClient = createClient(redisOptions))
+    const blockingReader = (eventReader = createClient(redisOptions))
+    commands.on('error', (cause) => fail('rediscommand', cause))
+    blockingReader.on('error', (cause) => fail('redisread', cause))
+    const connected = await Promise.allSettled([
+      connectBounded(commands, env.IO_TIMEOUT_MS),
+      connectBounded(blockingReader, env.IO_TIMEOUT_MS),
+    ])
+    const failed = connected.find(
+      (connection) => connection.status === 'rejected',
+    )
+    if (failed) throw failed.reason
+    shutdown.signal.throwIfAborted()
+    await commands
+      .xGroupCreate(
         executionStreams.events,
         executionStreams.eventGroup,
         '0-0',
         { MKSTREAM: true },
       )
-    } catch (cause) {
-      if (!(cause instanceof Error) || !cause.message.startsWith('BUSYGROUP '))
-        throw cause
-    }
-    this.shutdown.signal.throwIfAborted()
-    const url = this.listen(port)
-    this.eventAcceptance = this.acceptEventDeliveries().catch(this.fail)
-    this.commandPublication = publishPendingCommands(this.db, this.commands, {
-      signal: this.shutdown.signal,
-      pollMs: this.env.POLL_MS,
-    }).catch(this.fail)
-    const done = this.waitForShutdown()
-    // Library callers can await done or stop; a rejected done is still owned.
-    void done.catch(() => {})
-    return {
-      url,
-      done,
-      stop: this.close,
-    }
-  }
-
-  private async connectRedis() {
-    const connected = await Promise.allSettled([
-      connectBounded(this.commands, this.env.IO_TIMEOUT_MS),
-      connectBounded(this.blockingReader, this.env.IO_TIMEOUT_MS),
-    ])
-    this.shutdown.signal.throwIfAborted()
-    for (const connection of connected)
-      if (connection.status === 'rejected') throw connection.reason
-  }
-
-  private listen(port: number) {
-    const route = createHTTP(this.db, {
-      authentication: createAuthentication(this.db, {
-        baseURL: this.env.AUTH_BASE_URL,
-        secret: this.env.AUTH_SECRET,
-        githubClientID: this.env.GITHUB_CLIENT_ID,
-        githubClientSecret: this.env.GITHUB_CLIENT_SECRET,
+      .catch((cause: unknown) => {
+        if (
+          !(cause instanceof Error) ||
+          !cause.message.startsWith('BUSYGROUP ')
+        )
+          throw cause
+      })
+    shutdown.signal.throwIfAborted()
+    const route = createHTTP(db, {
+      authentication: createAuthentication(db, {
+        baseURL: env.AUTH_BASE_URL,
+        secret: env.AUTH_SECRET,
+        githubClientID: env.GITHUB_CLIENT_ID,
+        githubClientSecret: env.GITHUB_CLIENT_SECRET,
       }),
       bodyCollection: {
-        signal: this.shutdown.signal,
-        timeoutMs: this.env.FILE_IO_TIMEOUT_MS,
+        signal: shutdown.signal,
+        timeoutMs: env.FILE_IO_TIMEOUT_MS,
       },
-      maxAssetBytes: this.env.ASSET_MAX_BYTES,
+      maxAssetBytes: env.ASSET_MAX_BYTES,
       files: {
-        objects: this.objects,
-        maxAssetBytes: this.env.ASSET_MAX_BYTES,
-        timeoutMs: this.env.FILE_IO_TIMEOUT_MS,
-        signal: this.shutdown.signal,
+        objects,
+        maxAssetBytes: env.ASSET_MAX_BYTES,
+        timeoutMs: env.FILE_IO_TIMEOUT_MS,
+        signal: shutdown.signal,
       },
-      signal: this.shutdown.signal,
-      pollIntervalMs: this.env.POLL_MS,
-      registerSubscription: this.registerSubscription,
+      signal: shutdown.signal,
+      pollIntervalMs: env.POLL_MS,
+      ownRead(pending) {
+        // An SSE Response resolves before its pull. Own only outstanding work,
+        // not a second stream/subscription lifecycle and completion registry.
+        requests.set(pending, false)
+        void pending.then(() => requests.delete(pending))
+      },
     })
-    this.server = Bun.serve({
+    server = Bun.serve({
       hostname: '0.0.0.0',
-      maxRequestBodySize: Math.max(65536, this.env.ASSET_MAX_BYTES),
-      port,
-      fetch: (request) => {
-        // Four buffered file requests bound peak file bytes; ordinary HTTP and
-        // subscriptions are also capped instead of growing sockets without limit.
-        if (
-          this.requests.size >= 16 ||
-          (this.server?.pendingRequests ?? 0) >= 16 ||
-          this.subscriptions.size >= 32
-        )
+      maxRequestBodySize: Math.max(65536, env.ASSET_MAX_BYTES),
+      port: options.port ?? env.PORT,
+      fetch(request) {
+        // Route work, native HTTP transfer and SSE are different lifetimes.
+        if (requests.size >= 16 || (server?.pendingRequests ?? 0) >= 16)
           return new Response('Too many active requests. Try again.', {
             status: 429,
           })
         const fileRequest = /\/assets(?:\/|$)/.test(
           new URL(request.url).pathname,
         )
-        if (fileRequest && this.fileRequests >= 4)
+        if (fileRequest && [...requests.values()].filter(Boolean).length >= 4)
           return new Response('Too many active file requests. Try again.', {
             status: 429,
           })
-        if (fileRequest) this.fileRequests += 1
-        const pending = this.respond(request, route)
-        this.requests.add(pending)
-        void pending.then(() => {
-          this.requests.delete(pending)
-          if (fileRequest) this.fileRequests -= 1
-        })
+        const pending = (async () => {
+          if (shutdown.signal.aborted)
+            return new Response('Stopping', { status: 503 })
+          try {
+            return await route(request)
+          } catch (cause) {
+            fail('httphandler', cause)
+            return new Response(
+              'Server unavailable. Try again after restart.',
+              { status: 503 },
+            )
+          }
+        })()
+        requests.set(pending, fileRequest)
+        void pending.then(() => requests.delete(pending))
         return pending
       },
     })
-    return `http://127.0.0.1:${this.server.port}`
-  }
 
-  private async respond(
-    request: Request,
-    route: (request: Request) => Promise<Response>,
-  ) {
-    if (this.shutdown.signal.aborted)
-      return new Response('Stopping', { status: 503 })
-    try {
-      return await route(request)
-    } catch (cause) {
-      this.fail(cause)
-      return new Response('Server unavailable. Try again after restart.', {
-        status: 503,
-      })
+    const assetLimits = {
+      maxBytes: env.ASSET_MAX_BYTES,
+      maxFiles: env.ASSET_MAX_FILES,
     }
-  }
-
-  private registerSubscription = (subscription: EventSubscription) => {
-    this.subscriptions.add(subscription)
-    return () => {
-      this.subscriptions.delete(subscription)
+    let eventStage: 'rediscommand' | 'redisread' | 'eventreceipt' =
+      'rediscommand'
+    async function acceptEventDeliveries() {
+      const consumer = crypto.randomUUID()
+      let startID = '0-0'
+      while (!shutdown.signal.aborted) {
+        eventStage = 'rediscommand'
+        const reclaimed = await commands.xAutoClaim(
+          executionStreams.events,
+          executionStreams.eventGroup,
+          consumer,
+          1000,
+          startID,
+          { COUNT: 32 },
+        )
+        startID = reclaimed.nextId // Empty pages still advance the native cursor.
+        if (shutdown.signal.aborted) return
+        eventStage = 'eventreceipt'
+        await consumeEventBatch(db, {
+          commands,
+          assetLimits,
+          signal: shutdown.signal,
+          messages: reclaimed.messages,
+          deletedMessages: reclaimed.deletedMessages,
+        })
+        if (shutdown.signal.aborted) return
+        eventStage = 'redisread'
+        const streams = await blockingReader.xReadGroup(
+          executionStreams.eventGroup,
+          consumer,
+          { key: executionStreams.events, id: '>' },
+          { COUNT: 32, BLOCK: 200 },
+        )
+        // Newly claimed deliveries stay pending for the replacement during stop.
+        if (shutdown.signal.aborted) return
+        eventStage = 'eventreceipt'
+        await consumeEventBatch(db, {
+          commands,
+          assetLimits,
+          signal: shutdown.signal,
+          messages: streams?.flatMap((stream) => stream.messages) ?? [],
+        })
+      }
     }
-  }
-
-  private async acceptEventDeliveries() {
-    const consumer = crypto.randomUUID()
-    let startID = '0-0'
-    while (!this.shutdown.signal.aborted) {
-      const reclaimed = await this.commands.xAutoClaim(
-        executionStreams.events,
-        executionStreams.eventGroup,
-        consumer,
-        1000,
-        startID,
-        { COUNT: 32 },
-      )
-      startID = reclaimed.nextId // Advance through pages containing no live entries.
-      if (this.shutdown.signal.aborted) return
-      await consumeEventBatch(this.db, {
-        commands: this.commands,
-        assetLimits: {
-          maxBytes: this.env.ASSET_MAX_BYTES,
-          maxFiles: this.env.ASSET_MAX_FILES,
-        },
-        messages: reclaimed.messages,
-        deletedMessages: reclaimed.deletedMessages,
-      })
-      if (this.shutdown.signal.aborted) return
-      const streams = await this.blockingReader.xReadGroup(
-        executionStreams.eventGroup,
-        consumer,
-        { key: executionStreams.events, id: '>' },
-        { COUNT: 32, BLOCK: 200 },
-      )
-      const messages = streams?.flatMap((stream) => stream.messages) ?? []
-      // Deliveries claimed during shutdown stay pending for the replacement.
-      if (this.shutdown.signal.aborted) return
-      await consumeEventBatch(this.db, {
-        commands: this.commands,
-        messages,
-        assetLimits: {
-          maxBytes: this.env.ASSET_MAX_BYTES,
-          maxFiles: this.env.ASSET_MAX_FILES,
-        },
-      })
-    }
-  }
-
-  private abort = () => {
-    this.shutdown.abort()
-  }
-
-  private fail = (cause: unknown) => {
-    this.failures.push(cause)
-    // Error names classify diagnostics without logging driver parameters,
-    // validation inputs, private execution text or credentials.
-    console.error('Server process failed', {
-      classification: 'process-adapter',
-      cause: cause instanceof Error ? cause.name : typeof cause,
-    })
-    this.abort()
-  }
-
-  private async waitForShutdown() {
-    await new Promise<void>((resolve) => {
-      this.shutdown.signal.addEventListener('abort', () => resolve(), {
-        once: true,
-      })
-      if (this.shutdown.signal.aborted) resolve()
-    })
-    await this.close()
-  }
-
-  close = (): Promise<void> => {
-    if (this.closing) return this.closing
-    this.abort()
-    this.closing = this.settleAndDisconnect()
-    return this.closing
-  }
-
-  private async settleAndDisconnect() {
-    this.externalSignal?.removeEventListener('abort', this.abort)
-    await this.server?.stop(true)
-    await Promise.all(this.requests)
-    // HTTP Response promises are not subscription lifetimes. Every outstanding
-    // pull (including a query already sent to PG) must settle before DB close.
-    await Promise.all(
-      [...this.subscriptions].map((subscription) => subscription.close()),
+    background.push(
+      acceptEventDeliveries().catch((cause: unknown) =>
+        fail(eventStage, cause),
+      ),
+      publishPendingCommands(db, commands, {
+        signal: shutdown.signal,
+        pollMs: env.POLL_MS,
+      }).catch((cause: unknown) => fail('commandpublication', cause)),
     )
-    await Promise.all([this.eventAcceptance, this.commandPublication])
-    if (this.blockingReader.isOpen) this.blockingReader.destroy()
-    if (this.commands.isOpen) this.commands.destroy()
-    this.objects.close()
-    await this.db.destroy()
-    if (this.failures.length)
+    const done = new Promise<void>((resolve) => {
+      shutdown.signal.addEventListener('abort', () => resolve(), { once: true })
+      if (shutdown.signal.aborted) resolve()
+    }).then(close)
+    // Library callers may await stop instead; done still owns its rejection.
+    void done.catch(() => {})
+    return { url: `http://127.0.0.1:${server.port}`, done, stop: close }
+  } catch (cause) {
+    try {
+      await close()
+    } catch (cleanup) {
       throw new AggregateError(
-        this.failures,
-        'Server process failed; unaccepted deliveries remain pending',
+        [cause, cleanup],
+        'Server startup failed and cleanup also failed',
       )
+    }
+    throw cause
   }
 }
 
+/** Own the full native initialization receipt, not only TCP connectTimeout. */
 async function connectBounded(
   client: {
     isOpen: boolean
@@ -292,21 +283,5 @@ async function connectBounded(
     await client.connect()
   } finally {
     clearTimeout(timer)
-  }
-}
-
-/** The creator owns cleanup even when startup fails before HTTP is listening. */
-export async function startServer(
-  env: ServerEnv,
-  options: { port?: number; signal?: AbortSignal } = {},
-) {
-  const server = new Server(env, options.signal)
-  try {
-    return await server.start(
-      options.port === undefined ? env.PORT : options.port,
-    )
-  } catch (cause) {
-    await server.close()
-    throw cause
   }
 }

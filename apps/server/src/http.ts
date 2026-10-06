@@ -1,4 +1,8 @@
-import { readBody, type BodyCollectionPolicy } from './request-body'
+import {
+  readBody,
+  requestBodyRejection,
+  type BodyCollectionPolicy,
+} from './request-body'
 import type { DB } from '@vid/database/types'
 import type { Kysely } from 'kysely'
 import { Hono, type Context } from 'hono'
@@ -6,6 +10,7 @@ import { describeRoute } from 'hono-openapi'
 import {
   publicUUIDSchema,
   publicSchemas,
+  uploadMimeTypeSchema,
   threadCreationSchema,
   threadUpdateSchema,
   type SessionResponse,
@@ -20,7 +25,6 @@ import {
   listOwnedThreads,
   createOwnedThread,
   readOwnedThread,
-  requireMappedOwnership,
   updateOwnedThread,
   snapshotOwnedMessages,
 } from './db/conversations'
@@ -28,12 +32,10 @@ import { archiveThread } from './db/cancellations'
 import {
   threadUnavailable,
   threadConflict,
-  legacyOwnershipUnmapped,
   lockThread,
 } from './db/thread-access'
 import { listAssets } from './db/assets'
 import { uploadAsset, downloadAsset } from './assets/http'
-import { fileSignatures } from './assets/files'
 import type { FileHTTP } from './assets/uploads'
 import {
   submitMessage,
@@ -60,7 +62,7 @@ const json = (name: string) => ({
 })
 const uuid = publicUUIDSchema
 const fileContent = Object.fromEntries(
-  Object.keys(fileSignatures).map((mimeType) => [
+  uploadMimeTypeSchema.options.map((mimeType) => [
     mimeType,
     {
       schema: { type: 'string' as const, format: 'binary' },
@@ -73,13 +75,10 @@ const fileContent = Object.fromEntries(
 export function createRouter() {
   const app = new Hono<HTTPEnv>()
   app.onError((cause) => {
+    const bodyRejection = requestBodyRejection(cause)
+    if (bodyRejection) return bodyRejection
     if (cause === threadUnavailable) return unavailable()
     if (cause === threadConflict) return conflict()
-    if (cause === legacyOwnershipUnmapped)
-      return Response.json(
-        { error: 'Legacy thread ownership requires administrator assignment' },
-        { status: 503 },
-      )
     throw cause
   })
   app.notFound(unavailable)
@@ -94,7 +93,10 @@ export function createRouter() {
       responses: {
         200: { description: 'Session durably revoked and SDK cookies expired' },
         403: { description: 'Untrusted origin' },
+        408: { description: 'Request body timed out; retry same request' },
+        413: { description: 'Request body exceeds byte limit' },
         415: { description: 'Expected JSON' },
+        503: { description: 'Collection stopped or transport failed' },
       },
     }),
     (c) =>
@@ -144,7 +146,9 @@ export function createRouter() {
         401: { description: 'Authentication required' },
         403: { description: 'Untrusted origin' },
         404: { description: 'Not found (including foreign identifiers)' },
+        408: { description: 'Request body timed out; retry same request' },
         409: { description: 'Conflicting intent or archived thread' },
+        413: { description: 'Request body exceeds byte limit' },
         415: { description: 'Expected JSON request' },
         503: { description: 'Unavailable; retry after recovery' },
       },
@@ -162,7 +166,6 @@ export function createRouter() {
         c.req.raw.headers.get('origin') !== c.env.authentication.options.baseURL
       )
         return new Response('Untrusted request origin', { status: 403 })
-      await requireMappedOwnership(c.env.db)
       return await next()
     },
   )
@@ -389,7 +392,9 @@ export function createRouter() {
         200: {
           description:
             'Official AG-UI SSE, beginning with RUN_STARTED on every reconnect; event IDs are durable public cursors',
-          content: { 'text/event-stream': { schema: { type: 'string' } } },
+          // The official fetch transport yields JSON-decoded values or raw text.
+          // Consumers validate unknown frames with the official AG-UI schema.
+          content: { 'text/event-stream': { schema: {} } },
         },
       },
     }),
@@ -409,9 +414,7 @@ export function createRouter() {
         {
           signal: c.env.signal,
           pollIntervalMs: c.env.pollIntervalMs,
-          ...(c.env.registerSubscription
-            ? { registerSubscription: c.env.registerSubscription }
-            : {}),
+          ...(c.env.ownRead ? { ownRead: c.env.ownRead } : {}),
           authorize: async () =>
             (await readIdentity(c.env.authentication, c.req.raw.headers))
               ?.id === query.ownerID &&
@@ -445,7 +448,7 @@ export function createRouter() {
     describeRoute({
       operationId: 'uploadAsset',
       description:
-        'Raw bounded file bytes. Retry unknown receipts with the identical ID and bytes. Accepted file names exclude control characters; media bytes are verified.',
+        'Raw bounded file bytes with an explicit allowlisted Content-Type header. Retry unknown receipts with the identical ID and bytes. Accepted file names exclude control characters; media bytes are verified.',
       parameters: [
         {
           in: 'header',
@@ -460,6 +463,14 @@ export function createRouter() {
           schema: { type: 'string' },
           description: 'Percent-encoded UTF-8 file name',
         },
+        {
+          in: 'header',
+          name: 'Content-Type',
+          required: true,
+          schema: { type: 'string', enum: uploadMimeTypeSchema.options },
+          description:
+            'Exact supported MIME type; bytes are verified independently',
+        },
       ],
       requestBody: {
         required: true,
@@ -468,7 +479,8 @@ export function createRouter() {
       responses: {
         201: { description: 'Uploaded', content: json('AssetResponse') },
         200: { description: 'Exact replay', content: json('AssetResponse') },
-        413: { description: 'Upload too large or timed out' },
+        408: { description: 'Upload body timed out; retry same ID and bytes' },
+        413: { description: 'Upload exceeds byte limit' },
         415: { description: 'Invalid file' },
         503: { description: 'Upload unconfirmed; retry same ID and bytes' },
       },
@@ -499,8 +511,10 @@ export function createRouter() {
       responses: {
         200: {
           description:
-            'Verified attachment; private, no-store; nosniff; sandbox CSP',
-          content: fileContent,
+            'Binary attachment of any stored MIME type, including generated files outside the upload allowlist; private, no-store; nosniff; sandbox CSP',
+          content: {
+            '*/*': { schema: { type: 'string', format: 'binary' } },
+          },
         },
         413: { description: 'File exceeds download limit' },
         503: { description: 'File unavailable or verification failed' },

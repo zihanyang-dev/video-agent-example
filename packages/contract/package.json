@@ -3,18 +3,14 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./web-source": "./src/web-source.ts",
     "./http": "./src/http.ts",
-    "./execution": "./src/execution.ts",
-    "./client": "./generated/client/index.js",
-    "./types": "./generated/client/types.gen.d.ts",
-    "./fetch": "./generated/client/client/index.js"
+    "./execution": "./src/execution.ts"
   },
   "dependencies": {
     "zod": "4.6.5"
   },
   "devDependencies": {
-    "@hey-api/openapi-ts": "0.99.0",
-    "typescript": "6.0.3",
     "ajv": "8.20.0",
     "ajv-formats": "3.0.1"
   }

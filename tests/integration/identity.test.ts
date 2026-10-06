@@ -217,7 +217,7 @@ test('logout rejects oversized JSON without revoking the durable retry session',
     body: JSON.stringify({ padding: 'x'.repeat(65536) }),
   })
   const response = await signOut(auth, db, request, bodyCollection)
-  expect(response.status).toBe(400)
+  expect(response.status).toBe(413)
   expect(response.headers.get('set-cookie')).toBeNull()
   expect((await readIdentity(auth, login.headers))?.id).toBe(login.user.id)
 })
@@ -246,8 +246,8 @@ test('native server releases its request budget after trickling product and logo
       Promise.all(clients.map((client) => client.status)),
       Bun.sleep(1500).then(() => [] as number[]),
     ])
-    expect(statuses).toContain(400)
-    expect(statuses.every((status) => status === 400 || status === 429)).toBe(
+    expect(statuses).toContain(408)
+    expect(statuses.every((status) => status === 408 || status === 429)).toBe(
       true,
     )
     expect(clients.some((client) => client.chunks() > 1)).toBe(true)

@@ -1,8 +1,3 @@
-import {
-  uploadAsset as uploadWithSDK,
-  downloadAsset as downloadWithSDK,
-} from '@vid/contract/client'
-import { createClient } from '@vid/contract/fetch'
 import type { ExecutionLease } from '../../apps/agent/src/execute-run'
 import { acceptExecutionCommand } from '../../apps/agent/src/db/command-acceptance'
 import { claimExecutionRun } from '../../apps/agent/src/db/execution-leases'
@@ -330,7 +325,7 @@ test('uploaded asset traverses actual worker execution and official Pi tools to 
   if (!lease) throw new Error('Assigned run was not claimable')
   expect(lease.runID).toBe(input.result.runID)
   const vm = memoryVM()
-  const model = toolModel(input.assetID)
+  const model = toolModel(input.assetID, new TextDecoder().decode(input.bytes))
   try {
     expect(
       await executeRun(
@@ -359,7 +354,7 @@ test('uploaded asset traverses actual worker execution and official Pi tools to 
     ).toBe('completed')
     expect(vm.closed()).toBe(true)
     await publishAndDownload(input, lease)
-    expect(JSON.stringify(model.requests)).toContain('asset bytes')
+    expect(model.readResult()).toBe(new TextDecoder().decode(input.bytes))
   } finally {
     await model.server.stop(true)
   }
@@ -370,32 +365,30 @@ function memoryVM() {
   let closed = false
   return {
     nativeRef: { provider: 'e2b', id: crypto.randomUUID() },
-    renewTimeout: async () => {},
     closed: () => closed,
     close: async () => {
       closed = true
     },
-    files: {
-      readBytes: async (path: string) => {
-        const bytes = files.get(path)
-        if (!bytes) throw new Error('Missing assigned file')
-        return bytes
-      },
-      writeBytes: async (path: string, bytes: Uint8Array) => {
-        files.set(path, bytes)
-      },
+    readBytes: async (path: string) => {
+      const bytes = files.get(path)
+      if (!bytes) throw new Error('Missing assigned file')
+      return bytes
     },
-    tools: {
-      read: async ({ path }: { path: string }) =>
-        new TextDecoder().decode(files.get(path)),
-      write: async ({ path, content }: { path: string; content: string }) => {
-        files.set(path, new TextEncoder().encode(content))
-      },
-      execute: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
+    writeBytes: async (path: string, bytes: Uint8Array) => {
+      files.set(path, bytes)
     },
+    read: async ({ path }: { path: string }) => {
+      const bytes = files.get(path)
+      if (!bytes) throw new Error('Missing assigned file')
+      return new TextDecoder().decode(bytes)
+    },
+    write: async ({ path, content }: { path: string; content: string }) => {
+      files.set(path, new TextEncoder().encode(content))
+    },
+    execute: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
   }
 }
-const chosenTools = (assetID: string) => [
+const chosenTools = (assetID: string, readResult: string) => [
   {
     name: 'import_file',
     arguments: JSON.stringify({ assetID, path: '/tmp/input.txt' }),
@@ -405,7 +398,7 @@ const chosenTools = (assetID: string) => [
     name: 'write',
     arguments: JSON.stringify({
       path: '/tmp/result.txt',
-      content: 'asset bytes',
+      content: readResult,
     }),
   },
   {
@@ -417,15 +410,38 @@ const chosenTools = (assetID: string) => [
     }),
   },
 ]
-function toolModel(assetPath: string) {
+function toolModel(assetPath: string, expected: string) {
   const requests: unknown[] = []
+  let readResult: string | undefined
   const server = Bun.serve({
     hostname: '127.0.0.1',
     port: 0,
     async fetch(request) {
-      requests.push(await request.json())
+      const body = (await request.json()) as {
+        messages: { role: string; tool_call_id?: string; content?: string }[]
+      }
+      requests.push(body)
       const turn = requests.length
-      const tools = chosenTools(assetPath)
+      if (turn === 2) {
+        const imported = body.messages.filter(
+          (message) =>
+            message.role === 'tool' && message.tool_call_id === 'local-tool-1',
+        )
+        expect(imported).toHaveLength(1)
+        expect(imported[0]?.content).toBe(
+          'Imported to /tmp/input.txt. Use tools to inspect; importing does not establish understanding.',
+        )
+      }
+      if (turn === 3) {
+        const read = body.messages.filter(
+          (message) =>
+            message.role === 'tool' && message.tool_call_id === 'local-tool-2',
+        )
+        expect(read).toHaveLength(1)
+        expect(read[0]?.content).toBe(expected)
+        readResult = read[0]!.content!
+      }
+      const tools = chosenTools(assetPath, readResult ?? '')
       const tool = tools[turn - 1]
       const delta =
         turn <= 4
@@ -455,7 +471,11 @@ function toolModel(assetPath: string) {
       )
     },
   })
-  return { server, requests, url: `http://127.0.0.1:${server.port}/v1` }
+  return {
+    server,
+    readResult: () => readResult,
+    url: `http://127.0.0.1:${server.port}/v1`,
+  }
 }
 
 async function publishAndDownload(
@@ -808,56 +828,58 @@ test('accepted arbitrary binary exports remain authenticated downloadable attach
   )
 })
 
-test('official generated fetch client sends raw file headers and receives a verified attachment', async () => {
+test('native Fetch sends raw file headers and receives a verified attachment', async () => {
   const f = await fixture()
   const server = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: f.route })
-  const client = createClient({
-    baseUrl: server.url.toString(),
-    headers: f.login.headers,
-  })
   const assetID = crypto.randomUUID()
-  const body = new Blob(['generated client bytes'], { type: 'text/plain' })
+  const body = new Blob(['native Fetch bytes'], { type: 'text/plain' })
   const headers = {
     'x-asset-id': assetID,
     'x-file-name': encodeURIComponent('剪辑.txt'),
-    'content-type': 'text/plain',
+    'Content-Type': 'text/plain' as const,
   }
   try {
-    const uploaded = await uploadWithSDK({
-      client,
-      path: { threadID: f.threadID },
-      headers,
-      body,
-    })
-    expect(uploaded.response?.status).toBe(201)
-    expect(uploaded.data?.asset.assetID).toBe(assetID)
-    expect(
-      (
-        await uploadWithSDK({
-          client,
-          path: { threadID: f.threadID },
-          headers,
-          body,
-        })
-      ).response?.status,
-    ).toBe(200)
-    const downloaded = await downloadWithSDK({
-      client,
-      path: { assetID },
-      parseAs: 'blob',
-    })
-    expect(downloaded.response?.status).toBe(200)
-    expect(await downloaded.data?.text()).toBe('generated client bytes')
-    expect(downloaded.response?.headers.get('content-disposition')).toContain(
+    const uploadHeaders = new Headers(f.login.headers)
+    for (const [name, value] of Object.entries(headers))
+      uploadHeaders.set(name, value)
+    const uploaded = await fetch(
+      new URL(`/api/threads/${f.threadID}/assets`, server.url),
+      {
+        method: 'POST',
+        headers: uploadHeaders,
+        body,
+      },
+    )
+    expect(uploaded.status).toBe(201)
+    expect(assetResponseSchema.parse(await uploaded.json()).asset.assetID).toBe(
+      assetID,
+    )
+    const replay = await fetch(
+      new URL(`/api/threads/${f.threadID}/assets`, server.url),
+      {
+        method: 'POST',
+        headers: uploadHeaders,
+        body,
+      },
+    )
+    expect(replay.status).toBe(200)
+    const downloaded = await fetch(
+      new URL(`/api/assets/${assetID}/file`, server.url),
+      {
+        headers: f.login.headers,
+      },
+    )
+    expect(downloaded.status).toBe(200)
+    const bytes = new Uint8Array(await downloaded.arrayBuffer())
+    expect(sha256(bytes)).toBe(sha256(new Uint8Array(await body.arrayBuffer())))
+    expect(new TextDecoder().decode(bytes)).toBe('native Fetch bytes')
+    expect(downloaded.headers.get('content-type')).toBe('text/plain')
+    expect(downloaded.headers.get('content-disposition')).toContain(
       'attachment;',
     )
-    expect(downloaded.response?.headers.get('x-content-type-options')).toBe(
-      'nosniff',
-    )
-    expect(downloaded.response?.headers.get('cache-control')).toBe(
-      'private, no-store',
-    )
-    expect(downloaded.response?.headers.get('content-security-policy')).toBe(
+    expect(downloaded.headers.get('x-content-type-options')).toBe('nosniff')
+    expect(downloaded.headers.get('cache-control')).toBe('private, no-store')
+    expect(downloaded.headers.get('content-security-policy')).toBe(
       "default-src 'none'; sandbox",
     )
   } finally {

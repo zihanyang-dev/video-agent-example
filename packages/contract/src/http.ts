@@ -1,13 +1,23 @@
 import { z } from 'zod'
+import { webSourcesSchema } from './web-source'
+import { fileNameSchema } from './file-name'
+import { publicFailureReasonSchema } from './failure-reason'
 
 export const publicUUIDSchema = z.uuid().toLowerCase()
 const uuid = publicUUIDSchema
+// Unicode mode preserves surrogate pairs but rejects lone surrogates, which
+// PostgreSQL JSONB cannot represent. Reject NUL rather than lossy replacement.
+const productText = z.string().regex(
+  // oxlint-disable-next-line no-control-regex -- PostgreSQL rejects NUL; keep the runtime and JSON Schema boundary aligned.
+  /^[^\u0000\ud800-\udfff]*$/u,
+  'Text must be representable in PostgreSQL',
+)
 
 export const messageSubmissionSchema = z
   .strictObject({
     messageID: uuid,
     // Preserve text for exact replay; trimming here only tests for empty input.
-    text: z.string().max(32768),
+    text: productText.max(32768),
     assetIDs: z.array(uuid).max(16).default([]).meta({
       uniqueItems: true,
       description:
@@ -40,7 +50,7 @@ export const messageSubmissionSchema = z
   })
 
 // JSON input permits surrounding whitespace; length applies after trim.
-const title = z.string().trim().min(1).max(160).meta({
+const title = productText.trim().min(1).max(160).meta({
   description:
     'Trimmed before validation: 1–160 UTF-16 code units after removing surrounding whitespace. Foreign validators may count Unicode code points instead.',
 })
@@ -57,39 +67,37 @@ export const publicThreadSchema = z.strictObject({
   createdAt: timestamp,
   archivedAt: timestamp.nullable(),
 })
-export const publicFileNameSchema = z
-  .string()
-  .min(1)
-  .max(255)
-  .regex(/^(?!\.{1,2}$)[^/\\]+$/)
-  .refine(
-    (name) =>
-      name
-        .split('')
-        .every(
-          (char) => char.charCodeAt(0) >= 32 && char.charCodeAt(0) !== 127,
-        ),
-    'File names cannot contain ASCII controls',
-  )
-  .meta({
-    // Native JSON Schema cannot infer the character-code refinement.
-    pattern: '^(?!\\.{1,2}$)[^/\\\\\\u0000-\\u001f\\u007f]+$',
-    description:
-      'File name, not a path. Length is measured in UTF-16 code units at runtime; foreign validators may count Unicode code points.',
-  })
+export const publicFileNameSchema = fileNameSchema
+// Upload declarations and restored browser bytes share this exact MIME boundary.
+// Byte signatures remain the server's authority; exports are not restricted here.
+export const uploadMimeTypeSchema = z.enum([
+  'text/plain',
+  'application/json',
+  'image/png',
+  'image/jpeg',
+  'image/gif',
+  'image/webp',
+  'audio/wav',
+  'video/mp4',
+  'application/pdf',
+])
+export type UploadMimeType = z.infer<typeof uploadMimeTypeSchema>
 const publicFile = {
   name: publicFileNameSchema,
   mimeType: z.string(),
   byteLength: z.number().int().nonnegative(),
   createdAt: timestamp,
 }
-export const publicAssetSchema = z.strictObject({
-  assetID: uuid,
-  source: z.enum(['upload', 'generated']),
-  ...publicFile,
-  messageID: uuid.optional(),
-  runID: uuid.optional(),
-})
+const publicAssetFields = { assetID: uuid, ...publicFile }
+export const publicAssetSchema = z.discriminatedUnion('source', [
+  z.strictObject({ ...publicAssetFields, source: z.literal('upload') }),
+  z.strictObject({
+    ...publicAssetFields,
+    source: z.literal('generated'),
+    messageID: uuid,
+    runID: uuid,
+  }),
+])
 export const assetResponseSchema = z.strictObject({ asset: publicAssetSchema })
 export const assetsResponseSchema = z.strictObject({
   assets: z.array(publicAssetSchema),
@@ -99,6 +107,14 @@ export const publicMessageSchema = z.strictObject({
   role: z.enum(['user', 'assistant']),
   assets: z.array(publicAssetSchema).optional(),
   text: z.string(),
+  sources: webSourcesSchema.optional(),
+  // Derived from the durable terminal receipt, never stream/disconnect state.
+  runOutcome: z
+    .strictObject({
+      runID: uuid,
+      status: z.enum(['completed', 'cancelled']),
+    })
+    .optional(),
   createdAt: timestamp,
 })
 export const activeRunSchema = z.strictObject({
@@ -125,11 +141,7 @@ export const threadResponseSchema = z.strictObject({
 export const failedRunSchema = z.strictObject({
   runID: uuid,
   messageID: uuid,
-  reason: z.enum([
-    'execution-error',
-    'interrupted',
-    'sandbox-recovery-required',
-  ]),
+  reason: publicFailureReasonSchema,
 })
 export const messagesResponseSchema = z.strictObject({
   messages: z.array(publicMessageSchema),
@@ -173,21 +185,28 @@ export const publicSchemas = {
   ErrorResponse: z.strictObject({ error: z.string() }),
 }
 
-export type {
-  PublicThread,
-  PublicMessage,
-  ActiveRun,
-  FailedRun,
-  SessionResponse,
-  ThreadsResponse,
-  ThreadResponse,
-  MessagesResponse,
-  MessageAccepted,
-  CancellationAccepted,
-  PublicAsset,
-  AssetResponse,
-  AssetsResponse,
-} from '../generated/client/types.gen'
+export type PublicThread = z.output<typeof publicThreadSchema>
+export type PublicMessage = z.output<typeof publicMessageSchema>
+export type ActiveRun = z.output<typeof activeRunSchema>
+export type FailedRun = z.output<typeof failedRunSchema>
+export type SessionResponse = z.output<typeof sessionResponseSchema>
+export type ThreadsResponse = z.output<typeof threadsResponseSchema>
+export type ThreadResponse = z.output<typeof threadResponseSchema>
+export type MessagesResponse = z.output<typeof messagesResponseSchema>
+export type MessageAccepted = z.output<typeof messageAcceptedSchema>
+export type CancellationAccepted = z.output<typeof cancellationAcceptedSchema>
+export type PublicAsset = z.output<typeof publicAssetSchema>
+export type AssetResponse = z.output<typeof assetResponseSchema>
+export type AssetsResponse = z.output<typeof assetsResponseSchema>
+
+const inboundNames = new Set([
+  'UUID',
+  'EmptyRequest',
+  'ThreadCreation',
+  'ThreadUpdate',
+  'MessageSubmission',
+  'RunCancellation',
+])
 
 export function publicJSONSchemas() {
   const schemas: Record<string, z.core.JSONSchema.BaseSchema> = {}
@@ -196,6 +215,7 @@ export function publicJSONSchemas() {
       io: 'output',
       target: 'draft-2020-12',
     })
+    if (!inboundNames.has(name)) continue
     schemas[`${name}Input`] = z.toJSONSchema(schema, {
       io: 'input',
       target: 'draft-2020-12',
@@ -203,7 +223,9 @@ export function publicJSONSchemas() {
         if (context.zodSchema !== title) return
         delete context.jsonSchema.minLength
         delete context.jsonSchema.maxLength
-        context.jsonSchema.pattern = '^\\s*\\S(?:[\\s\\S]{0,158}\\S)?\\s*$'
+        context.jsonSchema.allOf = [
+          { pattern: '^\\s*\\S(?:[\\s\\S]{0,158}\\S)?\\s*$' },
+        ]
       },
     })
   }

@@ -2,12 +2,16 @@ import { test, expect } from 'bun:test'
 import { mkdtemp, readdir, copyFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { Client, Pool } from 'pg'
-import { Kysely, PostgresDialect } from 'kysely'
-import type { DB } from '@vid/database/types'
+import { Client, escapeIdentifier, escapeLiteral } from 'pg'
 import { acceptExecutionEvent } from '../../apps/server/src/db/execution-events'
 import { snapshotOwnedMessages } from '../../apps/server/src/db/conversations'
 import { readMigrationEnv } from '@vid/config'
+import {
+  testDatabaseOptions,
+  verifyTestDatabase,
+  settleTestCleanup,
+  openTestDatabase,
+} from './database-fixture'
 import {
   executionCommandSchema,
   executionDeliverySchema,
@@ -27,25 +31,32 @@ const ids = {
  * not a rebuilt imitation of the old tables or a source-text assertion. */
 async function legacyDatabase() {
   const url = new URL(readMigrationEnv().DATABASE_URL)
-  const admin = new Client({ connectionString: url.toString() })
+  const admin = new Client(testDatabaseOptions(url.toString()))
   const name = `asset_migration_${crypto.randomUUID().replaceAll('-', '')}`
+  const db = new Client(testDatabaseOptions(databaseURL(url, name)))
   const directory = await mkdtemp(join(tmpdir(), 'asset-migration-'))
-  const db = new Client({ connectionString: databaseURL(url, name) })
-  await admin.connect()
   let created = false
-  const close = async () => {
-    await db.end()
-    try {
-      // The identifier is generated locally from a UUID, never caller input.
-      if (created) await admin.query(`DROP DATABASE "${name}"`)
-    } finally {
-      await admin.end()
-      await rm(directory, { recursive: true, force: true })
-    }
+  let closing: Promise<void> | undefined
+  const close = () => {
+    closing ??= settleTestCleanup([
+      () => db.end(),
+      async () => {
+        // The identifier is generated locally from a UUID, never caller input.
+        if (created) await admin.query(`DROP DATABASE "${name}"`)
+      },
+      () => admin.end(),
+      () => rm(directory, { recursive: true, force: true }),
+    ])
+    return closing
   }
   try {
+    await admin.connect()
+    await verifyTestDatabase(admin)
     await admin.query(`CREATE DATABASE "${name}" TEMPLATE template0`)
     created = true
+    await admin.query(
+      `COMMENT ON DATABASE ${escapeIdentifier(name)} IS ${escapeLiteral(`vid-test-database:${process.env.VID_TEST_DATABASE_OWNER}`)}`,
+    )
     const files = (await readdir('packages/database/migrations')).filter(
       (file) => file.endsWith('.sql') && file < migration,
     )
@@ -56,6 +67,7 @@ async function legacyDatabase() {
       )
     expect(await migrate(directory, databaseURL(url, name))).toBe(0)
     await db.connect()
+    await verifyTestDatabase(db)
     await db.query(
       `INSERT INTO auth."user" (id,name,email,"emailVerified") VALUES ('migration-user','Migration user','migration@example.invalid',true)`,
     )
@@ -71,10 +83,14 @@ async function legacyDatabase() {
       db,
       url: databaseURL(url, name),
       close,
-      upgrade: async (through = migration) => {
+      // Current consumers require the complete forward schema. Explicit bounds
+      // remain available for tests of an intermediate migration or rollback.
+      upgrade: async (through?: string) => {
         const upgrades = (await readdir('packages/database/migrations')).filter(
           (file) =>
-            file.endsWith('.sql') && file >= migration && file <= through,
+            file.endsWith('.sql') &&
+            file >= migration &&
+            (through === undefined || file <= through),
         )
         for (const file of upgrades)
           await copyFile(
@@ -85,7 +101,15 @@ async function legacyDatabase() {
       },
     }
   } catch (cause) {
-    await close()
+    try {
+      await close()
+    } catch (cleanup) {
+      throw new AggregateError(
+        [cause, cleanup],
+        'Legacy fixture setup failed',
+        { cause },
+      )
+    }
     throw cause
   }
 }
@@ -339,11 +363,10 @@ test.each([
   'unaccepted historical completion survives dbmate upgrade: %j',
   async ({ uppercase, byteLength }) => {
     const fixture = await legacyDatabase()
-    const product = new Kysely<DB>({
-      dialect: new PostgresDialect({
-        pool: new Pool({ connectionString: fixture.url }),
-      }),
-    })
+    const { db: product, close: closeProduct } = openTestDatabase(
+      4,
+      fixture.url,
+    )
     try {
       await seedCommand(fixture.db, [])
       if (uppercase) await uppercaseCommandHeaders(fixture.db)
@@ -509,8 +532,7 @@ test.each([
           .execute(),
       ).toEqual([{ asset_id: ids.asset }, { asset_id: secondAssetID }])
     } finally {
-      await product.destroy()
-      await fixture.close()
+      await settleTestCleanup([closeProduct, fixture.close])
     }
   },
   30000,
@@ -518,11 +540,7 @@ test.each([
 
 test('retained uppercase legacy start authorizes migrated failure and owned failed-run snapshot', async () => {
   const fixture = await legacyDatabase()
-  const product = new Kysely<DB>({
-    dialect: new PostgresDialect({
-      pool: new Pool({ connectionString: fixture.url }),
-    }),
-  })
+  const { db: product, close: closeProduct } = openTestDatabase(4, fixture.url)
   try {
     await seedCommand(fixture.db, [])
     await uppercaseCommandHeaders(fixture.db)
@@ -578,7 +596,6 @@ test('retained uppercase legacy start authorizes migrated failure and owned fail
       }),
     ).toBeNull()
   } finally {
-    await product.destroy()
-    await fixture.close()
+    await settleTestCleanup([closeProduct, fixture.close])
   }
 }, 30000)

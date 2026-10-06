@@ -1,5 +1,10 @@
 import { expect, test } from 'bun:test'
-import { readMigrationEnv, readServerEnv, readWorkerEnv } from './env'
+import {
+  readAdministrationEnv,
+  readMigrationEnv,
+  readServerEnv,
+  readWorkerEnv,
+} from './env'
 
 const authenticationInput = {
   AUTH_BASE_URL: 'https://app.example',
@@ -68,13 +73,13 @@ test('worker has complete execution configuration and no provider secrets', () =
   expect(readWorkerEnv({ ...workerInput, FAL_KEY: 'private' })).toEqual({
     ...workerInput,
     ...budgets,
+    WEB_SEARCH_AUTH_MODE: 'keyless',
     MODEL_CONTEXT_WINDOW: 8192,
     MODEL_MAX_OUTPUT_TOKENS: 1024,
     MODEL_REASONING: false,
     MODEL_INPUT: 'text',
-    MODEL_PROMPT_PATH: '/app/profiles/video/instructions.md',
+    MODEL_PROMPT_PATH: '/app/apps/agent/prompt.md',
     E2B_TEMPLATE: 'base',
-    SANDBOX_PROVIDER: 'e2b',
     SANDBOX_TIMEOUT_MS: 300000,
     LEASE_MS: 30000,
     POLL_MS: 200,
@@ -137,6 +142,62 @@ test('model capabilities are explicit without treating false as a truthy string'
       MODEL_INPUT: 'text,image',
     }).MODEL_INPUT,
   ).toBe('text,image')
+})
+
+test('administration projects only SQL connection and its bounded deadline', () => {
+  expect(
+    readAdministrationEnv({
+      ...workerInput,
+      ...authenticationInput,
+      IO_TIMEOUT_MS: '1000',
+    }),
+  ).toEqual({ DATABASE_URL: connections.DATABASE_URL, IO_TIMEOUT_MS: 1000 })
+  expect(
+    readAdministrationEnv({
+      DATABASE_URL: connections.DATABASE_URL,
+      IO_TIMEOUT_MS: ' ',
+    }),
+  ).toEqual({ DATABASE_URL: connections.DATABASE_URL, IO_TIMEOUT_MS: 5000 })
+  const error = errorMessage(() =>
+    readAdministrationEnv({
+      DATABASE_URL: 'PRIVATE-INVALID-URL',
+      IO_TIMEOUT_MS: '999',
+    }),
+  )
+  expect(error).toContain('DATABASE_URL')
+  expect(error).toContain('IO_TIMEOUT_MS')
+  expect(error).not.toContain('PRIVATE-INVALID-URL')
+})
+
+test('sandbox lifetime is independent of SQL heartbeat timing', () => {
+  expect(
+    readWorkerEnv({
+      ...workerInput,
+      IO_TIMEOUT_MS: '60000',
+      SANDBOX_TIMEOUT_MS: '66000',
+    }).SANDBOX_TIMEOUT_MS,
+  ).toBe(66000)
+})
+
+test('deployment uses the same configuration limits as library callers', () => {
+  expect(
+    readServerEnv({
+      ...connections,
+      ...authenticationInput,
+      VID_DEPLOYMENT: 'compose',
+      IO_TIMEOUT_MS: '6000',
+      FILE_IO_TIMEOUT_MS: '30001',
+    }),
+  ).toMatchObject({ IO_TIMEOUT_MS: 6000, FILE_IO_TIMEOUT_MS: 30001 })
+  expect(
+    readWorkerEnv({
+      ...workerInput,
+      VID_DEPLOYMENT: 'compose',
+      CONCURRENCY: '4',
+      SANDBOX_TIMEOUT_MS: '300001',
+    }),
+  ).toMatchObject({ CONCURRENCY: 4, SANDBOX_TIMEOUT_MS: 300001 })
+  expect(readWorkerEnv(workerInput)).not.toHaveProperty('VID_DEPLOYMENT')
 })
 
 test('migration requires only its database connection', () => {
@@ -370,13 +431,24 @@ test('runtime has bounded IO and a authentication configured only on the server'
     POLL_MS: 200,
   })
   expect(readWorkerEnv(workerInput)).toMatchObject({ IO_TIMEOUT_MS: 5000 })
-  expect(() => readServerEnv({ ...connections, IO_TIMEOUT_MS: '0' })).toThrow()
+  for (const IO_TIMEOUT_MS of ['0', '999', '60001']) {
+    const diagnostic = errorMessage(() =>
+      readServerEnv({ ...connections, ...authenticationInput, IO_TIMEOUT_MS }),
+    )
+    expect(diagnostic).toContain('IO_TIMEOUT_MS')
+    expect(diagnostic).not.toContain('AUTH')
+  }
+  for (const IO_TIMEOUT_MS of ['1000', '60000'])
+    expect(
+      readServerEnv({ ...connections, ...authenticationInput, IO_TIMEOUT_MS })
+        .IO_TIMEOUT_MS,
+    ).toBe(Number(IO_TIMEOUT_MS))
 })
 
 test('trusted model prompt path defaults for blanks and accepts explicit assignment', () => {
   expect(
     readWorkerEnv({ ...workerInput, MODEL_PROMPT_PATH: ' ' }).MODEL_PROMPT_PATH,
-  ).toBe('/app/profiles/video/instructions.md')
+  ).toBe('/app/apps/agent/prompt.md')
   expect(
     readWorkerEnv({ ...workerInput, MODEL_PROMPT_PATH: '/trusted/custom.md' })
       .MODEL_PROMPT_PATH,
@@ -488,4 +560,59 @@ test('server and worker require explicit object credentials and bounded file bud
     expect(message).toContain('OBJECT_STORAGE_ACCESS_KEY_ID')
     expect(message).toContain('OBJECT_STORAGE_SECRET_ACCESS_KEY')
   }
+})
+
+test('worker timer and concurrency bounds reject overflow but retain supported endpoints', () => {
+  for (const [field, setting] of [
+    ['LEASE_MS', '2147483648'],
+    ['POLL_MS', '10001'],
+    ['CONCURRENCY', '33'],
+  ] as const)
+    expect(
+      errorMessage(() => readWorkerEnv({ ...workerInput, [field]: setting })),
+    ).toContain(field)
+  expect(
+    readWorkerEnv({
+      ...workerInput,
+      LEASE_MS: '2147483647',
+      POLL_MS: '10000',
+      CONCURRENCY: '32',
+    }),
+  ).toMatchObject({ LEASE_MS: 2147483647, POLL_MS: 10000, CONCURRENCY: 32 })
+  expect(
+    readWorkerEnv({ ...workerInput, SANDBOX_PROVIDER: 'unused' }),
+  ).not.toHaveProperty('SANDBOX_PROVIDER')
+})
+
+test('worker selects keyless demo auth explicitly and keyed auth requires a worker-only key', () => {
+  expect(readWorkerEnv(workerInput)).toMatchObject({
+    WEB_SEARCH_AUTH_MODE: 'keyless',
+  })
+  expect(
+    readWorkerEnv({
+      ...workerInput,
+      WEB_SEARCH_AUTH_MODE: 'key',
+      TAVILY_API_KEY: 'fixture-search-key',
+    }),
+  ).toMatchObject({
+    WEB_SEARCH_AUTH_MODE: 'key',
+    TAVILY_API_KEY: 'fixture-search-key',
+  })
+  for (const fields of [
+    { WEB_SEARCH_AUTH_MODE: 'key' },
+    { WEB_SEARCH_AUTH_MODE: 'fallback' },
+    { WEB_SEARCH_AUTH_MODE: 'keyless', TAVILY_API_KEY: 'PRIVATE' },
+  ]) {
+    expect(
+      errorMessage(() => readWorkerEnv({ ...workerInput, ...fields })),
+    ).not.toContain('PRIVATE')
+  }
+  expect(
+    readServerEnv({
+      ...connections,
+      ...authenticationInput,
+      WEB_SEARCH_AUTH_MODE: 'key',
+      TAVILY_API_KEY: 'PRIVATE',
+    }),
+  ).not.toHaveProperty('TAVILY_API_KEY')
 })

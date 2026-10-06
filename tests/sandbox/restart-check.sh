@@ -10,11 +10,6 @@ remote_attempted=0
 ssh_vm() { run_stage "$run_timeout" ssh -F "$ssh_config" -T -o ConnectTimeout=5 -o ServerAliveInterval=3 -o ServerAliveCountMax=3 lima-e2b "$@"; }
 cleanup() {
  status=$?; trap - EXIT HUP INT TERM
- if [ -n "$client" ]; then
-  kill "$client" 2>/dev/null || :
-  settle_cleanup "$client" 2>/dev/null || :
-  client=''
- fi
  # The build has no sandbox or runner to reconcile. Seed dispatch can commit
  # before losing its receipt, so cleanup must check actual labelled ownership.
  if [ "$remote_attempted" -eq 1 ]; then
@@ -30,7 +25,16 @@ if sudo timeout 10 docker inspect "$1" >/dev/null 2>&1; then
  sudo timeout 90 docker compose up -d --wait >/dev/null
  sudo timeout 15 docker exec -e E2B_RESTART_PHASE=cleanup "$1" bun test tests/sandbox/native-restart.test.ts
  label=$(sudo timeout 5 docker inspect --format '{{ index .Config.Labels "vid.check.owner" }}' "$1")
- if [ "$label" = "$1" ]; then sudo timeout 5 docker rm -f "$1" >/dev/null; fi
+ [ "$label" = "$1" ] || exit 1
+ sudo timeout 5 docker rm -f "$1" >/dev/null
+else
+ # A failed inspect is not evidence of absence (daemon errors and timeouts
+ # have the same status). Only a successful full listing may release metadata.
+ names=$(sudo timeout 10 docker container ls -a --format '{{.Names}}')
+ if printf '%s\n' "$names" | grep -Fx "$1" >/dev/null; then
+  echo "Cleanup inspection uncertain for owned runner $1" >&2
+  exit 1
+ fi
 fi
 sudo timeout 5 rm -f "/tmp/$1.env"
 CLEAN
@@ -44,7 +48,8 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 # Both the SDK test image and Embed stay on the dedicated Docker daemon.
 run_stage "$setup_timeout" tar --no-xattrs --no-mac-metadata -C "$root" \
-  --exclude=.git --exclude=.cache --exclude=node_modules \
+  --exclude=.git --exclude=.cache --exclude=.playwright-cli \
+  --exclude=.ruff_cache --exclude=node_modules \
   --exclude='.env*' --exclude='credentials*' -cf "$staging/context.tar" .
 ssh_vm sudo timeout 300 docker build --quiet -f deploy/docker/checks.Dockerfile - \
   < "$staging/context.tar" > "$staging/image"

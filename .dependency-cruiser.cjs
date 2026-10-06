@@ -1,4 +1,4 @@
-const apps = ['web', 'server', 'agent']
+const apps = ['server', 'agent']
 
 module.exports = {
   forbidden: [
@@ -21,18 +21,10 @@ module.exports = {
       to: { circular: true },
     },
     {
-      name: 'web-no-private-packages',
-      severity: 'error',
-      from: { path: '^apps/web/' },
-      to: {
-        path: '^packages/((config|database|object-storage)/|contract/(src/execution(?:\\.ts$|/)|generated/execution-))',
-      },
-    },
-    {
       name: 'http-no-execution-contract',
       severity: 'error',
       from: {
-        path: '^packages/contract/(src/http(?:\\.test)?\\.ts$|generated/client/)',
+        path: '^packages/contract/src/http(?:\\.test)?\\.ts$',
       },
       to: { path: '^packages/contract/src/execution(?:\\.ts$|/)' },
     },
@@ -49,7 +41,7 @@ module.exports = {
     tsConfig: { fileName: 'tsconfig.json' },
     tsPreCompilationDeps: true,
     doNotFollow: { path: 'node_modules' },
-    exclude: '(^|/)(dist|coverage|vendor)/',
+    exclude: '(^|/)(dist|coverage)/',
     enhancedResolveOptions: {
       exportsFields: ['exports'],
       conditionNames: ['types', 'import', 'default'],

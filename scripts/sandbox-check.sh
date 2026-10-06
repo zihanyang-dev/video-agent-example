@@ -17,7 +17,6 @@ fi
 if [ "$#" -eq 0 ]; then set -- tests/sandbox/e2b.test.ts; fi
 staging=$(mktemp -d)
 runner="vid-e2b-tests-$$-$(basename "$staging")"
-remote_attempted=0
 ssh_vm() {
   run_stage "$run_timeout" ssh -F "$ssh_config" -T -o ConnectTimeout=5 -o ServerAliveInterval=3 \
     -o ServerAliveCountMax=3 lima-e2b "$@"
@@ -26,46 +25,6 @@ cleanup() {
   status=$?
   trap - EXIT HUP INT TERM
   failed=0
-  if [ -n "$client" ]; then
-    kill "$client" 2>/dev/null || :
-    settle_cleanup "$client" 2>/dev/null || :
-    client=''
-  fi
-  if [ "$remote_attempted" -eq 1 ]; then
-    # Disconnect is not termination proof. Ask the owned remote shell to clean up;
-    # its independent timeout remains effective even when this connection fails.
-    ssh_vm sh -s -- "$runner" <<'CANCEL' || failed=1
-set -eu
-control="$HOME/e2b/.$1"
-if [ -d "$control" ]; then
-  unknown_identity() {
-    echo "Remote process identity unconfirmed for $1; operator cleanup required" >&2
-    exit 1
-  }
-  runner=$1
-  pid=$(cat "$control/pid") || unknown_identity "$runner"
-  case "$pid" in ''|*[!0-9]*) unknown_identity "$runner" ;; esac
-  boot=$(cat "$control/boot-id") || unknown_identity "$runner"
-  start=$(cat "$control/start-ticks") || unknown_identity "$runner"
-  [ -n "$boot" ] && [ -n "$start" ] || unknown_identity "$runner"
-  current_boot=$(cat /proc/sys/kernel/random/boot_id) || unknown_identity "$runner"
-  stat=$(cat "/proc/$pid/stat") || unknown_identity "$runner"
-  # comm may contain spaces and ')'; fields after its last ') ' start at state.
-  fields=${stat##*) }
-  [ "$fields" != "$stat" ] || unknown_identity "$runner"
-  current_start=$(printf '%s\n' "$fields" | cut -d ' ' -f 20)
-  [ "$boot" = "$current_boot" ] && [ "$start" = "$current_start" ] || unknown_identity "$runner"
-  kill -TERM "$pid"
-  set -- "$runner"
-fi
-attempt=0
-while [ -d "$control" ]; do
-  attempt=$((attempt + 1))
-  if [ "$attempt" -ge 10 ]; then echo "Remote cleanup remains unconfirmed for $1" >&2; exit 1; fi
-  sleep 1
-done
-CANCEL
-  fi
   rm -rf "$staging" || failed=1
   if [ "$failed" -ne 0 ]; then echo "Cleanup incomplete for owned runner $runner" >&2; fi
   if [ "$status" -eq 0 ]; then status=$failed; fi
@@ -77,12 +36,12 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 # Build only inside the dedicated VM; never use the host's default Docker context.
 run_stage "$setup_timeout" tar --no-xattrs --no-mac-metadata -C "$root" \
-  --exclude=.git --exclude=.cache --exclude=node_modules \
+  --exclude=.git --exclude=.cache --exclude=.playwright-cli \
+  --exclude=.ruff_cache --exclude=node_modules \
   --exclude='.env*' --exclude='credentials*' -cf "$staging/context.tar" .
 ssh_vm sudo timeout --signal=TERM --kill-after=5 300 docker build --quiet \
   -f deploy/docker/checks.Dockerfile - < "$staging/context.tar" > "$staging/image"
 image=$(cat "$staging/image")
-remote_attempted=1
 ssh_vm timeout --signal=TERM --kill-after=90 240 sh -s -- "$image" "$runner" "$@" <<'REMOTE'
 set -eu
 image=$1
@@ -100,18 +59,10 @@ alias_created=0
 runner_created=0
 allow_rule_created=0
 deny_rule_created=0
-client=''
 cleanup() {
   status=$?
   trap - EXIT HUP INT TERM
   failed=0
-  # Interrupt wait immediately; the native timeout forwards cancellation to
-  # its Docker client. Resource deletion below still checks actual ownership.
-  if [ -n "$client" ]; then
-    kill -TERM "$client" 2>/dev/null || :
-    wait "$client" 2>/dev/null || :
-    client=''
-  fi
   # A disconnected Docker client does not prove its container stopped.
   if [ "$runner_created" -eq 1 ]; then
     ownership=$(sudo timeout 10 docker inspect --format '{{.Id}} {{ index .Config.Labels "vid.check.owner" }}' "$runner" 2>/dev/null) || ownership=''
@@ -146,16 +97,6 @@ trap cleanup EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
-# Publish the PID only after recording its Linux boot/start identity.
-cat /proc/sys/kernel/random/boot_id > "$control/boot-id"
-stat=$(cat "/proc/$$/stat")
-fields=${stat##*) }
-[ "$fields" != "$stat" ]
-# Kernel stat fields use single spaces; leave the test arguments intact.
-start=$(printf '%s\n' "$fields" | cut -d ' ' -f 20)
-case "$start" in ''|*[!0-9]*) exit 1 ;; esac
-printf '%s\n' "$start" > "$control/start-ticks"
-echo $$ > "$control/pid"
 # Serialize the shared TEST-NET alias; never delete a preexisting alias.
 exec 9> "$HOME/e2b/.check-probe.lock"
 flock -w 10 9
@@ -185,8 +126,5 @@ sudo timeout --signal=TERM --kill-after=2 30 docker create --label "vid.check.ow
   --env "E2B_TEST_HOST=$probe_host" --env "E2B_TEST_PORT=$probe_port" \
   --env MODEL_API_KEY=worker-model-canary --env DATABASE_URL=postgres://worker-db-canary \
   --env TURN_TOKEN_SECRET=worker-signing-canary "$image" bun test "$@" >/dev/null
-sudo timeout --signal=TERM --kill-after=2 180 docker start -a "$runner" &
-client=$!
-wait "$client"
-client=''
+sudo timeout --signal=TERM --kill-after=2 180 docker start -a "$runner"
 REMOTE

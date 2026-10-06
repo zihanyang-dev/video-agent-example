@@ -2,6 +2,7 @@ import { expect, test } from 'bun:test'
 import { sha256, type ObjectStore } from '@vid/object-storage'
 import type { ExecutionLease, SandboxSessionPort } from '../execute-run'
 import { assignFileTools } from './files'
+import { fileToolDefinitions } from './file-tools'
 
 function fixture() {
   const bytes = new Uint8Array([0, 255, 128, 13, 10])
@@ -9,8 +10,6 @@ function fixture() {
   const lease: ExecutionLease = {
     threadID: crypto.randomUUID(),
     runID: crypto.randomUUID(),
-    commandID: crypto.randomUUID(),
-    messageID: crypto.randomUUID(),
     text: '',
     fence: 3,
     ownerID: 'worker',
@@ -31,25 +30,21 @@ function fixture() {
   const sandbox: SandboxSessionPort = {
     nativeRef: { provider: 'e2b', id: 'native' },
     close: async () => {},
-    renewTimeout: async () => {},
-    tools: {
-      execute: async () => ({ stdout: '', stderr: '', exitCode: 0 }),
-      read: async () => '',
-      write: async () => {},
+
+    execute: async () => ({ stdout: '', stderr: '', exitCode: 0 }),
+    read: async () => '',
+    write: async () => {},
+    readBytes: async (path, _signal, maxBytes) => {
+      const content = guest.get(path)
+      if (!content || content.byteLength > maxBytes)
+        throw new Error('Guest read unavailable or oversized')
+      return content
     },
-    files: {
-      readBytes: async (path, _signal, maxBytes) => {
-        const content = guest.get(path)
-        if (!content || content.byteLength > maxBytes)
-          throw new Error('Guest read unavailable or oversized')
-        return content
-      },
-      writeBytes: async (path, content) => {
-        guest.set(path, content)
-      },
+    writeBytes: async (path, content) => {
+      guest.set(path, content)
     },
   }
-  const objects = {
+  const objects: ObjectStore = {
     read: async (key) => {
       const content = stored.get(key)
       if (!content) throw new Error('Missing object')
@@ -61,7 +56,7 @@ function fixture() {
       return { byteLength: content.byteLength, sha256: sha256(content) }
     },
     close: () => {},
-  } satisfies ObjectStore
+  }
   return { bytes, assetID, lease, guest, stored, sandbox, objects }
 }
 
@@ -159,4 +154,144 @@ test('file and aggregate byte budgets reject exports before object upload', asyn
   await files.exportFile(request)
   expect(files.exportFile(request)).rejects.toThrow()
   expect(f.stored.size).toBe(2)
+})
+
+for (const budget of ['count', 'bytes'] as const) {
+  test(`${budget} exhaustion rejects before a second guest read without marking uncertainty`, async () => {
+    const f = fixture()
+    f.guest.set('/chosen', f.bytes)
+    let reads = 0
+    let stops = 0
+    const read = f.sandbox.readBytes
+    f.sandbox.readBytes = async (...args) => {
+      reads++
+      return await read(...args)
+    }
+    const files = assignFileTools(f.objects, {
+      maxBytes: budget === 'count' ? 100 : 5,
+      maxFiles: budget === 'count' ? 1 : 10,
+      timeoutMs: 1000,
+    })(f.lease, f.sandbox, () => {
+      stops++
+    })
+    const request = {
+      path: '/chosen',
+      name: 'out.bin',
+      mimeType: 'application/octet-stream',
+      signal: new AbortController().signal,
+    }
+    await files.exportFile(request)
+    const rejection = await files
+      .exportFile(request)
+      .catch((cause: unknown) => cause)
+    expect(rejection).toBeInstanceOf(Error)
+    expect(rejection instanceof Error && rejection.message).toContain(
+      'budget exceeded',
+    )
+    expect(reads).toBe(1)
+    expect(f.stored.size).toBe(2)
+    expect(stops).toBe(0)
+    expect(files.hasUnknownOutcome()).toBe(false)
+  })
+}
+
+for (const action of ['import', 'export'] as const) {
+  test(`${action} shares one deadline and awaits the first phase before rejecting the second`, async () => {
+    const f = fixture()
+    const started = Promise.withResolvers<AbortSignal>()
+    const release = Promise.withResolvers<void>()
+    let mutations = 0
+    if (action === 'import') {
+      f.objects.read = async (_key, _max, signal) => {
+        started.resolve(signal)
+        await release.promise
+        return f.bytes
+      }
+      f.sandbox.writeBytes = async () => {
+        mutations++
+      }
+    } else {
+      f.sandbox.readBytes = async (_path, signal) => {
+        started.resolve(signal)
+        await release.promise
+        return f.bytes
+      }
+      f.objects.put = async (_key, bytes) => {
+        mutations++
+        return { byteLength: bytes.byteLength, sha256: sha256(bytes) }
+      }
+    }
+    const files = assignFileTools(f.objects, {
+      maxBytes: 100,
+      maxFiles: 10,
+      timeoutMs: 10,
+    })(f.lease, f.sandbox, () => {})
+    const signal = new AbortController().signal
+    const operation =
+      action === 'import'
+        ? files.importFile({ assetID: f.assetID, path: '/chosen', signal })
+        : files.exportFile({
+            path: '/chosen',
+            name: 'out.bin',
+            mimeType: 'application/octet-stream',
+            signal,
+          })
+    let settled = false
+    const outcome = operation.finally(() => {
+      settled = true
+    })
+    const deadline = await started.promise
+    try {
+      await new Promise<void>((resolve) => {
+        if (deadline.aborted) resolve()
+        else deadline.addEventListener('abort', () => resolve(), { once: true })
+      })
+      expect(settled).toBe(false)
+    } finally {
+      release.resolve()
+    }
+    expect(await outcome.catch((cause: unknown) => cause)).toBeInstanceOf(Error)
+    expect(mutations).toBe(0)
+    expect(files.hasUnknownOutcome()).toBe(false)
+  })
+}
+
+test('native file definitions guard SDK cancellation before capabilities', async () => {
+  let invoked = 0
+  const files = {
+    assigned: [],
+    prepared: [],
+    hasUnknownOutcome: () => false,
+    importFile: async () => {
+      invoked++
+      return { bytes: new Uint8Array(), mimeType: 'image/png' }
+    },
+    exportFile: async () => {
+      invoked++
+      throw new Error('unexpected')
+    },
+  }
+  const definitions = fileToolDefinitions(
+    files,
+    new AbortController().signal,
+    true,
+    () => {
+      throw new Error('Unexpected byte limit')
+    },
+  )
+  const importTool = definitions[0]!
+  const context = {} as Parameters<typeof importTool.execute>[4]
+  const reason = new Error('owner cancellation')
+  const aborted = AbortSignal.abort(reason)
+  const rejected = await importTool
+    .execute(
+      'fixture',
+      { assetID: crypto.randomUUID(), path: '/chosen' },
+      aborted,
+      undefined,
+      context,
+    )
+    .catch((error: unknown) => error)
+  expect(rejected).toBe(reason)
+  expect(invoked).toBe(0)
 })

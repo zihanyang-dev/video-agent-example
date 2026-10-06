@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/env.ts"
   },
   "dependencies": {
     "zod": "4.6.5"

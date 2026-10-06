@@ -1,4 +1,7 @@
-import { expect, test } from 'bun:test'
+import { expect, spyOn, test } from 'bun:test'
+import { S3Client } from '@aws-sdk/client-s3'
+import { createServer, type Socket } from 'node:net'
+import * as objectStorage from '@vid/object-storage'
 import { readWorkerEnv, readMigrationEnv } from '@vid/config'
 import { executionStreams } from '@vid/contract/execution'
 import { createClient } from 'redis'
@@ -31,15 +34,11 @@ function workerEnv(baseURL = 'http://unused/v1') {
     MODEL_ID: 'local',
     MODEL_CONTEXT_WINDOW: '8192',
     MODEL_MAX_OUTPUT_TOKENS: '1024',
-    MODEL_PROMPT_PATH: new URL(
-      '../../profiles/video/instructions.md',
-      import.meta.url,
-    ).pathname,
-    EGRESS_URL: 'http://unused',
+    MODEL_PROMPT_PATH: new URL('../../apps/agent/prompt.md', import.meta.url)
+      .pathname,
     E2B_API_URL: 'http://unused',
     E2B_SANDBOX_URL: 'http://unused',
     E2B_API_KEY: 'test',
-    TURN_TOKEN_SECRET: 'x'.repeat(32),
     POLL_MS: '10',
   })
 }
@@ -74,21 +73,16 @@ function localModel() {
 function sandbox(close: () => Promise<void>) {
   return {
     nativeRef: { provider: 'e2b', id: 'fixture-native' },
-    renewTimeout: async () => {},
-    files: {
-      readBytes: async () => new Uint8Array(),
-      writeBytes: async () => {},
+    readBytes: async () => new Uint8Array(),
+    writeBytes: async () => {},
+    execute: async () => {
+      throw new Error('unexpected tool')
     },
-    tools: {
-      execute: async () => {
-        throw new Error('unexpected tool')
-      },
-      read: async () => {
-        throw new Error('unexpected tool')
-      },
-      write: async () => {
-        throw new Error('unexpected tool')
-      },
+    read: async () => {
+      throw new Error('unexpected tool')
+    },
+    write: async () => {
+      throw new Error('unexpected tool')
     },
     close,
   }
@@ -120,8 +114,8 @@ async function submit(url: string) {
   return threadID
 }
 async function answer(url: string, threadID: string) {
-  const deadline = Date.now() + 5000
-  while (Date.now() < deadline) {
+  const deadline = performance.now() + 5000
+  while (performance.now() < deadline) {
     const result = await (
       await fetch(`${url}/api/threads/${threadID}/messages`, {
         headers: identities.get(threadID)!,
@@ -132,6 +126,324 @@ async function answer(url: string, threadID: string) {
   }
   throw new Error('No stored answer')
 }
+
+test('server releases every allocated object store when native client construction fails', async () => {
+  const created: objectStorage.ObjectStore[] = []
+  const released = new Set<objectStorage.ObjectStore>()
+  const closes: ReturnType<typeof spyOn>[] = []
+  const nativeConnect = objectStorage.connectObjects
+  const connect = spyOn(objectStorage, 'connectObjects').mockImplementation(
+    (options) => {
+      const store = nativeConnect(options)
+      const nativeClose = store.close.bind(store)
+      created.push(store)
+      closes.push(
+        spyOn(store, 'close').mockImplementation(() => {
+          nativeClose()
+          released.add(store)
+        }),
+      )
+      return store
+    },
+  )
+  try {
+    const failure = await startServer(
+      { ...serverTestEnv(), REDIS_URL: 'ftp://127.0.0.1:6379' },
+      { port: 0 },
+    ).catch((cause: unknown) => cause)
+    expect(failure).toBeInstanceOf(Error)
+    expect(created).toHaveLength(1)
+    expect([...released]).toEqual(created)
+  } finally {
+    connect.mockRestore()
+    for (const close of closes) close.mockRestore()
+    for (const store of created.filter((store) => !released.has(store)))
+      store.close()
+  }
+})
+
+test('server closes its PostgreSQL sockets even when native storage close throws', async () => {
+  const env = serverTestEnv()
+  const proxy = await postgresProxy(env.DATABASE_URL)
+  const server = await startServer(
+    { ...env, DATABASE_URL: proxy.databaseURL },
+    { port: 0 },
+  )
+  const cleanupFailure = new Error('Injected native storage close failure')
+  const storageClose = spyOn(S3Client.prototype, 'destroy')
+  storageClose.mockImplementation(function (this: S3Client) {
+    storageClose.mockRestore()
+    this.destroy()
+    throw cleanupFailure
+  })
+  try {
+    expect((await fetch(`${server.url}/api/session`)).status).toBe(200)
+    expect(proxy.connections).toBeGreaterThan(0)
+    const failure = await server.stop().catch((cause: unknown) => cause)
+    await eventually(() => proxy.closedClients === proxy.connections, 500)
+    expect(proxy.closedClients).toBe(proxy.connections)
+    expect(failure).toBeInstanceOf(AggregateError)
+    if (!(failure instanceof AggregateError))
+      throw new Error('Expected cleanup failure')
+    expect(failure.errors).toContain(cleanupFailure)
+    expect(await server.stop().catch((cause: unknown) => cause)).toBe(failure)
+  } finally {
+    storageClose.mockRestore()
+    await proxy.close()
+    await server.stop().catch(() => {})
+  }
+})
+
+test('server startup retains the connection failure when cleanup also fails', async () => {
+  const cleanupFailure = new Error('Injected native storage close failure')
+  const storageClose = spyOn(S3Client.prototype, 'destroy')
+  storageClose.mockImplementation(function (this: S3Client) {
+    storageClose.mockRestore()
+    this.destroy()
+    throw cleanupFailure
+  })
+  try {
+    const failure = await startServer(
+      { ...serverTestEnv(), REDIS_URL: 'redis://127.0.0.1:1' },
+      { port: 0 },
+    ).catch((cause: unknown) => cause)
+    expect(failure).toBeInstanceOf(AggregateError)
+    if (!(failure instanceof AggregateError))
+      throw new Error('Expected startup failure')
+    const primary: unknown = failure.errors[0]
+    expect(primary).toBeInstanceOf(Error)
+    expect(String(primary)).toContain('ECONNREFUSED')
+    const cleanup: unknown = failure.errors[1]
+    expect(cleanup).toBeInstanceOf(AggregateError)
+    if (!(cleanup instanceof AggregateError))
+      throw new Error('Expected cleanup failure')
+    expect(cleanup.errors).toContain(cleanupFailure)
+  } finally {
+    storageClose.mockRestore()
+  }
+})
+
+test('server joins both native Redis initializations when TCP accepts but protocol initialization stalls', async () => {
+  const sockets = new Set<Socket>()
+  let accepted = 0
+  const tcp = createServer((socket) => {
+    accepted += 1
+    sockets.add(socket)
+    socket.on('data', () => {})
+    socket.once('close', () => sockets.delete(socket))
+  })
+  await new Promise<void>((resolve) => tcp.listen(0, '127.0.0.1', resolve))
+  const address = tcp.address()
+  if (address === null || typeof address === 'string')
+    throw new Error('Expected native TCP listener')
+  let settled = false
+  const result = startServer(
+    {
+      ...serverTestEnv(),
+      IO_TIMEOUT_MS: 1000,
+      REDIS_URL: `redis://127.0.0.1:${address.port}`,
+    },
+    { port: 0 },
+  )
+    .then(
+      () => {
+        throw new Error('Silent Redis unexpectedly initialized')
+      },
+      (cause: unknown) => cause,
+    )
+    .finally(() => {
+      settled = true
+    })
+  try {
+    await eventually(() => settled, 3000)
+    expect(settled).toBe(true)
+    expect(await result).toBeInstanceOf(Error)
+    await eventually(() => sockets.size === 0, 500)
+    expect(accepted).toBe(2)
+    expect(sockets.size).toBe(0)
+  } finally {
+    for (const socket of sockets) socket.destroy()
+    await result
+    await new Promise<void>((resolve, reject) =>
+      tcp.close((cause) => (cause ? reject(cause) : resolve())),
+    )
+  }
+})
+
+test('server caps owned file work without blocking ordinary reads and releases admission after completion', async () => {
+  const { db, close } = openTestDatabase()
+  const login = await signedTestIdentity(db)
+  const server = await startServer(serverTestEnv(), { port: 0 })
+  let unlock = () => {}
+  let locked = () => {}
+  const entered = new Promise<void>((resolve) => {
+    locked = resolve
+  })
+  const held = new Promise<void>((resolve) => {
+    unlock = resolve
+  })
+  const locking = db.transaction().execute(async (tx) => {
+    await sql`LOCK TABLE product.assets IN ACCESS EXCLUSIVE MODE`.execute(tx)
+    locked()
+    await held
+  })
+  const requests: Promise<Response>[] = []
+  const file = () =>
+    fetch(`${server.url}/api/assets/${crypto.randomUUID()}/file`, {
+      headers: login.headers,
+    })
+  try {
+    await entered
+    requests.push(...Array.from({ length: 4 }, file))
+    let blocked = 0
+    const deadline = performance.now() + 2000
+    while (blocked !== 4 && performance.now() < deadline) {
+      const observed = await sql<{
+        count: string
+      }>`SELECT count(*)::text AS count FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query LIKE ${'%"product"."assets"%'}`.execute(
+        db,
+      )
+      blocked = Number(observed.rows[0]?.count)
+      await Bun.sleep(10)
+    }
+    expect(blocked).toBe(4)
+    expect((await file()).status).toBe(429)
+    expect(
+      (await fetch(`${server.url}/api/session`, { headers: login.headers }))
+        .status,
+    ).toBe(200)
+    unlock()
+    await locking
+    expect(
+      (await Promise.all(requests)).map((response) => response.status),
+    ).toEqual([404, 404, 404, 404])
+    expect((await file()).status).toBe(404)
+  } finally {
+    unlock()
+    await locking
+    await Promise.allSettled(requests)
+    await Promise.allSettled([server.stop(), close()])
+  }
+})
+
+test('unsupported inherited MIME headers are rejected without stopping HTTP', async () => {
+  const { db, close } = openTestDatabase()
+  const login = await signedTestIdentity(db)
+  const server = await startServer(serverTestEnv(), { port: 0 })
+  try {
+    const threadID = crypto.randomUUID()
+    expect(
+      (
+        await fetch(`${server.url}/api/threads`, {
+          method: 'POST',
+          headers: login.headers,
+          body: JSON.stringify({ threadID, title: 'MIME boundary' }),
+        })
+      ).status,
+    ).toBe(201)
+    for (const mimeType of ['constructor', 'toString', '__proto__']) {
+      const headers = new Headers(login.headers)
+      headers.set('content-type', mimeType)
+      headers.set('x-asset-id', crypto.randomUUID())
+      headers.set('x-file-name', 'note.txt')
+      expect(
+        (
+          await fetch(`${server.url}/api/threads/${threadID}/assets`, {
+            method: 'POST',
+            headers,
+            body: 'hello',
+          })
+        ).status,
+      ).toBe(415)
+      expect(
+        (await fetch(`${server.url}/api/session`, { headers: login.headers }))
+          .status,
+      ).toBe(200)
+    }
+    expect(
+      await db
+        .selectFrom('product.assets')
+        .select('asset_id')
+        .where('thread_id', '=', threadID)
+        .execute(),
+    ).toEqual([])
+  } finally {
+    await server.stop()
+    await close()
+  }
+})
+
+test.each(['hello\u0000world', '\ud800', '\udc00'])(
+  'unrepresentable input %j is rejected before PostgreSQL without stopping HTTP',
+  async (text) => {
+    const { db, close } = openTestDatabase()
+    const login = await signedTestIdentity(db)
+    const server = await startServer(serverTestEnv(), { port: 0 })
+    const threadID = crypto.randomUUID()
+    const rejectedThreadID = crypto.randomUUID()
+    const messageID = crypto.randomUUID()
+    try {
+      expect(
+        (
+          await fetch(`${server.url}/api/threads`, {
+            method: 'POST',
+            headers: login.headers,
+            body: JSON.stringify({ threadID, title: 'Original title' }),
+          })
+        ).status,
+      ).toBe(201)
+      for (const [path, method, input] of [
+        [`/api/threads/${threadID}/messages`, 'POST', { messageID, text }],
+        ['/api/threads', 'POST', { threadID: rejectedThreadID, title: text }],
+        [`/api/threads/${threadID}`, 'PATCH', { title: text }],
+      ] as const) {
+        const response = await fetch(`${server.url}${path}`, {
+          method,
+          headers: login.headers,
+          body: JSON.stringify(input),
+        })
+        expect(response.status).toBe(400)
+        expect(
+          (await fetch(`${server.url}/api/session`, { headers: login.headers }))
+            .status,
+        ).toBe(200)
+      }
+      expect(
+        await db
+          .selectFrom('product.threads')
+          .select('thread_id')
+          .where('thread_id', '=', rejectedThreadID)
+          .execute(),
+      ).toEqual([])
+      expect(
+        (
+          await db
+            .selectFrom('product.threads')
+            .select('title')
+            .where('thread_id', '=', threadID)
+            .executeTakeFirstOrThrow()
+        ).title,
+      ).toBe('Original title')
+      expect(
+        await db
+          .selectFrom('product.messages')
+          .select('message_id')
+          .where('thread_id', '=', threadID)
+          .execute(),
+      ).toEqual([])
+      expect(
+        await db
+          .selectFrom('product.command_outbox')
+          .select('command_id')
+          .where('thread_id', '=', threadID)
+          .execute(),
+      ).toEqual([])
+    } finally {
+      await server.stop().catch(() => {})
+      await close()
+    }
+  },
+)
 
 // Fresh database/Redis from scripts/database-check.sh; real Pi, no cloud or VM.
 test('HTTP -> command -> leased Pi -> private history -> event -> stored public answer', async () => {
@@ -203,8 +515,10 @@ test('poison delivery fails the owning process and remains pending, without ACK 
   commands.on('error', () => {})
   await commands.connect()
   const worker = await startWorker(workerEnv(), noExternalExecution)
+  let replacement: Awaited<ReturnType<typeof startWorker>> | undefined
+  let id: string | undefined
   try {
-    const id = await commands.xAdd(executionStreams.commands, '*', {
+    id = await commands.xAdd(executionStreams.commands, '*', {
       command: '{invalid',
     })
     const failure = await worker.done.then(
@@ -223,7 +537,7 @@ test('poison delivery fails the owning process and remains pending, without ACK 
     expect(pending).toHaveLength(1)
     expect(pending[0]?.deliveriesCounter).toBe(1)
     await Bun.sleep(1100)
-    const replacement = await startWorker(workerEnv(), noExternalExecution)
+    replacement = await startWorker(workerEnv(), noExternalExecution)
     const recoveredFailure = await replacement.done.then(
       () => null,
       (error: unknown) => error,
@@ -237,15 +551,25 @@ test('poison delivery fails the owning process and remains pending, without ACK 
       1,
     )
     expect(recovered[0]?.deliveriesCounter).toBe(2)
-    await commands.xAck(
-      executionStreams.commands,
-      executionStreams.commandGroup,
-      id,
-    )
-    await commands.xDel(executionStreams.commands, id)
   } finally {
-    await worker.stop().catch(() => {})
-    commands.destroy()
+    await Promise.allSettled([
+      worker.stop(),
+      ...(replacement ? [replacement.stop()] : []),
+    ])
+    const poisonID = id
+    const removed =
+      poisonID === undefined
+        ? Promise.resolve()
+        : commands
+            .xAck(
+              executionStreams.commands,
+              executionStreams.commandGroup,
+              poisonID,
+            )
+            .then(() => commands.xDel(executionStreams.commands, poisonID))
+    await removed.finally(() => {
+      if (commands.isOpen) commands.destroy()
+    })
   }
 }, 15000)
 
@@ -363,8 +687,6 @@ test('established PostgreSQL response blackhole settles owned SQL and worker shu
   const objects = {
     read: async () => new Uint8Array(),
     put: async () => ({ byteLength: 0, sha256: '0'.repeat(64) }),
-    remove: async () => {},
-    list: async () => ({ objects: [], continuationToken: undefined }),
     close: () => {
       storageClosed = true
     },
@@ -387,7 +709,7 @@ test('established PostgreSQL response blackhole settles owned SQL and worker shu
     worker.own(querying)
     await eventually(() => proxy.requests > before)
     expect(proxy.requests).toBeGreaterThan(before)
-    const started = Date.now()
+    const started = performance.now()
     stopping = worker
       .stop()
       .catch((error: unknown) => {
@@ -398,7 +720,7 @@ test('established PostgreSQL response blackhole settles owned SQL and worker shu
       })
     await eventually(() => settled, 1500)
     expect(settled).toBe(true)
-    expect(Date.now() - started).toBeLessThan(1500)
+    expect(performance.now() - started).toBeLessThan(1500)
     expect(failure).toBeInstanceOf(AggregateError)
     expect(storageClosed).toBe(true)
     expect(worker.commands.isOpen).toBe(false)
@@ -440,7 +762,7 @@ test('server process settles HTTP and background SQL after an established Postgr
     }).catch(() => undefined)
     await eventually(() => proxy.requests > before)
     expect(proxy.requests).toBeGreaterThan(before)
-    const started = Date.now()
+    const started = performance.now()
     stopping = server
       .stop()
       .catch((error: unknown) => {
@@ -451,7 +773,7 @@ test('server process settles HTTP and background SQL after an established Postgr
       })
     await eventually(() => settled, 1500)
     expect(settled).toBe(true)
-    expect(Date.now() - started).toBeLessThan(1500)
+    expect(performance.now() - started).toBeLessThan(1500)
     expect(failure).toBeInstanceOf(AggregateError)
     await eventually(() => proxy.closedClients === proxy.connections)
     expect(proxy.closedClients).toBe(proxy.connections)
@@ -467,7 +789,6 @@ test('blackholed worker database stops an active turn and settles pause without 
   const env = workerEnv()
   const proxy = await postgresProxy(env.DATABASE_URL)
   const server = await startServer(serverTestEnv(), { port: 0 })
-  const turning = gate()
   let turns = 0
   let allocations = 0
   let pauses = 0
@@ -484,7 +805,6 @@ test('blackholed worker database stops an active turn and settles pause without 
         async turn({ signal }) {
           turns++
           proxy.blackhole()
-          turning.release()
           await new Promise<void>((resolve) => {
             signal.addEventListener('abort', () => resolve(), { once: true })
             if (signal.aborted) resolve()
@@ -513,11 +833,13 @@ test('blackholed worker database stops an active turn and settles pause without 
     })
   try {
     const threadID = await submit(server.url)
-    await turning.promise
-    const started = Date.now()
+    // A pre-turn failure must still reach finally and settle both processes.
+    await eventually(() => turns > 0 || settled, 3000)
+    expect(turns).toBe(1)
+    const started = performance.now()
     await eventually(() => settled, 3000)
     expect(settled).toBe(true)
-    expect(Date.now() - started).toBeLessThan(3000)
+    expect(performance.now() - started).toBeLessThan(3000)
     expect(failure).toBeInstanceOf(AggregateError)
     expect(aborted).toBe(true)
     expect(pauses).toBe(1)
@@ -558,8 +880,6 @@ test('worker storage closes only after an owned slow tool/pause task settles, in
   const objects = {
     read: async () => new Uint8Array(),
     put: async () => ({ byteLength: 0, sha256: '0'.repeat(64) }),
-    remove: async () => {},
-    list: async () => ({ objects: [], continuationToken: undefined }),
     close: () => {
       closed = true
     },
@@ -567,7 +887,6 @@ test('worker storage closes only after an owned slow tool/pause task settles, in
   const worker = new WorkerProcess(env, undefined, objects)
   worker.own(settlement)
   const stopping = worker.stop()
-  await Bun.sleep(10)
   expect(closed).toBe(false)
   released()
   await stopping
@@ -594,10 +913,6 @@ test('process S3 closes after actual slow file export and native pause settlemen
       retainedBytes = bytes.byteLength
       return { byteLength: bytes.byteLength, sha256: '0'.repeat(64) }
     },
-    remove: async () => {
-      throw new Error('Uncertain uploads must not be deleted')
-    },
-    list: async () => ({ objects: [], continuationToken: undefined }),
     close: () => {
       closed = true
     },
@@ -606,8 +921,6 @@ test('process S3 closes after actual slow file export and native pause settlemen
   const lease: ExecutionLease = {
     threadID: crypto.randomUUID(),
     runID: crypto.randomUUID(),
-    commandID: crypto.randomUUID(),
-    messageID: crypto.randomUUID(),
     text: 'export',
     history: [],
     fence: 1,
@@ -615,12 +928,11 @@ test('process S3 closes after actual slow file export and native pause settlemen
   }
   const assigned: SandboxSessionPort = {
     nativeRef: { provider: 'e2b', id: 'known-native' },
-    renewTimeout: async () => {},
-    files: {
-      readBytes: async () => new Uint8Array([0, 255]),
-      writeBytes: async () => {},
-    },
-    tools: sandbox(async () => {}).tools,
+    readBytes: async () => new Uint8Array([0, 255]),
+    writeBytes: async () => {},
+    execute: sandbox(async () => {}).execute,
+    read: sandbox(async () => {}).read,
+    write: sandbox(async () => {}).write,
     close: async () => {
       pausing.release()
       await paused.promise

@@ -12,7 +12,7 @@ import type { OwnedThread } from './submission'
 import { hasPublicCursor } from '../db/execution-events'
 import { cancelRun, hasAcceptedRun } from '../db/cancellations'
 import { acceptMessageIntent } from '../db/submissions'
-import { observeEvents, type RegisterSubscription } from './event-stream'
+import { observeEvents } from './event-stream'
 const cursorSchema = z
   .string()
   .regex(/^(0|[1-9][0-9]*)$/)
@@ -23,7 +23,7 @@ const conflict = () => Response.json({ error: 'Conflict' }, { status: 409 })
 export type ConversationOptions = Readonly<{
   signal: AbortSignal
   pollIntervalMs: number
-  registerSubscription?: RegisterSubscription
+  ownRead?: (pending: Promise<void>) => void
 }>
 
 export async function submitMessage(
@@ -110,9 +110,7 @@ export async function openObservation(
     requestSignal: request.signal,
     processSignal: options.signal,
     authorize: options.authorize,
-    ...(options.registerSubscription
-      ? { registerSubscription: options.registerSubscription }
-      : {}),
+    ...(options.ownRead ? { ownRead: options.ownRead } : {}),
   })
 }
 
@@ -128,6 +126,5 @@ function observationCursor(
     .object({ after: cursorSchema.optional() })
     .safeParse(forwardedProps ?? {})
   if (!props.success) return null
-  const after = cursorSchema.safeParse(props.data.after ?? '0')
-  return after.success ? after.data : null
+  return props.data.after ?? '0'
 }
