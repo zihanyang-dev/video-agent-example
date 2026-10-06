@@ -7,7 +7,7 @@ if [ "$#" -gt 0 ]; then shift; fi
 root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 . "$root/scripts/check-lifecycle.sh"
 staging=$(mktemp -d)
-owner="vid-database-$$-$(basename "$staging")"
+owner="vid-database-$$-$(basename "$staging" | tr '[:upper:].' '[:lower:]-')"
 test_owner=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')
 network="$owner"
 database="postgres-$owner"
