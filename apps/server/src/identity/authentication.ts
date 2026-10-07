@@ -3,11 +3,7 @@ import type { Kysely } from 'kysely'
 import type { DB } from '@vid/database/types'
 import { openAPI } from 'better-auth/plugins'
 import { revokeSession } from '../db/sessions'
-import {
-  readBody,
-  requestBodyRejection,
-  type BodyCollectionPolicy,
-} from '../request-body'
+import { readBody, requestBodyRejection, type BodyCollectionPolicy } from '../request-body'
 import { publicSchemas } from '@vid/contract/http'
 
 export type AuthenticationSettings = Readonly<{
@@ -65,10 +61,7 @@ export function authenticationOptions(
   } satisfies BetterAuthOptions
 }
 
-export function createAuthentication(
-  db: Kysely<DB>,
-  settings: AuthenticationSettings,
-) {
+export function createAuthentication(db: Kysely<DB>, settings: AuthenticationSettings) {
   return betterAuth(authenticationOptions(db, settings))
 }
 
@@ -96,14 +89,10 @@ export async function signOut(
   request: Request,
   bodyCollection: BodyCollectionPolicy,
 ) {
-  if (request.method !== 'POST')
-    return new Response('Method not allowed', { status: 405 })
+  if (request.method !== 'POST') return new Response('Method not allowed', { status: 405 })
   if (request.headers.get('origin') !== auth.options.baseURL)
     return new Response('Untrusted request origin', { status: 403 })
-  if (
-    request.headers.get('content-type')?.split(';')[0]?.trim() !==
-    'application/json'
-  )
+  if (request.headers.get('content-type')?.split(';')[0]?.trim() !== 'application/json')
     return new Response('Expected JSON request', { status: 415 })
 
   let body: unknown

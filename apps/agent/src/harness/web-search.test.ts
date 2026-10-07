@@ -8,17 +8,10 @@ const source = {
   url: 'https://example.org/story',
   content: '<p>Evidence</p>',
 }
-function tool(
-  transport: SearchTransport,
-  owner = new AbortController().signal,
-) {
+function tool(transport: SearchTransport, owner = new AbortController().signal) {
   return webSearchTool({ authMode: 'keyless', transport }, owner)
 }
-async function run(
-  native: ReturnType<typeof tool>,
-  query = 'public facts',
-  signal?: AbortSignal,
-) {
+async function run(native: ReturnType<typeof tool>, query = 'public facts', signal?: AbortSignal) {
   const result = await native.execute(
     'fixture',
     { query },
@@ -26,9 +19,10 @@ async function run(
     undefined,
     {} as Parameters<typeof native.execute>[4],
   )
-  return JSON.parse(
-    result.content[0]!.type === 'text' ? result.content[0]!.text : '',
-  ) as Record<string, unknown>
+  return JSON.parse(result.content[0]!.type === 'text' ? result.content[0]!.text : '') as Record<
+    string,
+    unknown
+  >
 }
 
 test('fixed provider request and bounded sanitized citation evidence', async () => {
@@ -37,9 +31,7 @@ test('fixed provider request and bounded sanitized citation evidence', async () 
     dispatches++
     expect(url).toBe('https://api.tavily.com/search')
     expect(init?.redirect).toBe('error')
-    expect(new Headers(init?.headers).get('X-Tavily-Access-Mode')).toBe(
-      'keyless',
-    )
+    expect(new Headers(init?.headers).get('X-Tavily-Access-Mode')).toBe('keyless')
     expect(new Headers(init?.headers).has('authorization')).toBe(false)
     expect(JSON.parse(init?.body as string)).toEqual({
       query: 'public facts',
@@ -71,31 +63,26 @@ test('parallel calls reserve three dispatches before await; no retry/refund', as
     await Bun.sleep(10)
     throw new Error('PRIVATE KEY')
   }) as SearchTransport)
-  const results = await Promise.all(
-    Array.from({ length: 6 }, () => run(native)),
-  )
+  const results = await Promise.all(Array.from({ length: 6 }, () => run(native)))
   expect(dispatches).toBe(3)
   expect(JSON.stringify(results)).not.toContain('PRIVATE KEY')
   expect(
-    results.filter(
-      (result) => result.error === 'Search limit reached for this turn.',
-    ),
+    results.filter((result) => result.error === 'Search limit reached for this turn.'),
   ).toHaveLength(3)
 })
 
 test('empty is explicit, bad shape and oversized body are safe errors', async () => {
   expect(
-    await run(
-      tool((async () => Response.json({ results: [] })) as SearchTransport),
-    ),
+    await run(tool((async () => Response.json({ results: [] })) as SearchTransport)),
   ).toMatchObject({ status: 'empty', results: [] })
   for (const response of [
     Response.json({ results: 'PRIVATE' }),
     new Response('x'.repeat(262145)),
   ]) {
-    expect(
-      await run(tool((async () => response) as SearchTransport)),
-    ).toMatchObject({ status: 'unavailable', error: 'Web search unavailable.' })
+    expect(await run(tool((async () => response) as SearchTransport))).toMatchObject({
+      status: 'unavailable',
+      error: 'Web search unavailable.',
+    })
   }
 })
 
@@ -112,9 +99,9 @@ test('invalid queries never dispatch; pre-aborted owner wins over SDK signal', a
   const owner = new AbortController()
   const reason = new Error('lease lost')
   owner.abort(reason)
-  expect(
-    run(tool(transport, owner.signal), 'public', new AbortController().signal),
-  ).rejects.toBe(reason)
+  expect(run(tool(transport, owner.signal), 'public', new AbortController().signal)).rejects.toBe(
+    reason,
+  )
   expect(dispatches).toBe(0)
 })
 
@@ -135,9 +122,7 @@ test('unsafe citation URLs are omitted and model JSON remains within 16 KiB', as
       content: '中'.repeat(3000),
     })),
   ]
-  const result = await run(
-    tool((async () => Response.json({ results })) as SearchTransport),
-  )
+  const result = await run(tool((async () => Response.json({ results })) as SearchTransport))
   expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThanOrEqual(16384)
   expect(JSON.stringify(result)).not.toContain('secret')
   expect(result.truncated).toBe(true)
@@ -235,10 +220,47 @@ test('encoded HTML and private host spellings never become citation evidence', a
         ],
       })) as SearchTransport),
   )
-  expect(result.results).toEqual([
-    { title: 'Title', url: source.url, snippet: 'Public' },
-  ])
+  expect(result.results).toEqual([{ title: 'Title', url: source.url, snippet: 'Public' }])
   expect(JSON.stringify(result)).not.toContain('PRIVATE')
+})
+
+test('sanitization decodes entities before removing private markup and invisible text', async () => {
+  const result = await run(
+    tool((async () =>
+      Response.json({
+        results: [
+          {
+            ...source,
+            title: '&lt;b&gt;Public&lt;/b&gt;&nbsp;&quot;&apos;&amp;',
+            content:
+              '&lt;script&gt;PRIVATE&lt;/script&gt;A&nbsp;&amp;B&#x1F600;&#0;&#x110000;\u200b\n',
+          },
+        ],
+      })) as SearchTransport),
+  )
+  expect(result.results).toEqual([{ title: 'Public "\'&', url: source.url, snippet: 'A &B😀' }])
+  expect(result.truncated).toBe(true)
+})
+
+test('title and snippet limits retain complete astral characters at the boundary', async () => {
+  const title = 'a'.repeat(255)
+  const snippet = 'b'.repeat(1499)
+  const result = await run(
+    tool((async () =>
+      Response.json({
+        results: [
+          {
+            ...source,
+            title: `${title}😀discarded`,
+            content: `${snippet}🎬discarded`,
+          },
+        ],
+      })) as SearchTransport),
+  )
+  expect(result.results).toEqual([
+    { title: `${title}😀`, url: source.url, snippet: `${snippet}🎬` },
+  ])
+  expect(result.truncated).toBe(true)
 })
 
 test('key mode uses only bound worker key and omits credentials from tool output', async () => {
@@ -247,12 +269,8 @@ test('key mode uses only bound worker key and omits credentials from tool output
       authMode: 'key',
       apiKey: 'fixture-secret',
       transport: (async (_url, init) => {
-        expect(new Headers(init?.headers).get('Authorization')).toBe(
-          'Bearer fixture-secret',
-        )
-        expect(new Headers(init?.headers).has('X-Tavily-Access-Mode')).toBe(
-          false,
-        )
+        expect(new Headers(init?.headers).get('Authorization')).toBe('Bearer fixture-secret')
+        expect(new Headers(init?.headers).has('X-Tavily-Access-Mode')).toBe(false)
         return Response.json({ results: [source], api_key: 'fixture-secret' })
       }) as SearchTransport,
     },
@@ -327,9 +345,7 @@ test('real loopback HTTP rejects redirects and caps decompressed provider bytes'
       }
       return new Response(
         Bun.gzipSync(
-          new TextEncoder().encode(
-            JSON.stringify({ results: [], padding: 'x'.repeat(262144) }),
-          ),
+          new TextEncoder().encode(JSON.stringify({ results: [], padding: 'x'.repeat(262144) })),
         ),
         {
           headers: {
@@ -471,7 +487,5 @@ test('normalized citation URL length is bounded after native percent encoding', 
     (sources) => found.push(...sources),
   )
   await run(native)
-  expect(found).toEqual([
-    { title: 'Public', url: 'https://example.org/%C3%A9' },
-  ])
+  expect(found).toEqual([{ title: 'Public', url: 'https://example.org/%C3%A9' }])
 })

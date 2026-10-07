@@ -20,8 +20,7 @@ function fixture() {
           return Response.json({ message: 'missing' }, { status: 404 })
         return new Response('native HTTP file bytes')
       }
-      if (url.pathname.endsWith('/pause'))
-        return new Response(null, { status: 204 })
+      if (url.pathname.endsWith('/pause')) return new Response(null, { status: 204 })
       return new Response('unexpected route', { status: 500 })
     },
   })
@@ -62,17 +61,14 @@ for (const scenario of ['success', 'absence', 'quota']) {
           scenario === 'quota' ? 1 : 100,
         )
         .catch((error: unknown) => error)
-      if (scenario === 'success')
-        expect(outcome).toEqual(Buffer.from('native HTTP file bytes'))
+      if (scenario === 'success') expect(outcome).toEqual(Buffer.from('native HTTP file bytes'))
       else expect(outcome).toBeInstanceOf(Error)
       expect(await session.readBytes('/file', signal, 100)).toEqual(
         Buffer.from('native HTTP file bytes'),
       )
       await session.close()
       expect(native.paths.filter((path) => path === '/files')).toHaveLength(2)
-      expect(
-        native.paths.filter((path) => path.endsWith('/pause')),
-      ).toHaveLength(1)
+      expect(native.paths.filter((path) => path.endsWith('/pause'))).toHaveLength(1)
     } finally {
       await native.stop()
     }

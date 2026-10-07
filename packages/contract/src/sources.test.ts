@@ -31,10 +31,7 @@ test('sources are strict optional canonical completion facts, never cancellation
     [{ ...sources[0], snippet: 'PRIVATE CANARY' }],
     [{ ...sources[0], url: 'https://127.0.0.1/' }],
   ]) {
-    expect(
-      executionEventSchema.safeParse({ ...completed, sources: invalid })
-        .success,
-    ).toBe(false)
+    expect(executionEventSchema.safeParse({ ...completed, sources: invalid }).success).toBe(false)
     expect(
       publicMessageSchema.safeParse({
         messageID: id,
@@ -46,10 +43,7 @@ test('sources are strict optional canonical completion facts, never cancellation
     ).toBe(false)
   }
   const { messageID: _messageID, text: _text, ...terminal } = completed
-  expect(
-    executionEventSchema.safeParse({ ...terminal, kind: 'run-cancelled' })
-      .success,
-  ).toBe(false)
+  expect(executionEventSchema.safeParse({ ...terminal, kind: 'run-cancelled' }).success).toBe(false)
   expect(
     executionEventSchema.safeParse({
       ...terminal,

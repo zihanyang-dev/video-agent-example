@@ -1,47 +1,41 @@
 import { once } from 'node:events'
+import { readFile } from 'node:fs/promises'
+import type { Kysely } from 'kysely'
+import { createClient, type RedisClientOptions, type RedisClientType } from 'redis'
+
+import type { WorkerEnv } from '@vid/config'
 import { openDatabase } from '@vid/database/connection'
 import type { DB } from '@vid/database/types'
-import type { Kysely } from 'kysely'
-import {
-  createClient,
-  type RedisClientOptions,
-  type RedisClientType,
-} from 'redis'
-
 import { connectObjects, type ObjectStore } from '@vid/object-storage'
+
+import { acceptCommands, initializeCommands } from './execution/commands'
+import { claimExecutionRun } from './execution/db/execution-leases'
+import { bindExecutionWrites } from './execution/db/run-writes'
+import { relayEvents } from './execution/events'
+import type { ExecuteRunDependencies } from './execution/contract'
 import { assignFileTools } from './harness/files'
-import { readFile } from 'node:fs/promises'
-import type { WorkerEnv } from '@vid/config'
-import { openE2BSandbox } from './sandbox/e2b'
-import { acceptCommands, initializeCommands } from './commands'
-import { relayEvents } from './events'
-import { bindExecutionWrites } from './db/run-writes'
-import { claimExecutionRun } from './db/execution-leases'
-import type { ExecuteRunDependencies } from './execute-run'
 import { createPiHarness } from './harness/pi'
-import { runWorker } from './run-loop'
+import { runWorker } from './execution/run-loop'
+import { openE2BSandbox } from './sandbox/e2b'
 import type { WorkerHealth } from './worker-health'
 
-type WorkerAssignment = Partial<
-  Pick<ExecuteRunDependencies, 'harness' | 'openSandbox'>
-> & { signal?: AbortSignal }
+type WorkerAssignment = {
+  readonly harness?: ExecuteRunDependencies['harness']
+  readonly openSandbox?: ExecuteRunDependencies['openSandbox']
+  signal?: AbortSignal
+}
+
+type WorkerConnections = Pick<WorkerEnv, 'DATABASE_URL' | 'REDIS_URL' | 'IO_TIMEOUT_MS'> & {
+  POLL_MS?: WorkerEnv['POLL_MS']
+}
 
 /** Test DI is restricted to an explicit trusted library caller, never environment input. */
-export async function startWorker(
-  env: WorkerEnv,
-  assignment: WorkerAssignment = {},
-) {
-  const harness =
-    assignment.harness === undefined
-      ? await loadConfiguredHarness(env)
-      : assignment.harness
-  const openSandbox =
-    assignment.openSandbox === undefined
-      ? bindConfiguredSandbox(env)
-      : assignment.openSandbox
+export async function startWorker(env: WorkerEnv, assignment: WorkerAssignment = {}) {
+  // Destructuring defaults are lazy and apply only to undefined, not null.
+  const { harness = await loadConfiguredHarness(env), openSandbox = bindConfiguredSandbox(env) } =
+    assignment
   // Only a caller supplying both execution capabilities bypasses SDK/storage.
-  const needsStorage =
-    assignment.harness === undefined || assignment.openSandbox === undefined
+  const needsStorage = assignment.harness === undefined || assignment.openSandbox === undefined
   const { objects, fileTools } = connectWorkerStorage(env, needsStorage)
   const connections = {
     DATABASE_URL: env.DATABASE_URL,
@@ -83,6 +77,7 @@ export async function startWorker(
       relayEvents(worker.db, worker.commands, {
         signal: worker.signal,
         pollMs: env.POLL_MS,
+        retentionMs: env.EVENT_OUTBOX_RETENTION_MS,
       }),
     )
     worker.markReady()
@@ -91,10 +86,7 @@ export async function startWorker(
     try {
       await worker.stop()
     } catch (cleanup) {
-      throw new AggregateError(
-        [error, cleanup],
-        'Worker startup and cleanup failed',
-      )
+      throw new AggregateError([error, cleanup], 'Worker startup and cleanup failed')
     }
     throw error
   }
@@ -113,16 +105,12 @@ async function loadConfiguredHarness(env: WorkerEnv) {
     systemPrompt,
     webSearch: {
       authMode: env.WEB_SEARCH_AUTH_MODE,
-      ...(env.TAVILY_API_KEY === undefined
-        ? {}
-        : { apiKey: env.TAVILY_API_KEY }),
+      ...(env.TAVILY_API_KEY === undefined ? {} : { apiKey: env.TAVILY_API_KEY }),
     },
   })
 }
 
-function bindConfiguredSandbox(
-  env: WorkerEnv,
-): ExecuteRunDependencies['openSandbox'] {
+function bindConfiguredSandbox(env: WorkerEnv): ExecuteRunDependencies['openSandbox'] {
   const connection = {
     apiURL: env.E2B_API_URL,
     apiKey: env.E2B_API_KEY,
@@ -156,8 +144,7 @@ function connectWorkerStorage(env: WorkerEnv, needsStorage: boolean) {
 }
 
 function allocateWorkerProcess(
-  connections: Pick<WorkerEnv, 'DATABASE_URL' | 'REDIS_URL' | 'IO_TIMEOUT_MS'> &
-    Partial<Pick<WorkerEnv, 'POLL_MS'>>,
+  connections: WorkerConnections,
   signal: AbortSignal | undefined,
   objects: ObjectStore | undefined,
 ) {
@@ -167,10 +154,7 @@ function allocateWorkerProcess(
     try {
       objects?.close()
     } catch (cleanup) {
-      throw new AggregateError(
-        [cause, cleanup],
-        'Worker construction and cleanup failed',
-      )
+      throw new AggregateError([cause, cleanup], 'Worker construction and cleanup failed')
     }
     throw cause
   }
@@ -193,26 +177,21 @@ export class WorkerProcess {
   }
 
   readonly health = (): WorkerHealth => {
-    const phase =
-      this.failures.length > 0
-        ? 'failed'
-        : this.signal.aborted
-          ? 'stopping'
-          : this.started && this.commands.isReady && this.blockingReader.isReady
-            ? 'ready'
-            : 'starting'
-    return { live: !this.signal.aborted, ready: phase === 'ready', phase }
+    if (this.failures.length > 0) {
+      return { live: !this.signal.aborted, ready: false, phase: 'failed' }
+    }
+    if (this.signal.aborted) return { live: false, ready: false, phase: 'stopping' }
+    if (this.started && this.commands.isReady && this.blockingReader.isReady) {
+      return { live: true, ready: true, phase: 'ready' }
+    }
+    return { live: true, ready: false, phase: 'starting' }
   }
 
   readonly claim = (options: Readonly<{ ownerID: string; leaseMs: number }>) =>
     claimExecutionRun(this.db, options)
 
   constructor(
-    private readonly connections: Pick<
-      WorkerEnv,
-      'DATABASE_URL' | 'REDIS_URL' | 'IO_TIMEOUT_MS'
-    > &
-      Partial<Pick<WorkerEnv, 'POLL_MS'>>,
+    private readonly connections: WorkerConnections,
     private readonly externalSignal?: AbortSignal,
     private readonly objects?: ObjectStore,
   ) {
@@ -261,9 +240,16 @@ export class WorkerProcess {
       connectBounded(this.commands, this.connections.IO_TIMEOUT_MS),
       connectBounded(this.blockingReader, this.connections.IO_TIMEOUT_MS),
     ])
-    this.signal.throwIfAborted()
+    const failures: unknown[] = []
     for (const connection of connected) {
-      if (connection.status === 'rejected') throw connection.reason
+      if (connection.status === 'rejected') failures.push(connection.reason)
+    }
+    if (this.signal.aborted) {
+      this.failures.push(...failures)
+      this.signal.throwIfAborted()
+    }
+    if (failures.length) {
+      throw new AggregateError(failures, 'Worker Redis connections failed')
     }
   }
 
@@ -297,8 +283,7 @@ export class WorkerProcess {
       Promise.resolve().then(() => this.db.destroy()),
     ])
     for (const connection of disconnected) {
-      if (connection.status === 'rejected')
-        this.failures.push(connection.reason)
+      if (connection.status === 'rejected') this.failures.push(connection.reason)
     }
     if (this.failures.length) {
       throw new AggregateError(

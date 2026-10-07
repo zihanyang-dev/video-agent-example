@@ -29,8 +29,7 @@ for (let prototype = Object.getPrototypeOf(createClient()); prototype; prototype
         ],
         {
           env: {
-            DATABASE_URL:
-              'postgres://fixture:fixture@127.0.0.1:1/fixture?sslmode=disable',
+            DATABASE_URL: 'postgres://fixture:fixture@127.0.0.1:1/fixture?sslmode=disable',
             REDIS_URL: 'redis://127.0.0.1:1',
             IO_TIMEOUT_MS: '1000',
             MODEL_BASE_URL: 'http://unused.invalid',

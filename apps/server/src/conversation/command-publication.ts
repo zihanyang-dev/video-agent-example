@@ -25,10 +25,7 @@ export async function publishPendingCommands(
   }
 }
 
-function waitForPublicationPoll(
-  ms: number,
-  signal: AbortSignal,
-): Promise<void> {
+function waitForPublicationPoll(ms: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
     const finish = () => {
       clearTimeout(timer)

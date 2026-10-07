@@ -1,13 +1,9 @@
 import { expect, test } from 'bun:test'
 import Ajv2020 from 'ajv/dist/2020.js'
 import addFormats from 'ajv-formats'
-import {
-  executionJSONSchemas,
-  executionCommandSchema,
-  executionDeliverySchema,
-} from './execution'
+import { executionJSONSchemas, executionCommandSchema, executionDeliverySchema } from './execution'
 
-const identity = '11111111-1111-4111-8111-111111111111'
+const identity = 'abcdefab-cdef-4abc-8def-abcdefabcdef'
 const reference = {
   assetID: identity,
   objectKey: 'assets/uploads/allocated',
@@ -32,49 +28,69 @@ test('foreign JSON Schema consumers enforce real command and delivery boundaries
     input: { messageID: identity, text: 'hello' },
   }
   const samples = [
-    start,
-    { ...start, version: 2 },
-    { ...start, input: { ...start.input, text: ' \n\t\uFEFF' } },
-    { ...start, input: { ...start.input, text: '', assets: [reference] } },
-    { ...start, input: { ...start.input, text: '', assets: [] } },
+    { value: start, valid: true },
+    { value: { ...start, version: 2 }, valid: false },
     {
-      ...start,
-      input: {
-        ...start.input,
-        assets: [{ ...reference, name: '../source.txt' }],
+      value: { ...start, input: { ...start.input, text: ' \n\t\uFEFF' } },
+      valid: false,
+    },
+    {
+      value: {
+        ...start,
+        input: { ...start.input, text: '', assets: [reference] },
       },
+      valid: true,
     },
     {
-      ...start,
-      input: { ...start.input, assets: [{ ...reference, name: '.' }] },
+      value: { ...start, input: { ...start.input, text: '', assets: [] } },
+      valid: false,
     },
     {
-      ...start,
-      input: {
-        ...start.input,
-        assets: [{ ...reference, name: 'bad\u0000name' }],
+      value: {
+        ...start,
+        input: {
+          ...start.input,
+          assets: [{ ...reference, name: '../source.txt' }],
+        },
       },
+      valid: false,
     },
-    { ...start, privateHistory: [] },
     {
-      version: 1,
-      kind: 'cancel',
-      commandID: identity.toUpperCase(),
-      threadID: identity,
-      runID: identity,
+      value: {
+        ...start,
+        input: { ...start.input, assets: [{ ...reference, name: '.' }] },
+      },
+      valid: false,
     },
+    {
+      value: {
+        ...start,
+        input: {
+          ...start.input,
+          assets: [{ ...reference, name: 'bad\u0000name' }],
+        },
+      },
+      valid: false,
+    },
+    { value: { ...start, privateHistory: [] }, valid: false },
+    {
+      value: {
+        version: 1,
+        kind: 'cancel',
+        commandID: identity.toUpperCase(),
+        threadID: identity,
+        runID: identity,
+      },
+      valid: true,
+    },
+    { value: { ...start, commandID: identity.toUpperCase() }, valid: true },
+    { value: { ...start, commandID: 'not-a-uuid' }, valid: false },
   ]
-  for (const value of samples)
-    expect(command(value)).toBe(executionCommandSchema.safeParse(value).success)
-  for (const name of [
-    '.',
-    '..',
-    'file\n',
-    'file\r',
-    'file\u007f',
-    'bad/name',
-    'bad\\name',
-  ]) {
+  for (const { value, valid } of samples) {
+    expect(executionCommandSchema.safeParse(value).success).toBe(valid)
+    expect(command(value)).toBe(valid)
+  }
+  for (const name of ['.', '..', 'file\n', 'file\r', 'file\u007f', 'bad/name', 'bad\\name']) {
     const value = {
       ...start,
       input: { ...start.input, assets: [{ ...reference, name }] },
@@ -90,13 +106,16 @@ test('foreign JSON Schema consumers enforce real command and delivery boundaries
     runID: identity,
     reason: 'sandbox-recovery-required',
   }
-  for (const value of [
-    { ordinal: 1, event },
-    { ordinal: 0, event },
-    { ordinal: 1, event: { ...event, privateHistory: [] } },
-  ])
-    expect(delivery(value)).toBe(
-      executionDeliverySchema.safeParse(value).success,
-    )
+  for (const { value, valid } of [
+    { value: { ordinal: 1, event }, valid: true },
+    { value: { ordinal: 0, event }, valid: false },
+    {
+      value: { ordinal: 1, event: { ...event, privateHistory: [] } },
+      valid: false,
+    },
+  ]) {
+    expect(executionDeliverySchema.safeParse(value).success).toBe(valid)
+    expect(delivery(value)).toBe(valid)
+  }
   expect(JSON.stringify(schemas)).not.toContain('readOnly')
 })

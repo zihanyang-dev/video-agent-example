@@ -1,8 +1,8 @@
-import { acceptExecutionCommand } from '../../apps/agent/src/db/command-acceptance'
+import { acceptExecutionCommand } from '../../apps/agent/src/execution/db/command-acceptance'
 import {
   claimExecutionRun,
   renewExecutionLease,
-} from '../../apps/agent/src/db/execution-leases'
+} from '../../apps/agent/src/execution/db/execution-leases'
 import {
   appendExecutionText,
   completeExecutionRun,
@@ -10,17 +10,17 @@ import {
   cancelExecutionRun,
   bindExecutionWrites,
   quarantineSandbox,
-} from '../../apps/agent/src/db/run-writes'
+} from '../../apps/agent/src/execution/db/run-writes'
 import { afterAll, expect, test } from 'bun:test'
 import { executionEventSchema } from '@vid/contract/execution'
 import { sql } from 'kysely'
-import {
-  executeRun,
-  type AgentHarness,
-  type ExecutionLease,
-  type ExecutionWrites,
-  type SandboxSessionPort,
-} from '../../apps/agent/src/execute-run'
+import { executeRun } from '../../apps/agent/src/execution/execute-run'
+import type {
+  AgentHarness,
+  ExecutionLease,
+  ExecutionWrites,
+  SandboxSessionPort,
+} from '../../apps/agent/src/execution/contract'
 import { openTestDatabase } from './database-fixture'
 
 const { db, close } = openTestDatabase()
@@ -34,22 +34,10 @@ afterAll(async () => {
           .set({ active_run_id: null, lease_owner: null, lease_until: null })
           .where('thread_id', '=', threadID)
           .execute()
-        await tx
-          .deleteFrom('execution.event_outbox')
-          .where('thread_id', '=', threadID)
-          .execute()
-        await tx
-          .deleteFrom('execution.runs')
-          .where('thread_id', '=', threadID)
-          .execute()
-        await tx
-          .deleteFrom('execution.command_inbox')
-          .where('thread_id', '=', threadID)
-          .execute()
-        await tx
-          .deleteFrom('execution.conversations')
-          .where('thread_id', '=', threadID)
-          .execute()
+        await tx.deleteFrom('execution.event_outbox').where('thread_id', '=', threadID).execute()
+        await tx.deleteFrom('execution.runs').where('thread_id', '=', threadID).execute()
+        await tx.deleteFrom('execution.command_inbox').where('thread_id', '=', threadID).execute()
+        await tx.deleteFrom('execution.conversations').where('thread_id', '=', threadID).execute()
       })
     }
   } finally {
@@ -80,8 +68,7 @@ async function claimFixture(leaseMs: number) {
     ownerID: crypto.randomUUID(),
     leaseMs,
   })
-  if (lease === null || lease.runID !== command.runID)
-    throw new Error('Expected fixture lease')
+  if (lease === null || lease.runID !== command.runID) throw new Error('Expected fixture lease')
   return lease
 }
 
@@ -115,14 +102,10 @@ function pipeline(turnError: boolean) {
   return { started, end, closing, closed, sandbox, harness }
 }
 
-async function fixture(
-  turnError = false,
-  writes: ExecutionWrites = bindExecutionWrites(db),
-) {
+async function fixture(turnError = false, writes: ExecutionWrites = bindExecutionWrites(db)) {
   const leaseMs = 600
   const lease = await claimFixture(leaseMs)
-  const { started, end, closing, closed, sandbox, harness } =
-    pipeline(turnError)
+  const { started, end, closing, closed, sandbox, harness } = pipeline(turnError)
   const shutdown = new AbortController()
   const run = executeRun(
     lease,
@@ -133,11 +116,13 @@ async function fixture(
       signal: shutdown.signal,
     },
   )
+  void run.catch(() => {})
   const input = await started.promise
   const aborted = deferred<void>()
   input.signal.addEventListener('abort', () => aborted.resolve(), {
     once: true,
   })
+  if (input.signal.aborted) aborted.resolve()
   async function cancel() {
     await acceptExecutionCommand(db, {
       version: 1,
@@ -242,10 +227,7 @@ test('cancelled remote cleanup failure records execution-error, not cancellation
   const state = await f.snapshot()
   expect(state.run).toEqual({ status: 'failed', cancel_requested: true })
   expect(state.conversation).toEqual({ history: [], active_run_id: null })
-  expect(state.events.map((event) => event.kind)).toEqual([
-    'run-started',
-    'run-failed',
-  ])
+  expect(state.events.map((event) => event.kind)).toEqual(['run-started', 'run-failed'])
   expect(state.events[1]).toMatchObject({ reason: 'execution-error' })
 })
 
@@ -281,26 +263,38 @@ test('database cancellation wins over shutdown interruption', async () => {
 
 test('true fence loss during cleanup excludes text, history and terminal writes', async () => {
   const f = await fixture()
-  await f.cancel()
+  const failures: unknown[] = []
+  try {
+    await f.cancel()
+    f.end.resolve()
+    await f.closing.promise
+    await db
+      .updateTable('execution.conversations')
+      .set({ fence: sql`fence + 1` })
+      .where('thread_id', '=', f.lease.threadID)
+      .execute()
+    expect(await renewExecutionLease(db, f.lease, f.leaseMs)).toBe('lost')
+    expect(await appendExecutionText(db, f.lease, 'stale')).toBe(false)
+    expect(
+      await completeExecutionRun(db, f.lease, {
+        text: 'stale',
+        history: ['stale'],
+      }),
+    ).toBe(false)
+    expect(await failExecutionRun(db, f.lease, 'execution-error')).toBe(false)
+    expect(await cancelExecutionRun(db, f.lease)).toBe(false)
+  } catch (cause) {
+    failures.push(cause)
+  }
   f.end.resolve()
-  await f.closing.promise
-  await db
-    .updateTable('execution.conversations')
-    .set({ fence: sql`fence + 1` })
-    .where('thread_id', '=', f.lease.threadID)
-    .execute()
-  expect(await renewExecutionLease(db, f.lease, f.leaseMs)).toBe('lost')
-  expect(await appendExecutionText(db, f.lease, 'stale')).toBe(false)
-  expect(
-    await completeExecutionRun(db, f.lease, {
-      text: 'stale',
-      history: ['stale'],
-    }),
-  ).toBe(false)
-  expect(await failExecutionRun(db, f.lease, 'execution-error')).toBe(false)
-  expect(await cancelExecutionRun(db, f.lease)).toBe(false)
   f.closed.resolve()
-  expect(await f.run).toBe('lost')
+  const outcome = await f.run.catch((cause: unknown) => {
+    failures.push(cause)
+    return undefined
+  })
+  if (failures.length > 1) throw new AggregateError(failures, 'Fenced fixture failed')
+  if (failures.length === 1) throw failures[0]
+  expect(outcome).toBe('lost')
   const state = await f.snapshot()
   expect(state.events.map((event) => event.kind)).toEqual(['run-started'])
   expect(state.conversation.history).toEqual([])
@@ -310,9 +304,7 @@ test('true fence loss during cleanup excludes text, history and terminal writes'
     .set({ lease_until: sql`clock_timestamp() - interval '1 second'` })
     .where('thread_id', '=', f.lease.threadID)
     .execute()
-  expect(
-    await claimExecutionRun(db, { ownerID: 'reaper', leaseMs: f.leaseMs }),
-  ).toBeNull()
+  expect(await claimExecutionRun(db, { ownerID: 'reaper', leaseMs: f.leaseMs })).toBeNull()
 })
 
 test('cancellation racing shutdown terminal retains database cancellation authority', async () => {
@@ -326,7 +318,7 @@ test('cancellation racing shutdown terminal retains database cancellation author
         threadID: lease.threadID,
         runID: lease.runID,
       })
-      return await failExecutionRun(db, lease, failure)
+      return await bindExecutionWrites(db).fail(lease, failure)
     },
   })
   f.shutdown.abort()
@@ -355,7 +347,7 @@ test('late old-fence quarantine aborts the new paid turn and keeps its lease thr
         ...writes,
         complete: async (lease, completion) => {
           oldCompletions++
-          expect(await writes.complete(lease, completion)).toBe(true)
+          expect(await writes.complete(lease, completion)).toBe('completed')
           committed.resolve()
           // Hold the lost acknowledgement until the next fence starts spending.
           await lostAck.promise
@@ -429,16 +421,12 @@ test('late old-fence quarantine aborts the new paid turn and keeps its lease thr
     expect(toolCalls).toBe(0)
     input.onText('unsafe')
     await Bun.sleep(1200)
-    expect(
-      await claimExecutionRun(db, { ownerID: 'contender', leaseMs: 600 }),
-    ).toBeNull()
+    expect(await claimExecutionRun(db, { ownerID: 'contender', leaseMs: 600 })).toBeNull()
     expect((await snapshot(active)).run.status).toBe('running')
     f.end.resolve()
     await f.closing.promise
     await Bun.sleep(1200)
-    expect(
-      await claimExecutionRun(db, { ownerID: 'contender', leaseMs: 600 }),
-    ).toBeNull()
+    expect(await claimExecutionRun(db, { ownerID: 'contender', leaseMs: 600 })).toBeNull()
     expect((await snapshot(active)).run.status).toBe('running')
   } finally {
     lostAck.resolve()
@@ -481,7 +469,7 @@ test('SQL decides racing cancellation once without reauthorization or quarantine
         threadID: lease.threadID,
         runID: lease.runID,
       })
-      return await completeExecutionRun(db, lease, completion)
+      return await writes.complete(lease, completion)
     },
     quarantine: async (lease, reason) => {
       quarantines++
@@ -496,10 +484,7 @@ test('SQL decides racing cancellation once without reauthorization or quarantine
   const state = await f.snapshot()
   expect(state.conversation).toEqual({ history: [], active_run_id: null })
   expect(state.run).toEqual({ status: 'cancelled', cancel_requested: true })
-  expect(state.events).toMatchObject([
-    { kind: 'run-started' },
-    { kind: 'run-cancelled' },
-  ])
+  expect(state.events).toMatchObject([{ kind: 'run-started' }, { kind: 'run-cancelled' }])
   const recovery = await db
     .selectFrom('execution.conversations')
     .select('sandbox_recovery_required')

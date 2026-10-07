@@ -1,5 +1,23 @@
 {
   "semi": false,
   "singleQuote": true,
-  "trailingComma": "all"
+  "trailingComma": "all",
+  "printWidth": 100,
+  "overrides": [
+    {
+      "files": "docs/handover-code-review.md",
+      "options": {
+        "printWidth": 80,
+        "embeddedLanguageFormatting": "off"
+      }
+    },
+    {
+      "files": "apps/agent/prompt.md",
+      "options": { "printWidth": 80 }
+    },
+    {
+      "files": "docs/handover-refactoring.md",
+      "options": { "embeddedLanguageFormatting": "off" }
+    }
+  ]
 }

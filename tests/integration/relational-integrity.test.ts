@@ -8,25 +8,22 @@ import {
   verifyTestDatabase,
   settleTestCleanup,
 } from './database-fixture'
-import { acceptExecutionCommand } from '../../apps/agent/src/db/command-acceptance'
+import { acceptExecutionCommand } from '../../apps/agent/src/execution/db/command-acceptance'
 import {
   claimExecutionRun,
   renewExecutionLease,
-} from '../../apps/agent/src/db/execution-leases'
+} from '../../apps/agent/src/execution/db/execution-leases'
 import {
   appendExecutionText,
   completeExecutionRun,
   quarantineSandbox,
   saveNativeSandbox,
-} from '../../apps/agent/src/db/run-writes'
+} from '../../apps/agent/src/execution/db/run-writes'
 
-const migration =
-  'packages/database/migrations/20261006000000_relational_integrity.sql'
+const migration = 'packages/database/migrations/20261006000000_relational_integrity.sql'
 const id = () => crypto.randomUUID()
 
-async function fixture(
-  body: (db: Client, ids: ReturnType<typeof identities>) => Promise<void>,
-) {
+async function fixture(body: (db: Client, ids: ReturnType<typeof identities>) => Promise<void>) {
   const db = new Client(testDatabaseOptions(readMigrationEnv().DATABASE_URL))
   let transactionOpened = false
   try {
@@ -39,18 +36,19 @@ async function fixture(
       `INSERT INTO auth."user" (id,name,email,"emailVerified") VALUES ($1,'Integrity',$2,true)`,
       [ids.owner, `${ids.owner}@fixture.invalid`],
     )
-    await db.query(
-      'INSERT INTO product.threads (thread_id,owner_id) VALUES ($1,$3),($2,$3)',
-      [ids.a, ids.b, ids.owner],
-    )
+    await db.query('INSERT INTO product.threads (thread_id,owner_id) VALUES ($1,$3),($2,$3)', [
+      ids.a,
+      ids.b,
+      ids.owner,
+    ])
     await db.query(
       "INSERT INTO product.messages (thread_id,message_id,role,text) VALUES ($1,$2,'user','Historical input')",
       [ids.a, ids.message],
     )
-    await db.query(
-      'INSERT INTO execution.conversations (thread_id) VALUES ($1),($2)',
-      [ids.a, ids.b],
-    )
+    await db.query('INSERT INTO execution.conversations (thread_id) VALUES ($1),($2)', [
+      ids.a,
+      ids.b,
+    ])
     await db.query(
       "INSERT INTO execution.command_inbox (command_id,thread_id,run_id,kind,command) VALUES ($1,$2,$3,'start',$4)",
       [
@@ -90,12 +88,7 @@ function identities() {
   }
 }
 
-async function rejects(
-  db: Client,
-  query: string,
-  values: unknown[],
-  constraint: string,
-) {
+async function rejects(db: Client, query: string, values: unknown[], constraint: string) {
   await db.query('SAVEPOINT invalid_write')
   try {
     const error = await db.query(query, values).then(
@@ -112,13 +105,7 @@ test('same-schema references admit claim, terminal release, cancellation and exp
   await fixture(async (db, ids) => {
     await db.query(
       'INSERT INTO product.command_outbox (command_id,thread_id,run_id,message_id,command) VALUES ($1,$2,$3,$4,$5)',
-      [
-        ids.command,
-        ids.a,
-        ids.run,
-        ids.message,
-        { threadID: ids.a.toUpperCase(), materials: [] },
-      ],
+      [ids.command, ids.a, ids.run, ids.message, { threadID: ids.a.toUpperCase(), materials: [] }],
     )
     // Cancel commands need no message and may precede a run.
     await db.query(
@@ -129,27 +116,19 @@ test('same-schema references admit claim, terminal release, cancellation and exp
       "UPDATE execution.conversations SET active_run_id=$1,lease_owner='worker',lease_until=now()+interval '1 minute',fence=1,native_sandbox=$3,sandbox_recovery_required=true WHERE thread_id=$2",
       [ids.run, ids.a, { provider: 'e2b', id: 'Native/UPPER', retained: true }],
     )
-    await db.query(
-      "UPDATE execution.runs SET status='running' WHERE run_id=$1",
-      [ids.run],
-    )
+    await db.query("UPDATE execution.runs SET status='running' WHERE run_id=$1", [ids.run])
     await db.query(
       'INSERT INTO execution.event_outbox (event_id,thread_id,run_id,ordinal,event) VALUES ($1,$2,$3,1,$4)',
       [id(), ids.a, ids.run, { kind: 'run-started' }],
     )
-    await db.query('DELETE FROM execution.event_outbox WHERE run_id=$1', [
-      ids.run,
-    ])
+    await db.query('DELETE FROM execution.event_outbox WHERE run_id=$1', [ids.run])
     await rejects(
       db,
       'DELETE FROM execution.runs WHERE run_id=$1',
       [ids.run],
       'conversations_active_run_identity',
     )
-    await db.query(
-      "UPDATE execution.runs SET status='failed' WHERE run_id=$1",
-      [ids.run],
-    )
+    await db.query("UPDATE execution.runs SET status='failed' WHERE run_id=$1", [ids.run])
     await db.query(
       'UPDATE execution.conversations SET active_run_id=null,lease_owner=null,lease_until=null WHERE thread_id=$1',
       [ids.a],
@@ -164,63 +143,59 @@ test('same-schema references admit claim, terminal release, cancellation and exp
       native_sandbox: { provider: 'e2b', id: 'Native/UPPER', retained: true },
       sandbox_recovery_required: true,
     })
-    await db.query('DELETE FROM execution.event_outbox WHERE run_id=$1', [
-      ids.run,
-    ])
+    await db.query('DELETE FROM execution.event_outbox WHERE run_id=$1', [ids.run])
     await db.query('DELETE FROM execution.runs WHERE run_id=$1', [ids.run])
-    await db.query('DELETE FROM execution.conversations WHERE thread_id=$1', [
-      ids.a,
-    ])
-    await db.query('DELETE FROM execution.command_inbox WHERE command_id=$1', [
-      ids.command,
-    ])
+    await db.query('DELETE FROM execution.conversations WHERE thread_id=$1', [ids.a])
+    await db.query('DELETE FROM execution.command_inbox WHERE command_id=$1', [ids.command])
   })
 })
 
 const invalid = [
-  [
-    'product message thread',
-    "INSERT INTO product.command_outbox (command_id,thread_id,run_id,message_id,command) VALUES ($1,$2,$3,$4,'{}')",
-    (ids: ReturnType<typeof identities>) => [id(), ids.b, ids.run, ids.message],
-    'command_outbox_message_identity',
-  ],
-  [
-    'run command thread',
-    'UPDATE execution.runs SET thread_id=$1 WHERE run_id=$2',
-    (ids: ReturnType<typeof identities>) => [ids.b, ids.run],
-    'runs_command_identity',
-  ],
-  [
-    'run command native ID',
-    'UPDATE execution.runs SET run_id=$1 WHERE run_id=$2',
-    (ids: ReturnType<typeof identities>) => [id(), ids.run],
-    'runs_command_identity',
-  ],
-  [
-    'event run thread',
-    "INSERT INTO execution.event_outbox (event_id,thread_id,run_id,ordinal,event) VALUES ($1,$2,$3,1,'{}')",
-    (ids: ReturnType<typeof identities>) => [id(), ids.b, ids.run],
-    'event_outbox_run_identity',
-  ],
-  [
-    'active run other thread',
-    "UPDATE execution.conversations SET active_run_id=$1,lease_owner='worker',lease_until=now() WHERE thread_id=$2",
-    (ids: ReturnType<typeof identities>) => [ids.run, ids.b],
-    'conversations_active_run_identity',
-  ],
-  [
-    'active run missing native ID',
-    "UPDATE execution.conversations SET active_run_id=$1,lease_owner='worker',lease_until=now() WHERE thread_id=$2",
-    (ids: ReturnType<typeof identities>) => [id(), ids.a],
-    'conversations_active_run_identity',
-  ],
+  {
+    name: 'product message thread',
+    query:
+      "INSERT INTO product.command_outbox (command_id,thread_id,run_id,message_id,command) VALUES ($1,$2,$3,$4,'{}')",
+    values: (ids: ReturnType<typeof identities>) => [id(), ids.b, ids.run, ids.message],
+    constraint: 'command_outbox_message_identity',
+  },
+  {
+    name: 'run command thread',
+    query: 'UPDATE execution.runs SET thread_id=$1 WHERE run_id=$2',
+    values: (ids: ReturnType<typeof identities>) => [ids.b, ids.run],
+    constraint: 'runs_command_identity',
+  },
+  {
+    name: 'run command native ID',
+    query: 'UPDATE execution.runs SET run_id=$1 WHERE run_id=$2',
+    values: (ids: ReturnType<typeof identities>) => [id(), ids.run],
+    constraint: 'runs_command_identity',
+  },
+  {
+    name: 'event run thread',
+    query:
+      "INSERT INTO execution.event_outbox (event_id,thread_id,run_id,ordinal,event) VALUES ($1,$2,$3,1,'{}')",
+    values: (ids: ReturnType<typeof identities>) => [id(), ids.b, ids.run],
+    constraint: 'event_outbox_run_identity',
+  },
+  {
+    name: 'active run other thread',
+    query:
+      "UPDATE execution.conversations SET active_run_id=$1,lease_owner='worker',lease_until=now() WHERE thread_id=$2",
+    values: (ids: ReturnType<typeof identities>) => [ids.run, ids.b],
+    constraint: 'conversations_active_run_identity',
+  },
+  {
+    name: 'active run missing native ID',
+    query:
+      "UPDATE execution.conversations SET active_run_id=$1,lease_owner='worker',lease_until=now() WHERE thread_id=$2",
+    values: (ids: ReturnType<typeof identities>) => [id(), ids.a],
+    constraint: 'conversations_active_run_identity',
+  },
 ] as const
 
-for (const [name, query, values, constraint] of invalid) {
+for (const { name, query, values, constraint } of invalid) {
   test(`rejects ${name}`, async () => {
-    await fixture(
-      async (db, ids) => await rejects(db, query, values(ids), constraint),
-    )
+    await fixture(async (db, ids) => await rejects(db, query, values(ids), constraint))
   })
 }
 
@@ -228,24 +203,22 @@ test('forward validation fails on every retained inconsistency without rewriting
   const text = await readFile(migration, 'utf8')
   const [up, down] = text.split('-- migrate:down')
   if (!up || !down) throw new Error('Expected reversible migration')
-  for (const [, query, values, constraint] of invalid) {
+  for (const { query, values, constraint } of invalid) {
     await fixture(async (db, ids) => {
       // Transaction-local rollback to the predecessor constraints: no global fixture changes.
       await db.query(down)
       await db.query(query, values(ids))
       const before = (
-        await db.query(
-          'SELECT command FROM execution.command_inbox WHERE command_id=$1',
-          [ids.command],
-        )
+        await db.query('SELECT command FROM execution.command_inbox WHERE command_id=$1', [
+          ids.command,
+        ])
       ).rows
       await rejects(db, up, [], constraint)
       expect(
         (
-          await db.query(
-            'SELECT command FROM execution.command_inbox WHERE command_id=$1',
-            [ids.command],
-          )
+          await db.query('SELECT command FROM execution.command_inbox WHERE command_id=$1', [
+            ids.command,
+          ])
         ).rows,
       ).toEqual(before)
     })
@@ -280,10 +253,7 @@ test('valid retained uppercase JSON, legacy checkpoint and unknown recovery surv
     await db.query('SAVEPOINT partial_release')
     try {
       const error = await db
-        .query(
-          'UPDATE execution.conversations SET active_run_id=null WHERE thread_id=$1',
-          [ids.a],
-        )
+        .query('UPDATE execution.conversations SET active_run_id=null WHERE thread_id=$1', [ids.a])
         .then(
           () => null,
           (cause: unknown) => cause,
@@ -335,9 +305,7 @@ test('actual execution admission, replay, claim, renewal, completion and quarant
         }),
       ).toBe(true)
       expect(await appendExecutionText(db, lease, 'done')).toBe(true)
-      expect(
-        await completeExecutionRun(db, lease, { text: 'done', history: [] }),
-      ).toBe(true)
+      expect(await completeExecutionRun(db, lease, { text: 'done', history: [] })).toBe(true)
       const next = { ...command, commandID: id(), runID: id() }
       expect(await acceptExecutionCommand(db, next)).toBe('accepted')
       const unknown = await claimExecutionRun(db, {
@@ -373,22 +341,10 @@ test('actual execution admission, replay, claim, renewal, completion and quarant
           .set({ active_run_id: null, lease_owner: null, lease_until: null })
           .where('thread_id', '=', ids.a)
           .execute()
-        await tx
-          .deleteFrom('execution.event_outbox')
-          .where('thread_id', '=', ids.a)
-          .execute()
-        await tx
-          .deleteFrom('execution.runs')
-          .where('thread_id', '=', ids.a)
-          .execute()
-        await tx
-          .deleteFrom('execution.conversations')
-          .where('thread_id', '=', ids.a)
-          .execute()
-        await tx
-          .deleteFrom('execution.command_inbox')
-          .where('thread_id', '=', ids.a)
-          .execute()
+        await tx.deleteFrom('execution.event_outbox').where('thread_id', '=', ids.a).execute()
+        await tx.deleteFrom('execution.runs').where('thread_id', '=', ids.a).execute()
+        await tx.deleteFrom('execution.conversations').where('thread_id', '=', ids.a).execute()
+        await tx.deleteFrom('execution.command_inbox').where('thread_id', '=', ids.a).execute()
       })
     } finally {
       await close()

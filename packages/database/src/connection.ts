@@ -26,8 +26,7 @@ export function openDatabase(
     log(event) {
       // SQL errors can roll back normally. An unknown query transport outcome
       // must notify the process owner to stop intake, not retry uncertain work.
-      if (event.level === 'error' && !(event.error instanceof DatabaseError))
-        onError(event.error)
+      if (event.level === 'error' && !(event.error instanceof DatabaseError)) onError(event.error)
     },
   })
 }

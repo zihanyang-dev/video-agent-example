@@ -1,9 +1,5 @@
 import { WEB_SOURCES_PER_TURN, type WebSource } from '@vid/contract/web-source'
-import {
-  InMemoryCredentialStore,
-  Type,
-  type AssistantMessageEvent,
-} from '@earendil-works/pi-ai'
+import { InMemoryCredentialStore, Type, type AssistantMessageEvent } from '@earendil-works/pi-ai'
 import {
   createAgentSession,
   createExtensionRuntime,
@@ -14,7 +10,7 @@ import {
   type AgentSession,
   type ResourceLoader,
 } from '@earendil-works/pi-coding-agent'
-import type { AgentHarness, SandboxTools } from '../execute-run.ts'
+import type { AgentHarness, SandboxTools } from '../execution/contract.ts'
 import { fileToolDefinitions } from './file-tools.ts'
 import { webSearchTool, type WebSearchConfig } from './web-search.ts'
 import { admitPiHistory, restorePiHistory } from './pi-history.ts'
@@ -30,6 +26,11 @@ export type PiHarnessOptions = Readonly<{
   systemPrompt: string
   webSearch?: WebSearchConfig
 }>
+
+// Local logical admission and cleanup policy, not transport/RSS or remote settlement guarantees.
+const maxTurnIterations = 16
+const maxDecodedDeltaBytes = 2 * 1024 * 1024
+const cancellationWaitMs = 10000
 
 async function assignedModel(options: PiHarnessOptions) {
   // No file credential store, models.json, catalog network refresh or ambient discovery.
@@ -92,11 +93,11 @@ function executeTool(tools: SandboxTools, signal: AbortSignal) {
     description: 'Execute a command in the assigned sandbox.',
     parameters: Type.Object({ command: Type.String({ maxLength: 16 * 1024 }) }),
     async execute(_id, params, sdkSignal) {
-      signal.throwIfAborted()
-      sdkSignal?.throwIfAborted()
+      const cancellation = sdkSignal === undefined ? signal : AbortSignal.any([signal, sdkSignal])
+      cancellation.throwIfAborted()
       const result = await tools.execute({
         command: params.command,
-        signal: sdkSignal ?? signal,
+        signal: cancellation,
       })
       return {
         content: [{ type: 'text', text: JSON.stringify(result) }],
@@ -113,22 +114,18 @@ function readTool(tools: SandboxTools, signal: AbortSignal) {
     description: 'Read a file in the assigned sandbox.',
     parameters: Type.Object({ path: Type.String({ maxLength: 4 * 1024 }) }),
     async execute(_id, params, sdkSignal) {
-      signal.throwIfAborted()
-      sdkSignal?.throwIfAborted()
+      const cancellation = sdkSignal === undefined ? signal : AbortSignal.any([signal, sdkSignal])
+      cancellation.throwIfAborted()
       const content = await tools.read({
         path: params.path,
-        signal: sdkSignal ?? signal,
+        signal: cancellation,
       })
       return { content: [{ type: 'text', text: content }], details: {} }
     },
   })
 }
 
-function writeTool(
-  tools: SandboxTools,
-  signal: AbortSignal,
-  onLimit: () => never,
-) {
+function writeTool(tools: SandboxTools, signal: AbortSignal, onLimit: () => never) {
   return defineTool({
     name: 'write',
     label: 'Write',
@@ -138,13 +135,13 @@ function writeTool(
       content: Type.String({ maxLength: 256 * 1024 }),
     }),
     async execute(_id, params, sdkSignal) {
-      signal.throwIfAborted()
-      sdkSignal?.throwIfAborted()
+      const cancellation = sdkSignal === undefined ? signal : AbortSignal.any([signal, sdkSignal])
+      cancellation.throwIfAborted()
       if (Buffer.byteLength(params.content) > 256 * 1024) onLimit()
       await tools.write({
         path: params.path,
         content: params.content,
-        signal: sdkSignal ?? signal,
+        signal: cancellation,
       })
       return {
         content: [{ type: 'text', text: 'Written' }],
@@ -169,6 +166,17 @@ async function assignedSession(
   },
 ) {
   const { runtime, model } = await assignedModel(options)
+  const definitions = [
+    executeTool(tools, signal),
+    readTool(tools, signal),
+    writeTool(tools, signal, onLimit),
+    ...(options.webSearch === undefined
+      ? []
+      : [webSearchTool(options.webSearch, signal, onSources)]),
+    ...(fileTools === undefined
+      ? []
+      : fileToolDefinitions(fileTools, signal, options.input.includes('image'), onLimit)),
+  ]
   const { session } = await createAgentSession({
     modelRuntime: runtime,
     model,
@@ -181,29 +189,8 @@ async function assignedSession(
       retry: { enabled: false, provider: { maxRetries: 0 } },
     }),
     // Name allowlist plus custom replacements: no host bash/edit/grep or skill tools.
-    tools: [
-      'execute',
-      'read',
-      'write',
-      ...(options.webSearch === undefined ? [] : ['web_search']),
-      ...(fileTools === undefined ? [] : ['import_file', 'export_file']),
-    ],
-    customTools: [
-      executeTool(tools, signal),
-      readTool(tools, signal),
-      writeTool(tools, signal, onLimit),
-      ...(options.webSearch === undefined
-        ? []
-        : [webSearchTool(options.webSearch, signal, onSources)]),
-      ...(fileTools === undefined
-        ? []
-        : fileToolDefinitions(
-            fileTools,
-            signal,
-            options.input.includes('image'),
-            onLimit,
-          )),
-    ],
+    tools: definitions.map((definition) => definition.name),
+    customTools: definitions,
   })
   return session
 }
@@ -247,12 +234,12 @@ async function runTurn(
       return
     const bytes = Buffer.byteLength(delta.delta)
     deltas += bytes
-    if (deltas > 2 * 1024 * 1024) refuse()
+    if (deltas > maxDecodedDeltaBytes) refuse()
   }
   const unsubscribe = session.subscribe((event) => {
     // Subscribers are synchronous. Retain abort's idle receipt; never await it here.
     if (event.type === 'turn_start') {
-      if (++iterations > 16) refuse()
+      if (++iterations > maxTurnIterations) refuse()
       return
     }
     if (event.type === 'message_end') {
@@ -270,15 +257,18 @@ async function runTurn(
   try {
     // Abort may have arrived during asynchronous session construction.
     signal.throwIfAborted()
-    const inputText =
-      fileTools === undefined
-        ? prompt
-        : `${prompt}
+    let inputText = prompt
+    if (fileTools !== undefined) {
+      const assets = fileTools.assigned.map(({ assetID, name, mimeType }) => ({
+        assetID,
+        name,
+        mimeType,
+      }))
+      inputText = `${prompt}
 Assigned assets (import_file by assetID to a path you choose):
-${JSON.stringify(fileTools.assigned.map(({ assetID, name, mimeType }) => ({ assetID, name, mimeType })))}`
-    const prompting = session
-      .prompt(inputText)
-      .then(() => session.waitForIdle())
+${JSON.stringify(assets)}`
+    }
+    const prompting = session.prompt(inputText).then(() => session.waitForIdle())
     void prompting.catch(() => {})
     await Promise.race([
       prompting,
@@ -296,27 +286,20 @@ ${JSON.stringify(fileTools.assigned.map(({ assetID, name, mimeType }) => ({ asse
     // Streaming may include tool-turn narration. The canonical answer is only
     // the final native assistant message; preserve its exact text, not the SDK
     // convenience getter's trimming. Thinking and tool blocks remain private.
-    const answer = session.messages.findLast(
-      (message) => message.role === 'assistant',
-    )
+    const answer = session.messages.findLast((message) => message.role === 'assistant')
     const history = {
       header: manager.getHeader(),
       entries: manager.getEntries(),
       leafID: manager.getLeafId(),
     }
     admitPiHistory(history)
-    return {
-      text:
-        answer?.content
-          .flatMap((block) => (block.type === 'text' ? [block.text] : []))
-          .join('') ?? '',
-      history: structuredClone(history),
-    }
+    const finalText =
+      answer?.content.flatMap((block) => (block.type === 'text' ? [block.text] : [])).join('') ?? ''
+    return { text: finalText, history: structuredClone(history) }
   } finally {
     // prompt/abort settling owns tool lifetime; agent_end alone is not completion.
     signal.removeEventListener('abort', abort)
-    if (rejectPrompt !== undefined)
-      signal.removeEventListener('abort', rejectPrompt)
+    if (rejectPrompt !== undefined) signal.removeEventListener('abort', rejectPrompt)
     // Abort is supported by Pi; bound our wait, without claiming the SDK joins
     // every remote operation. The rejected receipt remains supervised.
     const cleanup = aborting ?? session.abort()
@@ -328,7 +311,7 @@ ${JSON.stringify(fileTools.assigned.map(({ assetID, name, mimeType }) => ({ asse
         new Promise<never>((_, reject) => {
           timer = setTimeout(
             () => reject(new Error('Pi cancellation deadline exceeded')),
-            10000,
+            cancellationWaitMs,
           )
         }),
       ])

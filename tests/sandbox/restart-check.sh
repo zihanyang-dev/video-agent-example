@@ -10,10 +10,11 @@ remote_attempted=0
 ssh_vm() { run_stage "$run_timeout" ssh -F "$ssh_config" -T -o ConnectTimeout=5 -o ServerAliveInterval=3 -o ServerAliveCountMax=3 lima-e2b "$@"; }
 cleanup() {
  status=$?; trap - EXIT HUP INT TERM
+ failed=0
  # The build has no sandbox or runner to reconcile. Seed dispatch can commit
  # before losing its receipt, so cleanup must check actual labelled ownership.
  if [ "$remote_attempted" -eq 1 ]; then
- ssh_vm sh -s -- "$owner" <<'CLEAN' || status=1
+ ssh_vm sh -s -- "$owner" <<'CLEAN' || failed=1
 set -eu
 cd "$HOME/e2b"
 if sudo timeout 10 docker inspect "$1" >/dev/null 2>&1; then
@@ -39,7 +40,9 @@ fi
 sudo timeout 5 rm -f "/tmp/$1.env"
 CLEAN
  fi
- rm -rf "$staging" || status=1
+ rm -rf "$staging" || failed=1
+ if [ "$failed" -ne 0 ]; then echo "Cleanup incomplete for owned runner $owner" >&2; fi
+ if [ "$status" -eq 0 ]; then status=$failed; fi
  exit "$status"
 }
 trap cleanup EXIT

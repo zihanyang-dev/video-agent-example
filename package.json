@@ -9,11 +9,12 @@
   ],
   "scripts": {
     "check": "bun run typecheck && bun run lint && bun run fmt:check && bun run boundaries && bun run test",
-    "test": "bun test apps packages",
+    "test": "bun test apps packages && bun run test:scripts",
+    "test:scripts": "bun test scripts/generate-api.test.ts tests/scripts/ci-policy.test.ts tests/scripts/proxy-deadline.test.ts tests/scripts/reconciliation-cli.test.ts tests/scripts/database-project.test.ts tests/scripts/process-diagnostics.test.ts tests/scripts/restart-status.test.ts tests/scripts/deployment-http-fixture.test.ts",
     "test:integration": "bun test tests/integration",
     "typecheck": "tsc --noEmit",
-    "lint": "oxlint --type-aware --deny-warnings apps packages tests scripts deploy",
-    "fmt:check": "prettier --check . '!**/generated/**' --ignore-path .gitignore",
+    "lint": "oxlint --type-aware --deny-warnings apps packages tests scripts deploy .github",
+    "fmt:check": "prettier --check . '!**/generated/**' '!docs/*.html' '!**/migrations/**' '!bun.lock' --ignore-path .gitignore",
     "boundaries": "depcruise --config .dependency-cruiser.cjs apps packages && bun test tests/scripts/architecture.test.ts"
   },
   "devDependencies": {

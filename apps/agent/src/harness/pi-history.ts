@@ -32,9 +32,7 @@ function decodeHistory(history: unknown) {
   requireHistory(history.leafID === null || typeof history.leafID === 'string')
   // Use the official decoder/types, not a shadow session or provider schema.
   const decoded = parseSessionEntries(
-    [history.header, ...history.entries]
-      .map((entry) => JSON.stringify(entry))
-      .join('\n'),
+    [history.header, ...history.entries].map((entry) => JSON.stringify(entry)).join('\n'),
   )
   requireHistory(decoded.length === history.entries.length + 1)
   const [header, ...entries] = decoded
@@ -107,8 +105,7 @@ function validateAcyclic(byID: Map<string, SessionEntry>): void {
     while (current && !done.has(current.id)) {
       requireHistory(!path.has(current.id))
       path.add(current.id)
-      current =
-        current.parentId === null ? undefined : byID.get(current.parentId)
+      current = current.parentId === null ? undefined : byID.get(current.parentId)
     }
     for (const id of path) {
       done.add(id)
@@ -121,10 +118,7 @@ export class HistoryLimitError extends Error {}
 // Logical admission: serialization allocates; this is not a transport/RSS cap.
 export function admitPiHistory(history: unknown): void {
   const serialized = JSON.stringify(history)
-  if (
-    serialized !== undefined &&
-    Buffer.byteLength(serialized) > 4 * 1024 * 1024
-  ) {
+  if (serialized !== undefined && Buffer.byteLength(serialized) > 4 * 1024 * 1024) {
     throw new HistoryLimitError('Private history size limit exceeded')
   }
 }

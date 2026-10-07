@@ -7,35 +7,35 @@ import { sha256 } from '@vid/object-storage'
 import { acceptExecutionEvent } from '../../apps/server/src/db/execution-events'
 import { archiveThread } from '../../apps/server/src/db/cancellations'
 import { acceptMessageIntent } from '../../apps/server/src/db/submissions'
-import {
-  createOwnedThread,
-  snapshotOwnedMessages,
-} from '../../apps/server/src/db/conversations'
+import { createOwnedThread, snapshotOwnedMessages } from '../../apps/server/src/db/conversations'
 import { assignLegacyThreads } from '../../apps/server/src/db/legacy-thread-ownership'
 import { openTestDatabase, settleTestCleanup } from './database-fixture'
 import { signedTestIdentity } from './authentication-fixture'
 
 const { db, close } = openTestDatabase(8)
-const login = await signedTestIdentity(db).catch(async (cause: unknown) => {
+const userIDs = new Set<string>()
+function ownedIdentity() {
+  return signedTestIdentity(db, (userID) => userIDs.add(userID))
+}
+async function removeOwnedUsers() {
+  if (userIDs.size)
+    await db
+      .deleteFrom('auth.user')
+      .where('id', 'in', [...userIDs])
+      .execute()
+}
+const { login, foreign } = await (async () => {
   try {
-    await close()
-  } catch (cleanup) {
-    throw new AggregateError([cause, cleanup], 'Test identity setup failed', {
-      cause,
+    const login = await ownedIdentity()
+    const foreign = await ownedIdentity()
+    return { login, foreign }
+  } catch (cause) {
+    await settleTestCleanup([removeOwnedUsers, close]).catch((cleanup: unknown) => {
+      throw new AggregateError([cause, cleanup], 'Test identity setup failed', { cause })
     })
+    throw cause
   }
-  throw cause
-})
-const foreign = await signedTestIdentity(db).catch(async (cause: unknown) => {
-  try {
-    await close()
-  } catch (cleanup) {
-    throw new AggregateError([cause, cleanup], 'Test identity setup failed', {
-      cause,
-    })
-  }
-  throw cause
-})
+})()
 const shutdown = new AbortController()
 const route = createHTTP(db, {
   authentication: login.authentication,
@@ -57,17 +57,60 @@ afterAll(async () => {
         'product.threads',
       ] as const
     ).map((table) => async () => {
-      if (threadIDs.length)
-        await db.deleteFrom(table).where('thread_id', 'in', threadIDs).execute()
+      if (threadIDs.length) await db.deleteFrom(table).where('thread_id', 'in', threadIDs).execute()
     }),
-    () =>
-      db
-        .deleteFrom('auth.user')
-        .where('id', 'in', [login.user.id, foreign.user.id])
-        .execute(),
+    removeOwnedUsers,
+    async () => {
+      expect(
+        await db
+          .selectFrom('auth.user')
+          .select('id')
+          .where('id', 'in', [...userIDs])
+          .execute(),
+      ).toEqual([])
+      expect(
+        await db
+          .selectFrom('auth.session')
+          .select('id')
+          .where('userId', 'in', [...userIDs])
+          .execute(),
+      ).toEqual([])
+    },
     close,
   ])
 })
+test('partial official SDK login registers the saved user for owned cleanup', async () => {
+  const constraint = `owned_session_probe_${crypto.randomUUID().replaceAll('-', '')}`
+  const failures: unknown[] = []
+  let savedID: string | undefined
+  try {
+    await sql`alter table auth.session add constraint ${sql.id(constraint)} check (false) not valid`.execute(
+      db,
+    )
+    const cause = await signedTestIdentity(db, (userID) => {
+      userIDs.add(userID)
+      savedID = userID
+    }).then(
+      () => undefined,
+      (failure: unknown) => failure,
+    )
+    expect(cause).toBeInstanceOf(Error)
+    if (savedID === undefined) throw new Error('Missing owned user receipt')
+    expect(userIDs.has(savedID)).toBeTrue()
+    expect(
+      await db.selectFrom('auth.user').select('id').where('id', '=', savedID).execute(),
+    ).toEqual([{ id: savedID }])
+  } catch (cause) {
+    failures.push(cause)
+  }
+  await sql`alter table auth.session drop constraint if exists ${sql.id(constraint)}`
+    .execute(db)
+    .catch((cause: unknown) => {
+      failures.push(cause)
+    })
+  if (failures.length) throw new AggregateError(failures, 'Partial identity probe failed')
+})
+
 function request(
   path: string,
   body?: unknown,
@@ -114,34 +157,19 @@ test('HTTP thread retry, title, archive and authenticated ownership are the only
   threadIDs.push(threadID)
   const creation = { threadID, title: 'Chat title' }
   expect((await request('/threads', creation)).status).toBe(201)
-  expect(
-    (await request(`/threads/${threadID}`, { title: 'Renamed' }, 'PATCH'))
-      .status,
-  ).toBe(200)
+  expect((await request(`/threads/${threadID}`, { title: 'Renamed' }, 'PATCH')).status).toBe(200)
   expect((await request('/threads', creation)).status).toBe(200)
-  expect(
-    (await request('/threads', { ...creation, title: 'Conflicting' })).status,
-  ).toBe(409)
-  expect(
-    (await request('/threads', { ...creation, userID: foreign.user.id }))
-      .status,
-  ).toBe(400)
-  expect(
-    (await request(`/threads/${threadID}`, undefined, 'GET', new Headers()))
-      .status,
-  ).toBe(401)
-  expect(
-    (await request(`/threads/${threadID}`, undefined, 'GET', foreign.headers))
-      .status,
-  ).toBe(404)
-  expect(
-    (await request('/threads', creation, 'POST', foreign.headers)).status,
-  ).toBe(404)
+  expect((await request('/threads', { ...creation, title: 'Conflicting' })).status).toBe(409)
+  expect((await request('/threads', { ...creation, userID: foreign.user.id })).status).toBe(400)
+  expect((await request(`/threads/${threadID}`, undefined, 'GET', new Headers())).status).toBe(401)
+  expect((await request(`/threads/${threadID}`, undefined, 'GET', foreign.headers)).status).toBe(
+    404,
+  )
+  expect((await request('/threads', creation, 'POST', foreign.headers)).status).toBe(404)
   expect((await request(`/threads/${threadID}/archive`, {})).status).toBe(200)
-  expect(
-    (await request(`/threads/${threadID}`, { title: 'Cannot rename' }, 'PATCH'))
-      .status,
-  ).toBe(409)
+  expect((await request(`/threads/${threadID}`, { title: 'Cannot rename' }, 'PATCH')).status).toBe(
+    409,
+  )
   expect(
     (
       await request(`/threads/${threadID}/messages`, {
@@ -150,9 +178,11 @@ test('HTTP thread retry, title, archive and authenticated ownership are the only
       })
     ).status,
   ).toBe(409)
-  expect(await (await request(`/threads/${threadID}/messages`)).json()).toEqual(
-    { messages: [], activeRuns: [], failedRuns: [] },
-  )
+  expect(await (await request(`/threads/${threadID}/messages`)).json()).toEqual({
+    messages: [],
+    activeRuns: [],
+    failedRuns: [],
+  })
 })
 
 test('archive requests stopping and keeps durable accepted work active until a real terminal', async () => {
@@ -237,9 +267,7 @@ test('successful upload and ready replay need no storage GET; uncertain PUT stil
       },
     },
   }
-  expect((await publishUpload(db, query, uncertain, recoveryIO))?.created).toBe(
-    true,
-  )
+  expect((await publishUpload(db, query, uncertain, recoveryIO))?.created).toBe(true)
   expect(
     await publishUpload(
       db,
@@ -275,12 +303,20 @@ async function threadBarrier(threadID: string) {
     entered()
     await waiting
   })
-  await locked
+  await Promise.race([
+    locked,
+    done.then(() => {
+      throw new Error('Barrier finished before acquiring thread lock')
+    }),
+  ]).catch((cause: unknown) => {
+    release()
+    throw cause
+  })
   return { release, done }
 }
 async function waitForBlockedThreadWriters(count: number) {
-  const deadline = Date.now() + 3000
-  while (Date.now() < deadline) {
+  const deadline = performance.now() + 3000
+  while (performance.now() < deadline) {
     const blocked = await sql<{
       count: number
     }>`select count(*)::int as count from pg_stat_activity where datname = current_database() and wait_event_type = 'Lock' and query like '%product%threads%for update%'`.execute(
@@ -297,28 +333,41 @@ test('real PG barrier serializes archive against send and exact replay under the
   const accepted = intent(query)
   await acceptMessageIntent(db, accepted)
   const barrier = await threadBarrier(query.threadID)
-  try {
-    const archiving = archiveThread(db, query)
-    await waitForBlockedThreadWriters(1)
-    const sending = acceptMessageIntent(db, intent(query))
-    const replaying = acceptMessageIntent(db, accepted)
-    await waitForBlockedThreadWriters(3)
-    barrier.release()
-    await barrier.done
-    await archiving
-    expect((await sending).kind).toBe('conflict')
-    expect((await replaying).kind).toBe('conflict')
-    expect((await snapshotOwnedMessages(db, query))?.messages).toHaveLength(1)
-  } finally {
-    barrier.release()
-    await barrier.done
+  const writers: Promise<unknown>[] = []
+  const failures: unknown[] = []
+  function ownWriter(writer: Promise<unknown>) {
+    writers.push(writer)
+    void writer.catch(() => {})
   }
+  try {
+    ownWriter(archiveThread(db, query))
+    await waitForBlockedThreadWriters(1)
+    ownWriter(acceptMessageIntent(db, intent(query)))
+    ownWriter(acceptMessageIntent(db, accepted))
+    await waitForBlockedThreadWriters(3)
+  } catch (cause) {
+    failures.push(cause)
+  }
+  barrier.release()
+  await barrier.done.catch((cause: unknown) => {
+    failures.push(cause)
+  })
+  const outcomes = await Promise.allSettled(writers)
+  for (const outcome of outcomes) if (outcome.status === 'rejected') failures.push(outcome.reason)
+  if (failures.length > 1) throw new AggregateError(failures, 'Thread writers failed')
+  if (failures.length === 1) throw failures[0]
+  expect(outcomes).toMatchObject([
+    { status: 'fulfilled' },
+    { status: 'fulfilled', value: { kind: 'conflict' } },
+    { status: 'fulfilled', value: { kind: 'conflict' } },
+  ])
+  expect((await snapshotOwnedMessages(db, query))?.messages).toHaveLength(1)
 })
 
 test.each(['expiry', 'logout', 'revocation'] as const)(
   'open SSE stops future reads after session %s but does not abort accepted work',
   async (kind) => {
-    const identity = await signedTestIdentity(db)
+    const identity = await ownedIdentity()
     const query = { ownerID: identity.user.id, threadID: crypto.randomUUID() }
     threadIDs.push(query.threadID)
     await createOwnedThread(db, { ...query, title: 'Session lifetime' })
@@ -342,9 +391,7 @@ test.each(['expiry', 'logout', 'revocation'] as const)(
       ),
     )
     const reader = response.body!.getReader()
-    expect(new TextDecoder().decode((await reader.read()).value)).toContain(
-      'RUN_STARTED',
-    )
+    expect(new TextDecoder().decode((await reader.read()).value)).toContain('RUN_STARTED')
     await endSession(kind, identity, local)
     await acceptExecutionEvent(db, {
       ordinal: 1,
@@ -377,18 +424,10 @@ test('legacy assignment rejects unknown users atomically without changing IDs or
     expect((await request('/session')).status).toBe(200)
     expect((await request('/threads')).status).toBe(200)
     expect((await request(`/threads/${query.threadID}`)).status).toBe(404)
-    expect((await request(`/threads/${query.threadID}/messages`)).status).toBe(
-      404,
-    )
+    expect((await request(`/threads/${query.threadID}/messages`)).status).toBe(404)
     const active = await ownedThread()
     expect(
-      (
-        await request(
-          `/threads/${active.threadID}`,
-          { title: 'Available' },
-          'PATCH',
-        )
-      ).status,
+      (await request(`/threads/${active.threadID}`, { title: 'Available' }, 'PATCH')).status,
     ).toBe(200)
     expect(
       (
@@ -431,12 +470,12 @@ test('legacy assignment rejects unknown users atomically without changing IDs or
           .executeTakeFirstOrThrow()
       ).owner_id,
     ).toBeNull()
-    expect(
-      await assignLegacyThreads(db, [{ legacyOwnerID, userID: login.user.id }]),
-    ).toEqual({ assigned: 1 })
-    expect(
-      await assignLegacyThreads(db, [{ legacyOwnerID, userID: login.user.id }]),
-    ).toEqual({ assigned: 0 })
+    expect(await assignLegacyThreads(db, [{ legacyOwnerID, userID: login.user.id }])).toEqual({
+      assigned: 1,
+    })
+    expect(await assignLegacyThreads(db, [{ legacyOwnerID, userID: login.user.id }])).toEqual({
+      assigned: 0,
+    })
     expect((await request(`/threads/${query.threadID}`)).status).toBe(200)
     expect((await request(`/threads/${other.threadID}`)).status).toBe(404)
     expect(
@@ -448,12 +487,10 @@ test('legacy assignment rejects unknown users atomically without changing IDs or
           .executeTakeFirstOrThrow()
       ).owner_id,
     ).toBeNull()
-    expect(
-      (await snapshotOwnedMessages(db, query))?.messages[0]?.messageID,
-    ).toBe(submission.messageID)
-    expect((await snapshotOwnedMessages(db, query))?.activeRuns[0]?.runID).toBe(
-      submission.runID,
+    expect((await snapshotOwnedMessages(db, query))?.messages[0]?.messageID).toBe(
+      submission.messageID,
     )
+    expect((await snapshotOwnedMessages(db, query))?.activeRuns[0]?.runID).toBe(submission.runID)
   } finally {
     await db
       .updateTable('product.threads')
@@ -475,10 +512,7 @@ async function endSession(
       .where('id', '=', identity.session.id)
       .execute()
   if (kind === 'revocation')
-    await db
-      .deleteFrom('auth.session')
-      .where('id', '=', identity.session.id)
-      .execute()
+    await db.deleteFrom('auth.session').where('id', '=', identity.session.id).execute()
   if (kind === 'logout')
     expect(
       (
@@ -509,21 +543,14 @@ test('foreign cancellation command IDs cannot reveal conflicts in another user h
       })
     ).status,
   ).toBe(404)
-  expect((await snapshotOwnedMessages(db, query))?.activeRuns[0]?.status).toBe(
-    'accepted',
-  )
+  expect((await snapshotOwnedMessages(db, query))?.activeRuns[0]?.status).toBe('accepted')
 })
 
-async function restoreUnmappedLegacyFixture(
-  threadID: string,
-  legacyOwnerID: string,
-) {
+async function restoreUnmappedLegacyFixture(threadID: string, legacyOwnerID: string) {
   // Simulate a row that existed before the forward migration in this ephemeral
   // test database. Restoring NOT VALID is the actual migration's enforcement.
   await db.transaction().execute(async (tx) => {
-    await sql`alter table product.threads drop constraint thread_requires_identity`.execute(
-      tx,
-    )
+    await sql`alter table product.threads drop constraint thread_requires_identity`.execute(tx)
     await tx
       .updateTable('product.threads')
       .set({ owner_id: null, legacy_owner_id: legacyOwnerID })
@@ -564,9 +591,7 @@ for (const [field, value] of Object.entries({
         command,
       })
       .execute()
-    expect(
-      (await snapshotOwnedMessages(db, query))?.activeRuns[0]?.status,
-    ).toBe('accepted')
+    expect((await snapshotOwnedMessages(db, query))?.activeRuns[0]?.status).toBe('accepted')
     await archiveThread(db, query)
     const commands = await db
       .selectFrom('product.command_outbox')
@@ -574,12 +599,8 @@ for (const [field, value] of Object.entries({
       .where('thread_id', '=', query.threadID)
       .execute()
     expect(commands).toHaveLength(3)
-    expect(
-      commands.find((row) => row.command_id === commandID)?.command,
-    ).toEqual(command)
-    expect(
-      (await snapshotOwnedMessages(db, query))?.activeRuns[0]?.status,
-    ).toBe('stopping')
+    expect(commands.find((row) => row.command_id === commandID)?.command).toEqual(command)
+    expect((await snapshotOwnedMessages(db, query))?.activeRuns[0]?.status).toBe('stopping')
   })
 }
 
@@ -636,13 +657,7 @@ test('failed snapshot independently rejects string-version start authority', asy
   expect((await snapshotOwnedMessages(db, query))?.failedRuns).toEqual([])
 })
 
-for (const field of [
-  'version',
-  'commandID',
-  'runID',
-  'threadID',
-  'messageID',
-] as const) {
+for (const field of ['version', 'commandID', 'runID', 'threadID', 'messageID'] as const) {
   test(`active snapshot rejects inconsistent start ${field}`, async () => {
     const query = await ownedThread()
     const submission = intent(query)
@@ -698,9 +713,7 @@ test('a cancel with a non-null indexed message is not stopping authority', async
       },
     })
     .execute()
-  expect((await snapshotOwnedMessages(db, query))?.activeRuns[0]?.status).toBe(
-    'accepted',
-  )
+  expect((await snapshotOwnedMessages(db, query))?.activeRuns[0]?.status).toBe('accepted')
   await archiveThread(db, query)
   expect(
     await db
@@ -749,9 +762,7 @@ test('uppercase historical start and stop retain snapshot and receipt authority 
       command: cancel,
     })
     .execute()
-  expect((await snapshotOwnedMessages(db, query))?.activeRuns[0]?.status).toBe(
-    'stopping',
-  )
+  expect((await snapshotOwnedMessages(db, query))?.activeRuns[0]?.status).toBe('stopping')
   await archiveThread(db, query)
   expect(
     await acceptExecutionEvent(db, {

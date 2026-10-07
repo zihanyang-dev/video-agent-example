@@ -1,9 +1,5 @@
 import { expect, test } from 'bun:test'
-import {
-  decideThreadAccess,
-  decideMessageReplay,
-  normalizeMessageIntent,
-} from './submission'
+import { decideThreadAccess, decideMessageReplay, normalizeMessageIntent } from './submission'
 
 const intent = {
   ownerID: 'Owner-ABC',
@@ -14,12 +10,9 @@ const intent = {
   text: ' \tHello\nworld ',
 }
 
-test.each(['', ' ', '\t\n'])(
-  'blank text %j cannot form a submission',
-  (text) => {
-    expect(normalizeMessageIntent({ ...intent, text })).toBeNull()
-  },
-)
+test.each(['', ' ', '\t\n'])('blank text %j cannot form a submission', (text) => {
+  expect(normalizeMessageIntent({ ...intent, text })).toBeNull()
+})
 
 test('normalization preserves opaque ownership and canonicalizes all execution identities', () => {
   expect(normalizeMessageIntent(intent)).toEqual({
@@ -34,27 +27,15 @@ test('normalization preserves opaque ownership and canonicalizes all execution i
 
 test('authorization treats missing and foreign threads equally without case-folding owners', () => {
   for (const action of ['read', 'write', 'cancel'] as const) {
-    expect(
-      decideThreadAccess(
-        'Owner-ABC',
-        { ownerID: 'Owner-ABC', archived: false },
-        action,
-      ),
-    ).toBe('authorized')
-    expect(
-      decideThreadAccess(
-        'Owner-ABC',
-        { ownerID: 'owner-abc', archived: false },
-        action,
-      ),
-    ).toBe('unavailable')
-    expect(
-      decideThreadAccess(
-        'Owner-ABC',
-        { ownerID: null, archived: false },
-        action,
-      ),
-    ).toBe('unavailable')
+    expect(decideThreadAccess('Owner-ABC', { ownerID: 'Owner-ABC', archived: false }, action)).toBe(
+      'authorized',
+    )
+    expect(decideThreadAccess('Owner-ABC', { ownerID: 'owner-abc', archived: false }, action)).toBe(
+      'unavailable',
+    )
+    expect(decideThreadAccess('Owner-ABC', { ownerID: null, archived: false }, action)).toBe(
+      'unavailable',
+    )
     expect(decideThreadAccess('Owner-ABC', null, action)).toBe('unavailable')
   }
 })
@@ -83,14 +64,11 @@ test.each([
   { text: 'Different' },
   { commandID: null },
   { runID: null },
-])(
-  'conflicting or incomplete replay cannot borrow execution IDs: %j',
-  (changed) => {
-    expect(decideMessageReplay(intent, { ...saved, ...changed })).toEqual({
-      kind: 'conflict',
-    })
-  },
-)
+])('conflicting or incomplete replay cannot borrow execution IDs: %j', (changed) => {
+  expect(decideMessageReplay(intent, { ...saved, ...changed })).toEqual({
+    kind: 'conflict',
+  })
+})
 
 test('archived owned history and explicit stopping remain readable, but new writes and retries do not', () => {
   const archived = { ownerID: 'Owner-ABC', archived: true }

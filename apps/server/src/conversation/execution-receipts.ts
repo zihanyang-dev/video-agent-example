@@ -17,17 +17,19 @@ export function publicEvent(event: ExecutionEvent): ExecutionEvent {
         messageID: event.messageID.toLowerCase(),
         delta: event.delta,
       }
-    case 'run-completed':
-      return {
+    case 'run-completed': {
+      const completed: ExecutionEvent = {
         ...identities,
         kind: event.kind,
         messageID: event.messageID.toLowerCase(),
         text: event.text,
-        ...(event.assets === undefined ? {} : { assets: event.assets }),
-        ...(event.sources === undefined
-          ? {}
-          : { sources: webSourcesSchema.parse(event.sources) }),
       }
+      const optionalFields = {
+        ...(event.assets === undefined ? {} : { assets: event.assets }),
+        ...(event.sources === undefined ? {} : { sources: webSourcesSchema.parse(event.sources) }),
+      }
+      return { ...completed, ...optionalFields }
+    }
     case 'run-failed':
       return { ...identities, kind: event.kind, reason: event.reason }
     case 'run-started':

@@ -12,10 +12,7 @@ import {
   settleTestCleanup,
   openTestDatabase,
 } from './database-fixture'
-import {
-  executionCommandSchema,
-  executionDeliverySchema,
-} from '@vid/contract/execution'
+import { executionCommandSchema, executionDeliverySchema } from '@vid/contract/execution'
 
 const migration = '20261004040000_assets.sql'
 const ids = {
@@ -61,20 +58,17 @@ async function legacyDatabase() {
       (file) => file.endsWith('.sql') && file < migration,
     )
     for (const file of files)
-      await copyFile(
-        join('packages/database/migrations', file),
-        join(directory, file),
-      )
+      await copyFile(join('packages/database/migrations', file), join(directory, file))
     expect(await migrate(directory, databaseURL(url, name))).toBe(0)
     await db.connect()
     await verifyTestDatabase(db)
     await db.query(
       `INSERT INTO auth."user" (id,name,email,"emailVerified") VALUES ('migration-user','Migration user','migration@example.invalid',true)`,
     )
-    await db.query(
-      'INSERT INTO product.threads (thread_id,owner_id) VALUES ($1,$2)',
-      [ids.thread, 'migration-user'],
-    )
+    await db.query('INSERT INTO product.threads (thread_id,owner_id) VALUES ($1,$2)', [
+      ids.thread,
+      'migration-user',
+    ])
     await db.query(
       "INSERT INTO product.messages (message_id,thread_id,role,text) VALUES ($1,$3,'user','Historical input'),($2,$3,'assistant','Historical output')",
       [ids.message, ids.assistant, ids.thread],
@@ -93,10 +87,7 @@ async function legacyDatabase() {
             (through === undefined || file <= through),
         )
         for (const file of upgrades)
-          await copyFile(
-            join('packages/database/migrations', file),
-            join(directory, file),
-          )
+          await copyFile(join('packages/database/migrations', file), join(directory, file))
         return await migrate(directory, databaseURL(url, name))
       },
     }
@@ -104,11 +95,7 @@ async function legacyDatabase() {
     try {
       await close()
     } catch (cleanup) {
-      throw new AggregateError(
-        [cause, cleanup],
-        'Legacy fixture setup failed',
-        { cause },
-      )
+      throw new AggregateError([cause, cleanup], 'Legacy fixture setup failed', { cause })
     }
     throw cause
   }
@@ -205,17 +192,13 @@ test('asset migration preserves ready and pending files, old keys, links and exa
     const pendingID = crypto.randomUUID()
     await fixture.db.query(
       "INSERT INTO product.materials (material_id,thread_id,name,mime_type,byte_length,sha256,object_key) VALUES ($1,$2,'pending.txt','text/plain',3,$3,$4)",
-      [
-        pendingID,
-        ids.thread,
-        file.sha256,
-        `materials/${ids.thread}/${pendingID}`,
-      ],
+      [pendingID, ids.thread, file.sha256, `materials/${ids.thread}/${pendingID}`],
     )
-    await fixture.db.query(
-      'INSERT INTO product.message_materials VALUES ($1,$2,$3,0)',
-      [ids.thread, ids.message, ids.asset],
-    )
+    await fixture.db.query('INSERT INTO product.message_materials VALUES ($1,$2,$3,0)', [
+      ids.thread,
+      ids.message,
+      ids.asset,
+    ])
     await seedCommand(fixture.db, [file])
     expect(await fixture.upgrade()).toBe(0)
     const assets = await fixture.db.query<{
@@ -238,24 +221,29 @@ test('asset migration preserves ready and pending files, old keys, links and exa
       position: number
     }>('SELECT asset_id,position FROM product.message_assets')
     expect(links.rows).toEqual([{ asset_id: ids.asset, position: 0 }])
-    const commands = await fixture.db.query<{ command: unknown }>(
-      'SELECT command FROM product.command_outbox UNION ALL SELECT command FROM execution.command_inbox',
+    const commands = await fixture.db.query<{
+      source: string
+      command: unknown
+    }>(
+      "SELECT 'outbox' AS source,command FROM product.command_outbox UNION ALL SELECT 'inbox' AS source,command FROM execution.command_inbox",
     )
+    expect(commands.rows.map((row) => row.source).sort()).toEqual(['inbox', 'outbox'])
     const { materialID, ...reference } = file
+    const expected = {
+      version: 1,
+      kind: 'start',
+      commandID: ids.command,
+      threadID: ids.thread,
+      runID: ids.run,
+      input: {
+        messageID: ids.message,
+        text: 'Historical input',
+        assets: [{ assetID: materialID, ...reference }],
+      },
+    }
     for (const row of commands.rows) {
-      const command = executionCommandSchema.parse(row.command)
-      expect(command).toEqual({
-        version: 1,
-        kind: 'start',
-        commandID: ids.command,
-        threadID: ids.thread,
-        runID: ids.run,
-        input: {
-          messageID: ids.message,
-          text: 'Historical input',
-          assets: [{ assetID: materialID, ...reference }],
-        },
-      })
+      expect(row.command).toEqual(expected)
+      expect(executionCommandSchema.safeParse(row.command).success).toBe(true)
     }
   } finally {
     await fixture.close()
@@ -267,19 +255,24 @@ test('asset migration preserves a historical text input with an explicitly empty
   try {
     await seedCommand(fixture.db, [])
     expect(await fixture.upgrade()).toBe(0)
-    const commands = await fixture.db.query<{ command: unknown }>(
-      'SELECT command FROM product.command_outbox UNION ALL SELECT command FROM execution.command_inbox',
+    const commands = await fixture.db.query<{
+      source: string
+      command: unknown
+    }>(
+      "SELECT 'outbox' AS source,command FROM product.command_outbox UNION ALL SELECT 'inbox' AS source,command FROM execution.command_inbox",
     )
+    expect(commands.rows.map((row) => row.source).sort()).toEqual(['inbox', 'outbox'])
+    const expected = {
+      version: 1,
+      kind: 'start',
+      commandID: ids.command,
+      threadID: ids.thread,
+      runID: ids.run,
+      input: { messageID: ids.message, text: 'Historical input' },
+    }
     for (const row of commands.rows) {
-      const command = executionCommandSchema.parse(row.command)
-      expect(command).toEqual({
-        version: 1,
-        kind: 'start',
-        commandID: ids.command,
-        threadID: ids.thread,
-        runID: ids.run,
-        input: { messageID: ids.message, text: 'Historical input' },
-      })
+      expect(row.command).toEqual(expected)
+      expect(executionCommandSchema.safeParse(row.command).success).toBe(true)
     }
   } finally {
     await fixture.close()
@@ -363,17 +356,13 @@ test.each([
   'unaccepted historical completion survives dbmate upgrade: %j',
   async ({ uppercase, byteLength }) => {
     const fixture = await legacyDatabase()
-    const { db: product, close: closeProduct } = openTestDatabase(
-      4,
-      fixture.url,
-    )
+    const { db: product, close: closeProduct } = openTestDatabase(4, fixture.url)
     try {
       await seedCommand(fixture.db, [])
       if (uppercase) await uppercaseCommandHeaders(fixture.db)
-      await fixture.db.query(
-        'INSERT INTO execution.conversations (thread_id) VALUES ($1)',
-        [ids.thread],
-      )
+      await fixture.db.query('INSERT INTO execution.conversations (thread_id) VALUES ($1)', [
+        ids.thread,
+      ])
       await fixture.db.query(
         'INSERT INTO execution.runs (run_id,thread_id,command_id,message_id,text) VALUES ($1,$2,$3,$4,$5)',
         [ids.run, ids.thread, ids.command, ids.message, 'Historical input'],
@@ -424,10 +413,7 @@ test.each([
         [ids.command],
       )
       const expectedIDs = Object.fromEntries(
-        Object.entries(ids).map(([name, id]) => [
-          name,
-          uppercase ? id.toUpperCase() : id,
-        ]),
+        Object.entries(ids).map(([name, id]) => [name, uppercase ? id.toUpperCase() : id]),
       )
       expect(header.rows[0]?.command).toMatchObject({
         threadID: expectedIDs.thread,
@@ -438,12 +424,9 @@ test.each([
       const retained = await fixture.db.query<{
         event: unknown
         ordinal: number
-      }>('SELECT event,ordinal FROM execution.event_outbox WHERE event_id=$1', [
-        eventID,
-      ])
+      }>('SELECT event,ordinal FROM execution.event_outbox WHERE event_id=$1', [eventID])
       const delivery = executionDeliverySchema.parse(retained.rows[0])
-      if (delivery.event.kind !== 'run-completed')
-        throw new Error('Expected completion')
+      if (delivery.event.kind !== 'run-completed') throw new Error('Expected completion')
       const asset = delivery.event.assets?.[0]
       if (!asset) throw new Error('Missing migrated asset')
       for (const foreignKey of [
@@ -492,10 +475,7 @@ test.each([
         [
           {
             ...current,
-            objectKey: current.objectKey.replace(
-              currentID,
-              crypto.randomUUID(),
-            ),
+            objectKey: current.objectKey.replace(currentID, crypto.randomUUID()),
           },
         ],
       ])
@@ -544,10 +524,9 @@ test('retained uppercase legacy start authorizes migrated failure and owned fail
   try {
     await seedCommand(fixture.db, [])
     await uppercaseCommandHeaders(fixture.db)
-    await fixture.db.query(
-      'INSERT INTO execution.conversations (thread_id) VALUES ($1)',
-      [ids.thread],
-    )
+    await fixture.db.query('INSERT INTO execution.conversations (thread_id) VALUES ($1)', [
+      ids.thread,
+    ])
     await fixture.db.query(
       'INSERT INTO execution.runs (run_id,thread_id,command_id,message_id,text) VALUES ($1,$2,$3,$4,$5)',
       [ids.run, ids.thread, ids.command, ids.message, 'Historical input'],
@@ -573,9 +552,7 @@ test('retained uppercase legacy start authorizes migrated failure and owned fail
     const retained = await fixture.db.query<{
       event: unknown
       ordinal: number
-    }>('SELECT event,ordinal FROM execution.event_outbox WHERE event_id=$1', [
-      eventID,
-    ])
+    }>('SELECT event,ordinal FROM execution.event_outbox WHERE event_id=$1', [eventID])
     const delivery = executionDeliverySchema.parse(retained.rows[0])
     expect(await acceptExecutionEvent(product, delivery)).toBe('accepted')
     expect(
@@ -585,9 +562,7 @@ test('retained uppercase legacy start authorizes migrated failure and owned fail
       }),
     ).toMatchObject({
       activeRuns: [],
-      failedRuns: [
-        { runID: ids.run, messageID: ids.message, reason: 'execution-error' },
-      ],
+      failedRuns: [{ runID: ids.run, messageID: ids.message, reason: 'execution-error' }],
     })
     expect(
       await snapshotOwnedMessages(product, {

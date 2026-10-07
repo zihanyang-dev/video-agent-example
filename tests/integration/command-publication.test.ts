@@ -1,8 +1,5 @@
 import { afterAll, expect, test } from 'bun:test'
-import {
-  executionCommandSchema,
-  type ExecutionCommand,
-} from '@vid/contract/execution'
+import { executionCommandSchema, type ExecutionCommand } from '@vid/contract/execution'
 import { createClient } from 'redis'
 import { sql } from 'kysely'
 import { publishCommand } from '../../apps/server/src/db/command-publication'
@@ -14,18 +11,9 @@ const threadIDs: string[] = []
 afterAll(async () => {
   try {
     if (threadIDs.length === 0) return
-    await db
-      .deleteFrom('product.command_outbox')
-      .where('thread_id', 'in', threadIDs)
-      .execute()
-    await db
-      .deleteFrom('product.messages')
-      .where('thread_id', 'in', threadIDs)
-      .execute()
-    await db
-      .deleteFrom('product.threads')
-      .where('thread_id', 'in', threadIDs)
-      .execute()
+    await db.deleteFrom('product.command_outbox').where('thread_id', 'in', threadIDs).execute()
+    await db.deleteFrom('product.messages').where('thread_id', 'in', threadIDs).execute()
+    await db.deleteFrom('product.threads').where('thread_id', 'in', threadIDs).execute()
   } finally {
     await close()
   }
@@ -50,8 +38,7 @@ async function pendingCommand(threadID: string = crypto.randomUUID()) {
     .execute()
   threadIDs.push(intent.threadID)
   const accepted = await acceptMessageIntent(db, intent)
-  if (accepted.kind !== 'accepted')
-    throw new Error('Fixture command was not accepted')
+  if (accepted.kind !== 'accepted') throw new Error('Fixture command was not accepted')
   return intent
 }
 
@@ -202,9 +189,7 @@ test.each(['commandID', 'threadID', 'runID', 'messageID'] as const)(
             await redis.xAdd(stream, '*', { command: JSON.stringify(command) })
           },
         }),
-      ).rejects.toThrow(
-        'Stored command identities do not match the outbox record',
-      )
+      ).rejects.toThrow('Stored command identities do not match the outbox record')
       expect(await redis.xLen(stream)).toBe(0)
       expect(await publishedAt(intent.commandID)).toBeNull()
     } finally {
@@ -215,8 +200,7 @@ test.each(['commandID', 'threadID', 'runID', 'messageID'] as const)(
 
 function publicationStream() {
   const redisURL = process.env.REDIS_URL
-  if (!redisURL)
-    throw new Error('REDIS_URL is required for publication integration tests')
+  if (!redisURL) throw new Error('REDIS_URL is required for publication integration tests')
   const redis = createClient({
     url: redisURL,
     socket: { reconnectStrategy: false },
@@ -240,9 +224,7 @@ function publicationStream() {
 test('a lost Redis acceptance receipt can duplicate delivery but preserves command identities', async () => {
   const { redis, stream, closeStream } = publicationStream()
   const intent = await pendingCommand()
-  const lostReceipt = new Error(
-    'Redis accepted the command but its receipt was lost',
-  )
+  const lostReceipt = new Error('Redis accepted the command but its receipt was lost')
   try {
     await redis.connect()
     expect(
@@ -273,9 +255,7 @@ test('a lost Redis acceptance receipt can duplicate delivery but preserves comma
     if (entries === null) throw new Error('Expected recorded Redis commands')
     expect(entries[0]?.id).not.toBe(entries[1]?.id)
     for (const entry of entries) {
-      const command = executionCommandSchema.parse(
-        JSON.parse(entry.message.command ?? 'null'),
-      )
+      const command = executionCommandSchema.parse(JSON.parse(entry.message.command ?? 'null'))
       expect(command).toEqual({
         version: 1,
         kind: 'start',

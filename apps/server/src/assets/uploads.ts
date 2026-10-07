@@ -35,13 +35,12 @@ export async function publishUpload(
     objectKey: `assets/uploads/${query.threadID}/${upload.assetID}`,
   }
   const reservation = await reserveAsset(db, query, asset)
-  const objectKey = await storeUpload(
-    io,
-    { ...asset, bytes: upload.bytes },
-    reservation,
-  )
+  const objectKey = await storeUpload(io, { ...asset, bytes: upload.bytes }, reservation)
   if (objectKey === null) return null
-  return await completeAsset(db, query, upload.assetID, objectKey)
+  return await completeAsset(db, query, {
+    assetID: upload.assetID,
+    confirmedObjectKey: objectKey,
+  })
 }
 
 /** Reconcile storage before publishing SQL visibility, without legacy writes. */
@@ -66,12 +65,7 @@ async function storeUpload(
   }
 
   try {
-    await io.objects.put(
-      asset.objectKey,
-      asset.bytes,
-      asset.mimeType,
-      io.signal,
-    )
+    await io.objects.put(asset.objectKey, asset.bytes, asset.mimeType, io.signal)
     return asset.objectKey
   } catch {
     // PUT may have committed despite a lost receipt (or an exact concurrent
@@ -85,11 +79,7 @@ async function confirmStored(
   asset: Readonly<{ objectKey: string; byteLength: number; sha256: string }>,
 ) {
   try {
-    const stored = await io.objects.read(
-      asset.objectKey,
-      io.maxAssetBytes,
-      io.signal,
-    )
+    const stored = await io.objects.read(asset.objectKey, io.maxAssetBytes, io.signal)
     return stored.length === asset.byteLength && sha256(stored) === asset.sha256
   } catch {
     return false

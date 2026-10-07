@@ -162,14 +162,11 @@ const eventCases = [
   { ...eventBase, kind: 'run-failed', reason: 'interrupted' },
 ] as const
 
-test.each([...eventCases])(
-  'accepts public event $kind unchanged and immutable',
-  (event) => {
-    const parsed = executionEventSchema.parse(event)
-    expect(parsed).toEqual(event)
-    expect(Reflect.set(parsed, 'runID', 'replacement')).toBe(false)
-  },
-)
+test.each([...eventCases])('accepts public event $kind unchanged and immutable', (event) => {
+  const parsed = executionEventSchema.parse(event)
+  expect(parsed).toEqual(event)
+  expect(Reflect.set(parsed, 'runID', 'replacement')).toBe(false)
+})
 
 test('rejects private details, malformed identities and unknown versions', () => {
   const invalid: unknown[] = [null, [], {}, { ...eventBase, kind: 'tool-call' }]
@@ -190,8 +187,7 @@ test('rejects private details, malformed identities and unknown versions', () =>
     { ...eventBase, kind: 'run-completed', messageID },
     { ...eventBase, kind: 'run-failed', reason: 'provider-secret' },
   )
-  for (const event of invalid)
-    expect(executionEventSchema.safeParse(event).success).toBe(false)
+  for (const event of invalid) expect(executionEventSchema.safeParse(event).success).toBe(false)
 })
 
 test('canonicalizes all public event UUIDs while preserving text', () => {
@@ -232,17 +228,12 @@ test('event deliveries carry positive integer run ordinals and canonical identit
   expect(parsed.ordinal).toBe(3)
   expect(parsed.event.eventID).toBe('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa')
   for (const ordinal of [0, -1, 1.5, NaN, Infinity]) {
-    expect(
-      executionDeliverySchema.safeParse({ ordinal, event: deliveryEvent })
-        .success,
-    ).toBe(false)
+    expect(executionDeliverySchema.safeParse({ ordinal, event: deliveryEvent }).success).toBe(false)
   }
 })
 
 test('missing order authority and private transport payloads are rejected', () => {
-  expect(
-    executionDeliverySchema.safeParse({ event: deliveryEvent }).success,
-  ).toBe(false)
+  expect(executionDeliverySchema.safeParse({ event: deliveryEvent }).success).toBe(false)
   expect(
     executionDeliverySchema.safeParse({
       ordinal: 1,
@@ -280,9 +271,10 @@ test('asset wire references reject caller source and completion retains absence 
       assets: [{ ...asset, source: 'upload' }],
     }).success,
   ).toBe(false)
-  expect(executionEventSchema.parse({ ...completed, assets: [asset] })).toEqual(
-    { ...completed, assets: [asset] },
-  )
+  expect(executionEventSchema.parse({ ...completed, assets: [asset] })).toEqual({
+    ...completed,
+    assets: [asset],
+  })
   expect(
     executionEventSchema.parse({
       ...eventBase,

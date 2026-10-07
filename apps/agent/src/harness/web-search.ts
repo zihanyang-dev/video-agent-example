@@ -18,47 +18,47 @@ export type WebSearchConfig = Readonly<{
 const endpoint = 'https://api.tavily.com/search'
 const unavailable = 'Web search unavailable.'
 const encoder = new TextEncoder()
+const searchLimits = {
+  requestsPerTurn: 3,
+  providerBodyBytes: 262144,
+  toolOutputBytes: 16384,
+  requestTimeoutMs: 10000,
+} as const
+const entities: Readonly<Record<string, string>> = {
+  '&lt;': '<',
+  '&gt;': '>',
+  '&quot;': '"',
+  '&apos;': "'",
+  '&amp;': '&',
+  '&nbsp;': ' ',
+}
 
 function plainText(value: string, limit: number) {
-  return Array.from(
-    value
-      .replace(/&(?:lt|gt|quot|apos|amp|nbsp);/gi, (entity) => {
-        const entities: Record<string, string> = {
-          '&lt;': '<',
-          '&gt;': '>',
-          '&quot;': '"',
-          '&apos;': "'",
-          '&amp;': '&',
-          '&nbsp;': ' ',
-        }
-        return entities[entity.toLowerCase()] ?? ''
-      })
-      .replace(/&#(x[0-9a-f]+|[0-9]+);/gi, (_entity, code: string) => {
-        const point = code.toLowerCase().startsWith('x')
-          ? Number.parseInt(code.slice(1), 16)
-          : Number(code)
-        return point > 0 && point <= 0x10ffff ? String.fromCodePoint(point) : ''
-      })
-      .replace(/<(script|style|think|thinking)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, '')
-      .replace(/<[^>]*>/g, '')
-      .replace(/[<>]/g, '')
-      .replace(
-        // Control and invisible formatting characters must not enter model evidence.
-        // oxlint-disable-next-line no-control-regex
-        /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2060-\u206f]/g,
-        ' ',
-      )
-      .replace(/\s+/g, ' ')
-      .trim(),
-  )
-    .slice(0, limit)
-    .join('')
+  const decoded = value
+    .replace(/&(?:lt|gt|quot|apos|amp|nbsp);/gi, (entity) => entities[entity.toLowerCase()] ?? '')
+    .replace(/&#(x[0-9a-f]+|[0-9]+);/gi, (_entity, code: string) => {
+      const point = code.toLowerCase().startsWith('x')
+        ? Number.parseInt(code.slice(1), 16)
+        : Number(code)
+      return point > 0 && point <= 0x10ffff ? String.fromCodePoint(point) : ''
+    })
+  const text = decoded
+    .replace(/<(script|style|think|thinking)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, '')
+    .replace(/<[^>]*>/g, '')
+    .replace(/[<>]/g, '')
+    .replace(
+      // Control and invisible formatting characters must not enter model evidence.
+      // oxlint-disable-next-line no-control-regex
+      /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2060-\u206f]/g,
+      ' ',
+    )
+    .replace(/\s+/g, ' ')
+    .trim()
+  return Array.from(text).slice(0, limit).join('')
 }
 
 const providerPayload = z.object({
-  results: z.array(
-    z.object({ title: z.string(), url: z.string(), content: z.string() }),
-  ),
+  results: z.array(z.object({ title: z.string(), url: z.string(), content: z.string() })),
 })
 const searchQuery = z
   .string()
@@ -99,7 +99,7 @@ function normalize(payload: unknown) {
     results,
     truncated,
   }
-  while (encoder.encode(JSON.stringify(output)).byteLength > 16384) {
+  while (encoder.encode(JSON.stringify(output)).byteLength > searchLimits.toolOutputBytes) {
     results.pop()
     output.truncated = true
   }
@@ -132,7 +132,7 @@ async function boundedBody(response: Response, signal: AbortSignal) {
         break
       }
       size += chunk.value.byteLength
-      if (size > 262144) throw new Error(unavailable)
+      if (size > searchLimits.providerBodyBytes) throw new Error(unavailable)
       chunks.push(chunk.value)
     }
     const bytes = new Uint8Array(size)
@@ -141,9 +141,9 @@ async function boundedBody(response: Response, signal: AbortSignal) {
       bytes.set(chunk, offset)
       offset += chunk.byteLength
     }
-    return JSON.parse(
-      new TextDecoder('utf-8', { fatal: true }).decode(bytes),
-    ) as unknown
+    const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+    const payload: unknown = JSON.parse(text)
+    return payload
   } finally {
     signal.removeEventListener('abort', cancel)
     if (!complete) cancel()
@@ -163,11 +163,13 @@ export function webSearchTool(
   if (config.authMode === 'key' && !config.apiKey?.trim())
     throw new Error('Web search key required.')
   const transport = config.transport ?? fetch
-  const headers = {
+  const headers: Record<string, string> = {
     'Content-Type': 'application/json',
-    ...(config.authMode === 'keyless'
-      ? { 'X-Tavily-Access-Mode': 'keyless' }
-      : { Authorization: `Bearer ${config.apiKey}` }),
+  }
+  if (config.authMode === 'keyless') {
+    headers['X-Tavily-Access-Mode'] = 'keyless'
+  } else {
+    headers.Authorization = `Bearer ${config.apiKey}`
   }
   let dispatched = 0
   let closed = false
@@ -192,16 +194,13 @@ export function webSearchTool(
       const query = searchQuery.safeParse(params.query)
       if (!query.success) return failure('Invalid search query.')
       if (closed) return failure(unavailable)
-      if (dispatched >= 3) return failure('Search limit reached for this turn.')
+      if (dispatched >= searchLimits.requestsPerTurn)
+        return failure('Search limit reached for this turn.')
       // Reserve before the first await; failed/ambiguous requests consume quota.
       dispatched++
       const deadline = new AbortController()
-      const timer = setTimeout(() => deadline.abort(), 10000)
-      const signal = AbortSignal.any([
-        ownerSignal,
-        callerSignal,
-        deadline.signal,
-      ])
+      const timer = setTimeout(() => deadline.abort(), searchLimits.requestTimeoutMs)
+      const signal = AbortSignal.any([ownerSignal, callerSignal, deadline.signal])
       let body: ReadableStream<Uint8Array> | null = null
       try {
         signal.throwIfAborted()
@@ -236,9 +235,7 @@ export function webSearchTool(
       } catch {
         ownerSignal.throwIfAborted()
         callerSignal.throwIfAborted()
-        return failure(
-          deadline.signal.aborted ? 'Web search timed out.' : unavailable,
-        )
+        return failure(deadline.signal.aborted ? 'Web search timed out.' : unavailable)
       } finally {
         // Await actual body/transport cleanup, never race-and-detach IO.
         await body?.cancel().catch(() => {})

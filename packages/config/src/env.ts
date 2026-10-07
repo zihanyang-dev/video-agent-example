@@ -39,6 +39,7 @@ const positiveInteger = z.coerce
   .positive({ error: 'Must be a positive integer' })
 const port = positiveInteger.max(65535, { error: 'Must be at most 65535' })
 const ioTimeout = positiveInteger.min(1000).max(60000).default(5000)
+const pollingInterval = positiveInteger.max(10000).default(200)
 // Fixed native RPC budget, shared with the resource adapter and TTL validation.
 export const sandboxRequestTimeoutMs = 10000
 
@@ -53,12 +54,8 @@ const objectStorage = {
   OBJECT_STORAGE_BUCKET: requiredString,
   OBJECT_STORAGE_ACCESS_KEY_ID: requiredString,
   OBJECT_STORAGE_SECRET_ACCESS_KEY: requiredString,
-  ASSET_MAX_BYTES: positiveInteger
-    .max(16777216)
-    .default(assetBudgetDefaults.ASSET_MAX_BYTES),
-  ASSET_MAX_FILES: positiveInteger
-    .max(32)
-    .default(assetBudgetDefaults.ASSET_MAX_FILES),
+  ASSET_MAX_BYTES: positiveInteger.max(16777216).default(assetBudgetDefaults.ASSET_MAX_BYTES),
+  ASSET_MAX_FILES: positiveInteger.max(32).default(assetBudgetDefaults.ASSET_MAX_FILES),
   FILE_IO_TIMEOUT_MS: positiveInteger
     .min(1000)
     .max(120000)
@@ -76,8 +73,7 @@ const serverEnvSchema = z.object({
         const url = new URL(origin)
         return (
           url.origin === origin &&
-          (url.protocol === 'https:' ||
-            ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname))
+          (url.protocol === 'https:' || ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname))
         )
       } catch {
         // Zod can continue refinements after a URL-format failure. Keep the
@@ -95,7 +91,7 @@ const serverEnvSchema = z.object({
   GITHUB_CLIENT_ID: requiredString,
   GITHUB_CLIENT_SECRET: requiredString,
   IO_TIMEOUT_MS: ioTimeout,
-  POLL_MS: positiveInteger.max(10000).default(200),
+  POLL_MS: pollingInterval,
 })
 
 const workerEnvSchema = z
@@ -126,7 +122,9 @@ const workerEnvSchema = z
     // Native JS timers use signed 32-bit millisecond delays.
     LEASE_MS: positiveInteger.max(2147483647).default(30000),
     // Match the server's polling ceiling: no overflow or hour-long claim stalls.
-    POLL_MS: positiveInteger.max(10000).default(200),
+    POLL_MS: pollingInterval,
+    // SQL retention, not a JS timer: explicitly admit the existing 30-day default.
+    EVENT_OUTBOX_RETENTION_MS: positiveInteger.max(2592000000).default(2592000000),
     // Each active run owns a VM and model stream; cap per-process fan-out.
     CONCURRENCY: positiveInteger.max(32).default(3),
     IO_TIMEOUT_MS: ioTimeout,
@@ -138,8 +136,7 @@ const workerEnvSchema = z
         : env.TAVILY_API_KEY === undefined,
     {
       path: ['TAVILY_API_KEY'],
-      message:
-        'Required only for WEB_SEARCH_AUTH_MODE=key; omit in keyless mode',
+      message: 'Required only for WEB_SEARCH_AUTH_MODE=key; omit in keyless mode',
     },
   )
   // Reserve three polling intervals for renewal; this is not a guarantee against pauses.
@@ -166,10 +163,7 @@ export type WorkerEnv = z.infer<typeof workerEnvSchema>
 export type WebSearchAuthMode = WorkerEnv['WEB_SEARCH_AUTH_MODE']
 type MigrationEnv = z.infer<typeof migrationEnvSchema>
 
-function readEnv<Schema extends z.ZodType>(
-  schema: Schema,
-  source: EnvSource,
-): z.output<Schema> {
+function readEnv<Schema extends z.ZodType>(schema: Schema, source: EnvSource): z.output<Schema> {
   // Omit blank entries without altering nonblank credentials.
   const nonblankEntries = Object.entries(source).filter(
     ([, entry]) => entry !== undefined && entry.trim() !== '',
@@ -181,9 +175,7 @@ function readEnv<Schema extends z.ZodType>(
   const diagnostics = parsed.error.issues.map(
     (issue) => `${issue.path.join('.')}: ${issue.message}`,
   )
-  throw new Error(
-    `Invalid environment configuration:\n${diagnostics.join('\n')}`,
-  )
+  throw new Error(`Invalid environment configuration:\n${diagnostics.join('\n')}`)
 }
 
 /** Parse product-process input once; return no model or tool-provider credentials. */
@@ -197,15 +189,11 @@ export function readWorkerEnv(source: EnvSource = process.env): WorkerEnv {
 }
 
 /** Administrative SQL needs a connection and deadlines, never application secrets. */
-export function readAdministrationEnv(
-  source: EnvSource = process.env,
-): AdministrationEnv {
+export function readAdministrationEnv(source: EnvSource = process.env): AdministrationEnv {
   return readEnv(administrationEnvSchema, source)
 }
 
 /** Parse only the migration connection; this does not create or select a database. */
-export function readMigrationEnv(
-  source: EnvSource = process.env,
-): MigrationEnv {
+export function readMigrationEnv(source: EnvSource = process.env): MigrationEnv {
   return readEnv(migrationEnvSchema, source)
 }

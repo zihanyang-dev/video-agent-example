@@ -2,8 +2,7 @@
 export type OwnedThread = Readonly<{ ownerID: string; threadID: string }>
 export type SubmitMessageInput = OwnedThread &
   Readonly<{ messageID: string; text: string; assetIDs?: readonly string[] }>
-export type MessageIntent = SubmitMessageInput &
-  Readonly<{ commandID: string; runID: string }>
+export type MessageIntent = SubmitMessageInput & Readonly<{ commandID: string; runID: string }>
 export type SubmitIntentOutcome =
   | {
       readonly kind: 'accepted'
@@ -14,12 +13,9 @@ export type SubmitIntentOutcome =
   // Missing and foreign threads share recovery without disclosing existence.
   | { readonly kind: 'unavailable' }
   | { readonly kind: 'conflict' }
-export type SubmitMessageOutcome =
-  SubmitIntentOutcome | { readonly kind: 'invalid-input' }
+export type SubmitMessageOutcome = SubmitIntentOutcome | { readonly kind: 'invalid-input' }
 
-export function normalizeMessageIntent(
-  intent: MessageIntent,
-): MessageIntent | null {
+export function normalizeMessageIntent(intent: MessageIntent): MessageIntent | null {
   const text = intent.text.trim()
   if (!text && (intent.assetIDs ?? []).length === 0) return null
   return {
@@ -55,8 +51,7 @@ export function decideMessageReplay(
     message.threadID !== intent.threadID ||
     message.role !== 'user' ||
     message.text !== intent.text ||
-    JSON.stringify(message.assetIDs ?? []) !==
-      JSON.stringify(intent.assetIDs ?? []) ||
+    JSON.stringify(message.assetIDs ?? []) !== JSON.stringify(intent.assetIDs ?? []) ||
     message.commandID === null ||
     message.runID === null
   )

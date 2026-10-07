@@ -1,7 +1,7 @@
 import { createConnection, createServer, type Socket } from 'node:net'
 
 /** Owned test-only transport: forward requests, optionally discard backend replies. */
-export async function postgresProxy(databaseURL: string) {
+export async function postgresProxy(databaseURL: string, port = 0) {
   const target = new URL(databaseURL)
   const backendAddress = {
     host: target.hostname,
@@ -38,12 +38,44 @@ export async function postgresProxy(databaseURL: string) {
       client.destroy()
     })
   })
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
-  const address = server.address()
-  if (!address || typeof address === 'string')
-    throw new Error('Missing proxy port')
-  target.hostname = '127.0.0.1'
-  target.port = String(address.port)
+  async function close() {
+    for (const socket of sockets) socket.destroy()
+    if (!server.listening) return
+    await new Promise<void>((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve())),
+    )
+  }
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const ready = () => {
+        server.off('error', failed)
+        resolve()
+      }
+      const failed = (cause: unknown) => {
+        server.off('listening', ready)
+        server.off('error', failed)
+        reject(cause)
+      }
+      server.once('listening', ready)
+      server.once('error', failed)
+      try {
+        server.listen(port, '127.0.0.1')
+      } catch (cause) {
+        failed(cause)
+      }
+    })
+    const address = server.address()
+    if (!address || typeof address === 'string') throw new Error('Missing proxy port')
+    target.hostname = '127.0.0.1'
+    target.port = String(address.port)
+  } catch (cause) {
+    await close().catch((cleanup: unknown) => {
+      throw new AggregateError([cause, cleanup], 'Proxy setup failed', {
+        cause,
+      })
+    })
+    throw cause
+  }
   return {
     databaseURL: target.toString(),
     blackhole: () => {
@@ -61,12 +93,7 @@ export async function postgresProxy(databaseURL: string) {
     get requests() {
       return requests
     },
-    async close() {
-      for (const socket of sockets) socket.destroy()
-      await new Promise<void>((resolve, reject) =>
-        server.close((error) => (error ? reject(error) : resolve())),
-      )
-    },
+    close,
   }
 }
 

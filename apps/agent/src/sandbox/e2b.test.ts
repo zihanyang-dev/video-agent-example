@@ -1,10 +1,64 @@
 import { expect, test } from 'bun:test'
 import { openE2BSandbox } from './e2b'
 import { E2B } from 'e2b'
-import { executeRun, type ExecutionWrites } from '../execute-run'
+import { executeRun } from '../execution/execute-run'
+import type { ExecutionWrites } from '../execution/contract'
 import { assignFileTools } from '../harness/files'
 import { sha256 } from '@vid/object-storage'
 import { createPiHarness } from '../harness/pi'
+
+test('assigned native identity cannot be mutated before durable persistence', async () => {
+  const requests: string[] = []
+  const server = Bun.serve({
+    hostname: '127.0.0.1',
+    port: 0,
+    fetch(request) {
+      const path = new URL(request.url).pathname
+      requests.push(path)
+      if (path === '/v2/sandboxes')
+        return Response.json({
+          sandboxID: 'owned-identity',
+          envdVersion: '0.6.2',
+          envdAccessToken: 'fixture',
+        })
+      if (path === '/sandboxes/owned-identity/pause') return new Response(null, { status: 204 })
+      return new Response('unexpected', { status: 500 })
+    },
+  })
+  const endpoint = `http://127.0.0.1:${server.port}`
+  let session: Awaited<ReturnType<typeof openE2BSandbox>> | undefined
+  try {
+    session = await openE2BSandbox(
+      {
+        apiURL: endpoint,
+        sandboxURL: endpoint,
+        apiKey: 'fixture',
+        template: 'fixture',
+        timeoutMs: 120000,
+        lease: {
+          threadID: crypto.randomUUID(),
+          runID: crypto.randomUUID(),
+          text: 'identity',
+          fence: 1,
+          ownerID: 'fixture',
+          history: [],
+        },
+      },
+      AbortSignal.timeout(5000),
+    )
+    const identity = session.nativeRef
+    expect(() => Object.assign(identity, { id: 'other-allocation' })).toThrow()
+    expect(identity).toEqual({ provider: 'e2b', id: 'owned-identity' })
+    expect(session.nativeRef).toBe(identity)
+  } finally {
+    try {
+      await session?.close()
+    } finally {
+      await server.stop(true)
+    }
+  }
+  expect(requests).toEqual(['/v2/sandboxes', '/sandboxes/owned-identity/pause'])
+})
 
 // Official SDK against owned loopback HTTP; no VM, Cloud, SDK doubles or credentials.
 for (const rejection of [
@@ -20,14 +74,9 @@ for (const rejection of [
     let modelRequests = 0
     let correctionContext = ''
     let quarantines = 0
-    const oversized =
-      rejection === 'quota-text'
-        ? 'x'.repeat(262145)
-        : new Uint8Array([1, 2, 3, 4])
+    const oversized = rejection === 'quota-text' ? 'x'.repeat(262145) : new Uint8Array([1, 2, 3, 4])
     const initialTool =
-      rejection === 'missing-text' ||
-      rejection === 'quota-text' ||
-      rejection === 'unknown-read'
+      rejection === 'missing-text' || rejection === 'quota-text' || rejection === 'unknown-read'
         ? 'read'
         : 'export_file'
     const server = Bun.serve({
@@ -80,9 +129,9 @@ for (const rejection of [
         quarantines++
       },
       appendText: async () => true,
-      complete: async () => true,
-      fail: async () => true,
-      cancel: async () => true,
+      complete: async () => 'completed',
+      fail: async () => 'failed',
+      cancel: async () => 'cancelled',
     }
     try {
       const result = await executeRun(
@@ -133,9 +182,7 @@ for (const rejection of [
         expect(correctionContext).toContain('Sandbox file byte limit exceeded')
         expect(correctionContext.length).toBeLessThan(16384)
       }
-      expect(
-        requests.filter((path) => path === 'POST /v1/chat/completions'),
-      ).toHaveLength(3)
+      expect(requests.filter((path) => path === 'POST /v1/chat/completions')).toHaveLength(3)
       expect(reads).toBe(2)
       expect(requests.at(-1)).toBe('POST /sandboxes/owned-read/pause')
     } finally {
@@ -254,17 +301,13 @@ test('official command callbacks cannot prevent current-event accumulation', asy
       onStdout: onOutput,
       onStderr: onOutput,
     })
-    const outcome: unknown = await handle
-      .wait()
-      .catch((error: unknown) => error)
+    const outcome: unknown = await handle.wait().catch((error: unknown) => error)
     expect(outcome).toBeInstanceOf(Error)
     expect(String(outcome)).toContain('owned output quota')
     expect(callbacks).toBe(2)
     // RED for <= 262144 received 262146. The offending event is already
     // retained; throwing only prevents the later event from accumulating.
-    expect(
-      Buffer.byteLength(handle.stdout) + Buffer.byteLength(handle.stderr),
-    ).toBe(262146)
+    expect(Buffer.byteLength(handle.stdout) + Buffer.byteLength(handle.stderr)).toBe(262146)
     expect(await handle.kill()).toBe(true)
     expect(killBody).toEqual({ process: { pid: 42 }, signal: 'SIGNAL_SIGKILL' })
   } finally {

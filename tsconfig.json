@@ -32,7 +32,8 @@
     "packages/**/*.ts",
     "tests/**/*.ts",
     "scripts/**/*.ts",
-    "deploy/**/*.ts"
+    "deploy/**/*.ts",
+    ".github/**/*.ts"
   ],
   "exclude": ["node_modules", "dist", "coverage", "**/generated/**"]
 }

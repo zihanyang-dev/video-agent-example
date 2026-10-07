@@ -4,6 +4,14 @@ set -eu
 mode=${1:-test}
 case "$mode" in test|check|generate|verify) ;; *) echo 'Usage: sh scripts/database-check.sh [test|check|generate|verify]' >&2; exit 2 ;; esac
 if [ "$#" -gt 0 ]; then shift; fi
+case "$mode" in
+  generate|verify)
+    if [ "$#" -ne 0 ]; then
+      echo 'generate and verify do not accept test arguments' >&2
+      exit 2
+    fi
+    ;;
+esac
 root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 . "$root/scripts/check-lifecycle.sh"
 staging=$(mktemp -d)

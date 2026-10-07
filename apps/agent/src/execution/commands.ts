@@ -14,21 +14,15 @@ type CommandConsumer = {
   consumerID: string
 }
 
-type PendingCommands = Awaited<
-  ReturnType<RedisClientType['xAutoClaim']>
->['messages']
+type PendingCommands = Awaited<ReturnType<RedisClientType['xAutoClaim']>>['messages']
 
 export async function initializeCommands(commands: RedisClientType) {
   try {
-    await commands.xGroupCreate(
-      executionStreams.commands,
-      executionStreams.commandGroup,
-      '0-0',
-      { MKSTREAM: true },
-    )
+    await commands.xGroupCreate(executionStreams.commands, executionStreams.commandGroup, '0-0', {
+      MKSTREAM: true,
+    })
   } catch (cause) {
-    if (!(cause instanceof Error) || !cause.message.startsWith('BUSYGROUP '))
-      throw cause
+    if (!(cause instanceof Error) || !cause.message.startsWith('BUSYGROUP ')) throw cause
   }
 }
 
@@ -51,11 +45,7 @@ export async function acceptCommandMessages(
     if (outcome === 'conflict')
       throw new Error('Execution command conflicts with accepted identity')
 
-    await commands.xAck(
-      executionStreams.commands,
-      executionStreams.commandGroup,
-      id,
-    )
+    await commands.xAck(executionStreams.commands, executionStreams.commandGroup, id)
     acceptedCount += 1
   }
   return acceptedCount
@@ -81,8 +71,7 @@ export async function acceptCommands(
     // Advance even across empty pages; deleted PEL entries are data loss.
     cursor = page.nextId
     if (signal.aborted) return
-    if (page.deletedMessages.length)
-      throw new Error('Deleted pending command payloads')
+    if (page.deletedMessages.length) throw new Error('Deleted pending command payloads')
     await acceptCommandMessages(db, commands, page.messages, {
       signal,
     })

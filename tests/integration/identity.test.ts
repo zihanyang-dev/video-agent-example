@@ -37,8 +37,7 @@ const users: string[] = []
 
 afterAll(async () => {
   try {
-    if (users.length)
-      await db.deleteFrom('auth.user').where('id', 'in', users).execute()
+    if (users.length) await db.deleteFrom('auth.user').where('id', 'in', users).execute()
   } finally {
     await close()
   }
@@ -109,12 +108,7 @@ test('a foreign-origin logout does not revoke the authenticated session', async 
 
 test('logout revokes the server session before acknowledging and expiring the cookie', async () => {
   const login = await signedIdentity()
-  const response = await signOut(
-    auth,
-    db,
-    logoutRequest(login.headers),
-    bodyCollection,
-  )
+  const response = await signOut(auth, db, logoutRequest(login.headers), bodyCollection)
   expect(response.status).toBe(200)
   expect(response.headers.get('set-cookie')).toContain('Max-Age=0')
   expect(await readIdentity(auth, login.headers)).toBeNull()
@@ -131,9 +125,7 @@ test('failed session deletion is not a successful logout or an expired retry coo
     entered = resolve
   })
   const blocker = db.transaction().execute(async (tx) => {
-    await sql`select id from auth.session where id = ${login.session.id} for update`.execute(
-      tx,
-    )
+    await sql`select id from auth.session where id = ${login.session.id} for update`.execute(tx)
     entered()
     await unlocked
   })
@@ -225,19 +217,12 @@ test('logout rejects oversized JSON without revoking the durable retry session',
 test('native server releases its request budget after trickling product and logout JSON deadlines without revoking sessions', async () => {
   const login = await signedTestIdentity(db)
   users.push(login.user.id)
-  const server = await startServer(
-    { ...serverTestEnv(), FILE_IO_TIMEOUT_MS: 400 },
-    { port: 0 },
-  )
+  const server = await startServer({ ...serverTestEnv(), FILE_IO_TIMEOUT_MS: 400 }, { port: 0 })
   const clients: ReturnType<typeof tricklingJSON>[] = []
   try {
     for (let index = 0; index < 16; index++)
       clients.push(
-        tricklingJSON(
-          server.url,
-          login.headers,
-          index < 8 ? '/api/logout' : '/api/threads',
-        ),
+        tricklingJSON(server.url, login.headers, index < 8 ? '/api/logout' : '/api/threads'),
       )
     await Promise.all(clients.map((client) => client.connected))
     const saturated = await fetch(`${server.url}/api/session`)
@@ -247,20 +232,16 @@ test('native server releases its request budget after trickling product and logo
       Bun.sleep(1500).then(() => [] as number[]),
     ])
     expect(statuses).toContain(408)
-    expect(statuses.every((status) => status === 408 || status === 429)).toBe(
-      true,
-    )
+    expect(statuses.every((status) => status === 408 || status === 429)).toBe(true)
     expect(clients.some((client) => client.chunks() > 1)).toBe(true)
     const released = await fetch(`${server.url}/api/session`, {
       headers: login.headers,
     })
     expect(released.status).toBe(200)
-    expect(
-      ((await released.json()) as { user: { userID: string } }).user.userID,
-    ).toBe(login.user.id)
-    expect((await readIdentity(login.authentication, login.headers))?.id).toBe(
+    expect(((await released.json()) as { user: { userID: string } }).user.userID).toBe(
       login.user.id,
     )
+    expect((await readIdentity(login.authentication, login.headers))?.id).toBe(login.user.id)
   } finally {
     for (const client of clients) client.close()
     await server.stop()
@@ -270,25 +251,17 @@ test('native server releases its request budget after trickling product and logo
 test('native server shutdown settles an unfinished JSON body before closing resources', async () => {
   const login = await signedTestIdentity(db)
   users.push(login.user.id)
-  const server = await startServer(
-    { ...serverTestEnv(), FILE_IO_TIMEOUT_MS: 5000 },
-    { port: 0 },
-  )
+  const server = await startServer({ ...serverTestEnv(), FILE_IO_TIMEOUT_MS: 5000 }, { port: 0 })
   const client = tricklingJSON(server.url, login.headers, '/api/logout')
   try {
     await client.connected
     await Bun.sleep(30)
     const stopped = server.stop()
-    expect(
-      await Promise.race([
-        stopped.then(() => true),
-        Bun.sleep(1000).then(() => false),
-      ]),
-    ).toBe(true)
-    await stopped
-    expect((await readIdentity(login.authentication, login.headers))?.id).toBe(
-      login.user.id,
+    expect(await Promise.race([stopped.then(() => true), Bun.sleep(1000).then(() => false)])).toBe(
+      true,
     )
+    await stopped
+    expect((await readIdentity(login.authentication, login.headers))?.id).toBe(login.user.id)
   } finally {
     client.close()
     await server.stop()
@@ -307,20 +280,17 @@ function tricklingJSON(url: string, headers: Headers, path: string) {
   const status = new Promise<number>((resolve) => {
     finish = resolve
   })
-  const socket = connect(
-    { host: address.hostname, port: Number(address.port) },
-    () => {
-      socket.write(
-        `POST ${path} HTTP/1.1\r\nHost: ${address.host}\r\nOrigin: ${authenticationSettings.baseURL}\r\nCookie: ${headers.get('cookie')}\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n`,
-      )
+  const socket = connect({ host: address.hostname, port: Number(address.port) }, () => {
+    socket.write(
+      `POST ${path} HTTP/1.1\r\nHost: ${address.host}\r\nOrigin: ${authenticationSettings.baseURL}\r\nCookie: ${headers.get('cookie')}\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n`,
+    )
+    socket.write('1\r\n \r\n')
+    timer = setInterval(() => {
+      count++
       socket.write('1\r\n \r\n')
-      timer = setInterval(() => {
-        count++
-        socket.write('1\r\n \r\n')
-      }, 10)
-      connected()
-    },
-  )
+    }, 10)
+    connected()
+  })
   let response = ''
   socket.on('data', (bytes) => {
     response += bytes.toString()

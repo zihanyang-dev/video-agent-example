@@ -17,9 +17,7 @@ const webSourceURLSchema = z
   .refine((value) => {
     try {
       const url = new URL(value)
-      return (
-        url.protocol === 'https:' && !url.username && !url.password && !url.hash
-      )
+      return url.protocol === 'https:' && !url.username && !url.password && !url.hash
     } catch {
       return false
     }
@@ -39,10 +37,7 @@ export const webSourceSchema = z
   })
   .readonly()
 
-export const webSourcesSchema = z
-  .array(webSourceSchema)
-  .max(WEB_SOURCES_PER_TURN)
-  .readonly()
+export const webSourcesSchema = z.array(webSourceSchema).max(WEB_SOURCES_PER_TURN).readonly()
 export type WebSource = z.infer<typeof webSourceSchema>
 
 /** Normalize only admitted facts; native URL serialization can expand Unicode

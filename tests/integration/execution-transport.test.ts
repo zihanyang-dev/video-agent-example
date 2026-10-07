@@ -7,18 +7,15 @@ import {
 } from '@vid/contract/execution'
 import { createClient, type RedisClientType } from 'redis'
 import { sql } from 'kysely'
-import { acceptExecutionCommand } from '../../apps/agent/src/db/command-acceptance'
-import { publishEvent } from '../../apps/agent/src/db/event-publication'
+import { acceptExecutionCommand } from '../../apps/agent/src/execution/db/command-acceptance'
+import { publishEvent } from '../../apps/agent/src/execution/db/event-publication'
 import {
   acceptCommandMessages,
   acceptCommands,
   initializeCommands,
-} from '../../apps/agent/src/commands'
+} from '../../apps/agent/src/execution/commands'
 import { consumeEventBatch } from '../../apps/server/src/conversation/execution-events'
-import {
-  acceptExecutionEvent,
-  readPublicEvents,
-} from '../../apps/server/src/db/execution-events'
+import { acceptExecutionEvent, readPublicEvents } from '../../apps/server/src/db/execution-events'
 import { acceptMessageIntent } from '../../apps/server/src/db/submissions'
 import { seedTestUser, openTestDatabase } from './database-fixture'
 
@@ -35,10 +32,7 @@ const transportURL = new URL(redisURL)
 if (!/^\/[1-9][0-9]*$/.test(transportURL.pathname))
   throw new Error('Reserved nonzero transport Redis database required')
 const runtimeURL = process.env.REDIS_URL
-if (
-  !runtimeURL ||
-  (new URL(runtimeURL).pathname || '/0') === transportURL.pathname
-)
+if (!runtimeURL || (new URL(runtimeURL).pathname || '/0') === transportURL.pathname)
   throw new Error('Transport Redis database must be separate from runtime')
 const ownerID = crypto.randomUUID()
 let commands: RedisClientType
@@ -94,46 +88,16 @@ afterAll(async () => {
       .set({ active_run_id: null, lease_owner: null, lease_until: null })
       .where('thread_id', 'in', threads)
       .execute()
-    await db
-      .deleteFrom('execution.event_outbox')
-      .where('thread_id', 'in', threads)
-      .execute()
-    await db
-      .deleteFrom('execution.runs')
-      .where('thread_id', 'in', threads)
-      .execute()
-    await db
-      .deleteFrom('execution.command_inbox')
-      .where('thread_id', 'in', threads)
-      .execute()
-    await db
-      .deleteFrom('execution.conversations')
-      .where('thread_id', 'in', threads)
-      .execute()
-    await db
-      .deleteFrom('product.execution_events')
-      .where('thread_id', 'in', threads)
-      .execute()
-    await db
-      .deleteFrom('product.command_outbox')
-      .where('thread_id', 'in', threads)
-      .execute()
-    await db
-      .deleteFrom('product.message_assets')
-      .where('thread_id', 'in', threads)
-      .execute()
-    await db
-      .deleteFrom('product.assets')
-      .where('thread_id', 'in', threads)
-      .execute()
-    await db
-      .deleteFrom('product.messages')
-      .where('thread_id', 'in', threads)
-      .execute()
-    await db
-      .deleteFrom('product.threads')
-      .where('thread_id', 'in', threads)
-      .execute()
+    await db.deleteFrom('execution.event_outbox').where('thread_id', 'in', threads).execute()
+    await db.deleteFrom('execution.runs').where('thread_id', 'in', threads).execute()
+    await db.deleteFrom('execution.command_inbox').where('thread_id', 'in', threads).execute()
+    await db.deleteFrom('execution.conversations').where('thread_id', 'in', threads).execute()
+    await db.deleteFrom('product.execution_events').where('thread_id', 'in', threads).execute()
+    await db.deleteFrom('product.command_outbox').where('thread_id', 'in', threads).execute()
+    await db.deleteFrom('product.message_assets').where('thread_id', 'in', threads).execute()
+    await db.deleteFrom('product.assets').where('thread_id', 'in', threads).execute()
+    await db.deleteFrom('product.messages').where('thread_id', 'in', threads).execute()
+    await db.deleteFrom('product.threads').where('thread_id', 'in', threads).execute()
     await db.deleteFrom('auth.user').where('id', '=', ownerID).execute()
   } finally {
     await close()
@@ -146,8 +110,7 @@ async function useEvents() {
   try {
     await commands.xGroupCreate(stream, group, '0-0', { MKSTREAM: true })
   } catch (cause) {
-    if (!(cause instanceof Error) || !cause.message.startsWith('BUSYGROUP '))
-      throw cause
+    if (!(cause instanceof Error) || !cause.message.startsWith('BUSYGROUP ')) throw cause
   }
 }
 
@@ -168,20 +131,12 @@ async function read() {
 }
 
 async function reclaim() {
-  return await commands.xAutoClaim(
-    stream,
-    group,
-    crypto.randomUUID(),
-    0,
-    '0-0',
-    { COUNT: 10 },
-  )
+  return await commands.xAutoClaim(stream, group, crypto.randomUUID(), 0, '0-0', { COUNT: 10 })
 }
 
 async function rejected(promise: Promise<unknown>) {
   const failure = await promise.catch((cause: unknown) => cause)
-  if (!(failure instanceof Error))
-    throw new Error('Expected an operation failure')
+  if (!(failure instanceof Error)) throw new Error('Expected an operation failure')
   return failure
 }
 
@@ -228,10 +183,9 @@ test('command acceptance committed before a lost ACK is replayed after restart',
   const command = await fixture()
   await publish({ command: JSON.stringify(command) })
   const messages = await read()
-  expect(
-    (await rejected(acceptCommandMessages(db, createClient(), messages)))
-      .message,
-  ).toContain('closed')
+  expect((await rejected(acceptCommandMessages(db, createClient(), messages))).message).toContain(
+    'closed',
+  )
   expect(await acceptExecutionCommand(db, command)).toBe('replay')
   expect((await commands.xPending(stream, group)).pending).toBe(1)
 
@@ -317,8 +271,7 @@ test('retained legacy artifacts replay their migrated SQL receipt before ACK', a
     },
   }
   expect(await acceptExecutionEvent(db, completed)).toBe('accepted')
-  if (completed.event.kind !== 'run-completed')
-    throw new Error('Expected completion')
+  if (completed.event.kind !== 'run-completed') throw new Error('Expected completion')
   const { assets, ...event } = completed.event
   await publish({
     delivery: JSON.stringify({
@@ -338,9 +291,7 @@ test('retained legacy artifacts replay their migrated SQL receipt before ACK', a
   })
   expect(await read()).toHaveLength(1)
   expect((await commands.xPending(stream, group)).pending).toBe(1)
-  expect(await consumeEventBatch(db, { commands, ...(await reclaim()) })).toBe(
-    1,
-  )
+  expect(await consumeEventBatch(db, { commands, ...(await reclaim()) })).toBe(1)
   expect((await commands.xPending(stream, group)).pending).toBe(0)
   expect(await acceptExecutionEvent(db, completed)).toBe('accepted')
   expect(
@@ -381,19 +332,14 @@ test('invalid and conflicting commands remain pending; intake fails on deleted b
   }
 
   const failure = await rejected(
-    acceptCommands(
-      db,
-      { commands, blockingReader: reader, consumerID },
-      AbortSignal.timeout(2000),
-    ),
+    acceptCommands(db, { commands, blockingReader: reader, consumerID }, AbortSignal.timeout(2000)),
   )
   expect(failure.message).toContain('Deleted pending command')
 })
 
 test('intake advances an empty reclaim page to reach older pending commands', async () => {
   const command = await fixture()
-  for (let index = 0; index < 340; index++)
-    await publish({ command: 'Too young to reclaim' })
+  for (let index = 0; index < 340; index++) await publish({ command: 'Too young to reclaim' })
   const older = await publish({ command: JSON.stringify(command) })
   const claimed = await reader.xReadGroup(
     group,
@@ -412,11 +358,7 @@ test('intake advances an empty reclaim page to reach older pending commands', as
   expect(empty.messages).toEqual([])
   expect(empty.nextId).not.toBe('0-0')
   const stop = new AbortController()
-  const intake = acceptCommands(
-    db,
-    { commands, blockingReader: reader, consumerID },
-    stop.signal,
-  )
+  const intake = acceptCommands(db, { commands, blockingReader: reader, consumerID }, stop.signal)
   let accepted = false
   try {
     const deadline = performance.now() + 700
@@ -478,12 +420,8 @@ test('lost XADD acknowledgement republishes the same event identity and ordinal'
         .executeTakeFirstOrThrow()
     ).published_at,
   ).toBeNull()
-  expect(await publishEvent(db, { eventID: row.event_id, publish: send })).toBe(
-    'published',
-  )
-  expect(await publishEvent(db, { eventID: row.event_id, publish: send })).toBe(
-    'skipped',
-  )
+  expect(await publishEvent(db, { eventID: row.event_id, publish: send })).toBe('published')
+  expect(await publishEvent(db, { eventID: row.event_id, publish: send })).toBe('skipped')
 
   const messages = await read()
   expect(messages).toHaveLength(2)
@@ -561,11 +499,7 @@ test('event acceptance before ACK replays, buffers ordinals and supports cursor 
   await publish({ delivery: JSON.stringify(second) })
   const messages = await read()
   expect(
-    (
-      await rejected(
-        consumeEventBatch(db, { commands: createClient(), messages }),
-      )
-    ).message,
+    (await rejected(consumeEventBatch(db, { commands: createClient(), messages }))).message,
   ).toContain('closed')
   expect(await acceptExecutionEvent(db, second)).toBe('accepted')
   expect(
@@ -574,14 +508,10 @@ test('event acceptance before ACK replays, buffers ordinals and supports cursor 
       threadID: command.threadID,
     }),
   ).toEqual([])
-  expect(await consumeEventBatch(db, { commands, ...(await reclaim()) })).toBe(
-    1,
-  )
+  expect(await consumeEventBatch(db, { commands, ...(await reclaim()) })).toBe(1)
 
   await publish({ delivery: JSON.stringify(first) })
-  expect(
-    await consumeEventBatch(db, { commands, messages: await read() }),
-  ).toBe(1)
+  expect(await consumeEventBatch(db, { commands, messages: await read() })).toBe(1)
   const visible = await readPublicEvents(db, {
     ownerID: ownerID,
     threadID: command.threadID,
@@ -627,9 +557,9 @@ test('shutdown finishes the accepted receipt ACK but leaves the rest of a claime
     const batch = { commands, messages: await read(), signal: shutdown.signal }
     expect(await consumeEventBatch(db, batch)).toBe(1)
     expect(
-      (
-        await commands.xPendingRange(stream, group, pendingID, pendingID, 1)
-      ).map((entry) => entry.id),
+      (await commands.xPendingRange(stream, group, pendingID, pendingID, 1)).map(
+        (entry) => entry.id,
+      ),
     ).toEqual([pendingID])
     expect(
       (
@@ -642,9 +572,7 @@ test('shutdown finishes the accepted receipt ACK but leaves the rest of a claime
   } finally {
     ack.mockRestore()
   }
-  expect(await consumeEventBatch(db, { commands, ...(await reclaim()) })).toBe(
-    1,
-  )
+  expect(await consumeEventBatch(db, { commands, ...(await reclaim()) })).toBe(1)
   expect(
     (
       await readPublicEvents(db, {
@@ -780,9 +708,7 @@ test('poison delivery diagnostics mask private bytes and leave owned entries pen
     JSON.stringify({ ordinal: 1, event: { kind: privateBytes } }),
   ]) {
     const id = await publish({ delivery: body })
-    const failure = await rejected(
-      consumeEventBatch(db, { commands, messages: await read() }),
-    )
+    const failure = await rejected(consumeEventBatch(db, { commands, messages: await read() }))
     expect(failure.message).toBe('Invalid pending delivery payload')
     expect(failure.message).not.toContain(privateBytes)
     const pending = await commands.xPendingRange(stream, group, id, id, 1)
@@ -794,24 +720,19 @@ test('deleted or missing delivery payloads are explicit errors without ACK', asy
   await useEvents()
   const id = await publish({ other: 'not a delivery' })
   expect(
-    (
-      await rejected(
-        consumeEventBatch(db, { commands, messages: await read() }),
-      )
-    ).message,
+    (await rejected(consumeEventBatch(db, { commands, messages: await read() }))).message,
   ).toContain('Missing pending delivery')
   expect((await commands.xPending(stream, group)).pending).toBe(1)
   await commands.xDel(stream, id)
   const recovery = await reclaim()
   expect(recovery.deletedMessages).toEqual([id])
-  expect(
-    (await rejected(consumeEventBatch(db, { commands, ...recovery }))).message,
-  ).toContain('Deleted pending delivery')
-  expect(
-    (await rejected(consumeEventBatch(db, { commands, messages: [null] })))
-      .message,
-  ).toContain('Deleted pending delivery')
-  expect(
-    (await rejected(acceptCommandMessages(db, commands, [null]))).message,
-  ).toContain('Deleted pending command')
+  expect((await rejected(consumeEventBatch(db, { commands, ...recovery }))).message).toContain(
+    'Deleted pending delivery',
+  )
+  expect((await rejected(consumeEventBatch(db, { commands, messages: [null] }))).message).toContain(
+    'Deleted pending delivery',
+  )
+  expect((await rejected(acceptCommandMessages(db, commands, [null]))).message).toContain(
+    'Deleted pending command',
+  )
 })

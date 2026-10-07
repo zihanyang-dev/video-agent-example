@@ -42,19 +42,11 @@ test('filesystem-only native state survives a normal whole host restart without 
       timeoutMs: 120000,
     })
     expect(remote.sandboxId).toBe(stored.id)
-    expect(await remote.files.read('/proc/sys/kernel/random/boot_id')).not.toBe(
-      stored.bootID,
-    )
-    expect(await remote.files.read('/home/user/restart-chosen/note')).toBe(
-      'persistent',
-    )
+    expect(await remote.files.read('/proc/sys/kernel/random/boot_id')).not.toBe(stored.bootID)
+    expect(await remote.files.read('/home/user/restart-chosen/note')).toBe('persistent')
     await Bun.sleep(62000)
     expect(
-      (
-        await remote.commands.run(
-          'test ! -e /home/user/restart-chosen/continued',
-        )
-      ).exitCode,
+      (await remote.commands.run('test ! -e /home/user/restart-chosen/continued')).exitCode,
     ).toBe(0)
   } finally {
     await cleanup(stored.ownership)
@@ -94,15 +86,10 @@ async function seed() {
       'printf started > /home/user/restart-chosen/started; sleep 60; printf unsafe > /home/user/restart-chosen/continued',
       { background: true },
     )
-    expect((await remote.commands.run(`kill -0 ${command.pid}`)).exitCode).toBe(
-      0,
-    )
+    expect((await remote.commands.run(`kill -0 ${command.pid}`)).exitCode).toBe(0)
     await waitForStart(remote)
     expect(await remote.pause({ keepMemory: false })).toBe(true)
-    await Bun.write(
-      statePath,
-      JSON.stringify({ id: remote.sandboxId, ownership, bootID }),
-    )
+    await Bun.write(statePath, JSON.stringify({ id: remote.sandboxId, ownership, bootID }))
     saved = true
   } finally {
     if (!saved) await cleanup(ownership)
@@ -112,16 +99,14 @@ async function seed() {
 async function cleanup(ownership: string) {
   const paginator = client.Sandbox.list({ query: { metadata: { ownership } } })
   while (paginator.hasNext) {
-    for (const sandbox of await paginator.nextItems())
-      await client.Sandbox.kill(sandbox.sandboxId)
+    for (const sandbox of await paginator.nextItems()) await client.Sandbox.kill(sandbox.sandboxId)
   }
 }
 
 async function waitForStart(remote: Sandbox) {
   const deadline = Date.now() + 10000
   while (!(await remote.files.exists('/home/user/restart-chosen/started'))) {
-    if (Date.now() > deadline)
-      throw new Error('Background command did not start')
+    if (Date.now() > deadline) throw new Error('Background command did not start')
     await Bun.sleep(20)
   }
 }

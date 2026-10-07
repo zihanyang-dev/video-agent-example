@@ -8,6 +8,9 @@ import { executionJSONSchemas } from '@vid/contract/execution'
 import { createRouter } from '../apps/server/src/http'
 import { authenticationOptions } from '../apps/server/src/identity/authentication'
 
+type OpenAPIComponents = NonNullable<GenerateSpecOptions['documentation']['components']>
+type OpenAPISchemas = NonNullable<OpenAPIComponents['schemas']>
+
 async function generateDocuments(output: string) {
   // Redis carries private JSON envelopes, not HTTP operations or AG-UI frames.
   for (const [name, schema] of Object.entries(executionJSONSchemas()))
@@ -30,11 +33,7 @@ async function generateDocuments(output: string) {
         // Hono OpenAPI's component declaration still narrows JSON Schema to
         // OpenAPI 3.0. The emitted document is 3.1 and uses native 2020-12 schemas;
         // independent AJV tests validate the conversion rather than weakening it.
-        schemas: schemas as NonNullable<
-          NonNullable<
-            GenerateSpecOptions['documentation']['components']
-          >['schemas']
-        >,
+        schemas: schemas as OpenAPISchemas,
         securitySchemes: {
           sessionCookie: {
             type: 'apiKey',
@@ -47,10 +46,7 @@ async function generateDocuments(output: string) {
       },
     },
   })
-  await Bun.write(
-    `${output}/openapi.json`,
-    `${JSON.stringify(spec, null, 2)}\n`,
-  )
+  await Bun.write(`${output}/openapi.json`, `${JSON.stringify(spec, null, 2)}\n`)
   // The auth SDK spec remains separate: it owns its routes and DTOs. Omitting the
   // DB in the exact same options selects its offline adapter; schema generation
   // invokes no identity query, provider request or app connection constructor.
@@ -63,20 +59,13 @@ async function generateDocuments(output: string) {
     }),
   )
   const authSpec = await auth.api.generateOpenAPISchema()
-  await Bun.write(
-    `${output}/authentication.openapi.json`,
-    `${JSON.stringify(authSpec, null, 2)}\n`,
-  )
+  await Bun.write(`${output}/authentication.openapi.json`, `${JSON.stringify(authSpec, null, 2)}\n`)
 }
 
 const { values } = parseArgs({ options: { outdir: { type: 'string' } } })
-const output = resolve(
-  values.outdir ?? resolve(import.meta.dir, '../packages/contract/generated'),
-)
+const output = resolve(values.outdir ?? resolve(import.meta.dir, '../packages/contract/generated'))
 await mkdir(dirname(output), { recursive: true })
-const staging = await mkdtemp(
-  join(dirname(output), `.${basename(output)}-stage-`),
-)
+const staging = await mkdtemp(join(dirname(output), `.${basename(output)}-stage-`))
 try {
   await generateDocuments(staging)
   await rm(output, { recursive: true, force: true })

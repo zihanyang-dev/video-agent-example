@@ -23,26 +23,11 @@ const threadIDs: string[] = []
 afterAll(async () => {
   try {
     if (threadIDs.length === 0) return
-    await db
-      .deleteFrom('product.command_outbox')
-      .where('thread_id', 'in', threadIDs)
-      .execute()
-    await db
-      .deleteFrom('product.message_assets')
-      .where('thread_id', 'in', threadIDs)
-      .execute()
-    await db
-      .deleteFrom('product.assets')
-      .where('thread_id', 'in', threadIDs)
-      .execute()
-    await db
-      .deleteFrom('product.messages')
-      .where('thread_id', 'in', threadIDs)
-      .execute()
-    await db
-      .deleteFrom('product.threads')
-      .where('thread_id', 'in', threadIDs)
-      .execute()
+    await db.deleteFrom('product.command_outbox').where('thread_id', 'in', threadIDs).execute()
+    await db.deleteFrom('product.message_assets').where('thread_id', 'in', threadIDs).execute()
+    await db.deleteFrom('product.assets').where('thread_id', 'in', threadIDs).execute()
+    await db.deleteFrom('product.messages').where('thread_id', 'in', threadIDs).execute()
+    await db.deleteFrom('product.threads').where('thread_id', 'in', threadIDs).execute()
   } finally {
     await close()
   }
@@ -106,12 +91,12 @@ test('acceptance commits a normalized user message and a matching pending execut
 
 test('foreign and missing threads are unavailable without storing an input or command', async () => {
   const input = await inputForThread()
-  expect(await submitMessage(db, { ...input, ownerID: 'other-owner' })).toEqual(
-    { kind: 'unavailable' },
-  )
-  expect(
-    await submitMessage(db, { ...input, threadID: crypto.randomUUID() }),
-  ).toEqual({ kind: 'unavailable' })
+  expect(await submitMessage(db, { ...input, ownerID: 'other-owner' })).toEqual({
+    kind: 'unavailable',
+  })
+  expect(await submitMessage(db, { ...input, threadID: crypto.randomUUID() })).toEqual({
+    kind: 'unavailable',
+  })
   expect(await savedAcceptance(input.threadID)).toEqual({
     messages: [],
     commands: [],
@@ -138,9 +123,7 @@ test('identical retries preserve execution IDs before and after publication', as
 
 test('concurrent identical inputs commit exactly one message and pending command', async () => {
   const input = await inputForThread()
-  const accepted = await Promise.all(
-    Array.from({ length: 8 }, () => submitMessage(db, input)),
-  )
+  const accepted = await Promise.all(Array.from({ length: 8 }, () => submitMessage(db, input)))
   const first = accepted[0]
   if (first === undefined) throw new Error('No submission outcome')
   expect(first.kind).toBe('accepted')
@@ -166,9 +149,9 @@ test('reusing a message ID for a different owned thread cannot borrow its execut
   const first = await inputForThread()
   const second = await inputForThread()
   expect((await submitMessage(db, first)).kind).toBe('accepted')
-  expect(
-    await submitMessage(db, { ...second, messageID: first.messageID }),
-  ).toEqual({ kind: 'conflict' })
+  expect(await submitMessage(db, { ...second, messageID: first.messageID })).toEqual({
+    kind: 'conflict',
+  })
   expect(await savedAcceptance(second.threadID)).toEqual({
     messages: [],
     commands: [],
@@ -318,24 +301,26 @@ for (const [name, patch] of Object.entries({
   })
 }
 
-for (const header of [
-  'command_id',
-  'run_id',
-  'thread_id',
-  'message_id',
-] as const) {
+for (const header of ['command_id', 'run_id', 'thread_id', 'message_id'] as const) {
   test(`exact replay rejects inconsistent indexed ${header}`, async () => {
     const input = await inputForThread()
     const accepted = await submitMessage(db, input)
     if (accepted.kind !== 'accepted') throw new Error('Expected acceptance')
     const other = await inputForThread()
     await submitMessage(db, other)
-    const value =
-      header === 'thread_id'
-        ? other.threadID
-        : header === 'message_id'
-          ? other.messageID
-          : crypto.randomUUID()
+    let value: string
+    switch (header) {
+      case 'thread_id':
+        value = other.threadID
+        break
+      case 'message_id':
+        value = other.messageID
+        break
+      case 'command_id':
+      case 'run_id':
+        value = crypto.randomUUID()
+        break
+    }
     // message_id is globally unique; remove the other command first.
     if (header === 'message_id')
       await db
@@ -428,10 +413,8 @@ async function inputWithAssets() {
 }
 
 const assetMutations = {
-  order: (assets: Awaited<ReturnType<typeof inputWithAssets>>['assets']) =>
-    assets.reverse(),
-  missing: (assets: Awaited<ReturnType<typeof inputWithAssets>>['assets']) =>
-    assets.pop(),
+  order: (assets: Awaited<ReturnType<typeof inputWithAssets>>['assets']) => assets.reverse(),
+  missing: (assets: Awaited<ReturnType<typeof inputWithAssets>>['assets']) => assets.pop(),
   extra: (assets: Awaited<ReturnType<typeof inputWithAssets>>['assets']) =>
     assets.push({ ...assets[0]!, assetID: crypto.randomUUID() }),
   ID: (assets: Awaited<ReturnType<typeof inputWithAssets>>['assets']) => {

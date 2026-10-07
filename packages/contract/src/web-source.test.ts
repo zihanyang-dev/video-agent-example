@@ -1,11 +1,7 @@
 import { expect, test } from 'bun:test'
 import { z } from 'zod'
 import Ajv from 'ajv/dist/2020'
-import {
-  normalizeWebSource,
-  webSourceSchema,
-  webSourcesSchema,
-} from './web-source'
+import { normalizeWebSource, webSourceSchema, webSourcesSchema } from './web-source'
 
 const source = { title: 'Public source', url: 'https://example.org/source' }
 const badURLs = [
@@ -32,9 +28,7 @@ const badURLs = [
 ]
 
 test('strict source facts reject unsafe URLs in runtime and exported JSON Schema', () => {
-  const validate = new Ajv({ strict: false }).compile(
-    z.toJSONSchema(webSourceSchema),
-  )
+  const validate = new Ajv({ strict: false }).compile(z.toJSONSchema(webSourceSchema))
   expect(webSourceSchema.parse(source)).toEqual(source)
   expect(validate(source)).toBe(true)
   for (const url of badURLs) {
@@ -65,12 +59,11 @@ test('source titles and turn bounds are strict and readonly', () => {
 })
 
 test('shared normalization preserves only strict admitted facts within serialized URL bounds', () => {
-  expect(
-    normalizeWebSource({ title: 'Found', url: 'https://example.org' }),
-  ).toEqual({ title: 'Found', url: 'https://example.org/' })
-  expect(
-    normalizeWebSource({ ...source, snippet: 'PRIVATE CANARY' }),
-  ).toBeUndefined()
+  expect(normalizeWebSource({ title: 'Found', url: 'https://example.org' })).toEqual({
+    title: 'Found',
+    url: 'https://example.org/',
+  })
+  expect(normalizeWebSource({ ...source, snippet: 'PRIVATE CANARY' })).toBeUndefined()
   expect(
     normalizeWebSource({
       ...source,

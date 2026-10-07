@@ -7,40 +7,32 @@ import {
 
 /** Stored MIME authority comes from the actual bytes, never the browser's name alone.
  * These formats are staged inputs. Receiving audio/video does not imply model support. */
-export function validateFile(
-  name: string,
-  mimeType: string,
-  bytes: Uint8Array,
-): boolean {
+export function validateFile(name: string, mimeType: string, bytes: Uint8Array): boolean {
   if (!publicFileNameSchema.safeParse(name).success) return false
   if (!Object.hasOwn(fileSignatures, mimeType)) return false
   const verify = fileSignatures[mimeType]
   return verify === undefined ? false : verify(bytes)
 }
 // The actual byte verifiers also define the documented accepted media types.
-const fileSignatures: Readonly<Record<string, (bytes: Uint8Array) => boolean>> =
-  {
-    'text/plain': (bytes) => validText(bytes, false),
-    'application/json': (bytes) => validText(bytes, true),
-    'image/png': (bytes) => prefix(bytes, [137, 80, 78, 71, 13, 10, 26, 10]),
-    'image/jpeg': (bytes) =>
-      prefix(bytes, [255, 216, 255]) &&
-      bytes[bytes.length - 2] === 255 &&
-      bytes[bytes.length - 1] === 217,
-    'image/gif': (bytes) =>
-      ascii(bytes, 0, 'GIF87a') || ascii(bytes, 0, 'GIF89a'),
-    'image/webp': (bytes) => ascii(bytes, 0, 'RIFF') && ascii(bytes, 8, 'WEBP'),
-    'audio/wav': (bytes) => ascii(bytes, 0, 'RIFF') && ascii(bytes, 8, 'WAVE'),
-    'video/mp4': (bytes) => bytes.length >= 12 && ascii(bytes, 4, 'ftyp'),
-    'application/pdf': (bytes) => ascii(bytes, 0, '%PDF-'),
-  } satisfies Record<UploadMimeType, (bytes: Uint8Array) => boolean>
+const fileSignatures: Readonly<Record<string, (bytes: Uint8Array) => boolean>> = {
+  'text/plain': (bytes) => validText(bytes, false),
+  'application/json': (bytes) => validText(bytes, true),
+  'image/png': (bytes) => prefix(bytes, [137, 80, 78, 71, 13, 10, 26, 10]),
+  'image/jpeg': (bytes) =>
+    prefix(bytes, [255, 216, 255]) &&
+    bytes[bytes.length - 2] === 255 &&
+    bytes[bytes.length - 1] === 217,
+  'image/gif': (bytes) => ascii(bytes, 0, 'GIF87a') || ascii(bytes, 0, 'GIF89a'),
+  'image/webp': (bytes) => ascii(bytes, 0, 'RIFF') && ascii(bytes, 8, 'WEBP'),
+  'audio/wav': (bytes) => ascii(bytes, 0, 'RIFF') && ascii(bytes, 8, 'WAVE'),
+  'video/mp4': (bytes) => bytes.length >= 12 && ascii(bytes, 4, 'ftyp'),
+  'application/pdf': (bytes) => ascii(bytes, 0, '%PDF-'),
+} satisfies Record<UploadMimeType, (bytes: Uint8Array) => boolean>
 function prefix(bytes: Uint8Array, values: number[]) {
   return values.every((value, index) => bytes[index] === value)
 }
 function ascii(bytes: Uint8Array, offset: number, value: string) {
-  return value
-    .split('')
-    .every((char, index) => bytes[offset + index] === char.charCodeAt(0))
+  return value.split('').every((char, index) => bytes[offset + index] === char.charCodeAt(0))
 }
 
 type FileFacts = Readonly<{
@@ -78,8 +70,7 @@ export function validGeneratedAssets(
   limits: AssetLimits,
 ) {
   if (assets.length > ASSET_MAX_OUTPUT_FILES) return false
-  if (new Set(assets.map((file) => file.assetID)).size !== assets.length)
-    return false
+  if (new Set(assets.map((file) => file.assetID)).size !== assets.length) return false
   const runKey = new RegExp(
     `^(artifacts|assets/generated)/${query.threadID}/${query.runID}/[1-9][0-9]*/([^/]+)$`,
   )
@@ -89,21 +80,17 @@ export function validGeneratedAssets(
     if (!key || key[2] !== file.assetID) return false
     // Legacy GET-only keys retain the old SQL per-file limit. This is metadata
     // acceptance, not a relaxation of configured upload or download IO budgets.
-    return (
-      file.byteLength <=
-      (key[1] === 'artifacts' ? 16 * 1024 * 1024 : limits.maxBytes)
-    )
+    return file.byteLength <= (key[1] === 'artifacts' ? 16 * 1024 * 1024 : limits.maxBytes)
   })
   if (!validFiles) return false
 
   const legacyPrefix = `artifacts/${query.threadID}/${query.runID}/`
-  const currentAssets = assets.filter(
-    (file) => !file.objectKey.startsWith(legacyPrefix),
-  )
-  if (currentAssets.length > limits.maxFiles) return false
-  const currentBytes = currentAssets.reduce(
-    (sum, file) => sum + file.byteLength,
-    0,
-  )
-  return currentBytes <= limits.maxBytes
+  let currentFiles = 0
+  let currentBytes = 0
+  for (const file of assets) {
+    if (file.objectKey.startsWith(legacyPrefix)) continue
+    currentFiles += 1
+    currentBytes += file.byteLength
+  }
+  return currentFiles <= limits.maxFiles && currentBytes <= limits.maxBytes
 }

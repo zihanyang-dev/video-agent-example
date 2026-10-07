@@ -6,15 +6,9 @@ import { sql, type Kysely } from 'kysely'
 /** Read-only evidence for manual investigation, never permission to requeue.
  * Receiver absence does not prove work never ran or SQL history is intact.
  */
-export async function inspectDelivery(
-  db: Kysely<DB>,
-  kind: 'command' | 'event',
-  id: string,
-) {
+export async function inspectDelivery(db: Kysely<DB>, kind: 'command' | 'event', id: string) {
   return await db.transaction().execute(async (tx) => {
-    await sql`set transaction isolation level repeatable read, read only`.execute(
-      tx,
-    )
+    await sql`set transaction isolation level repeatable read, read only`.execute(tx)
     if (kind === 'command') {
       return {
         sender: await tx

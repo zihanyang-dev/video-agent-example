@@ -5,35 +5,91 @@ import { cpSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-const docker = (...args: string[]) =>
-  execFileSync('docker', args, { encoding: 'utf8', timeout: 600000 })
-function logs(id: string) {
+type DockerCommand = (...args: string[]) => string
+type OwnedContainer = {
+  name: string
+  owner: string
+  id?: string
+  removalAttempted: boolean
+}
+function docker(deadline: number, ...args: string[]) {
+  const remaining = deadline - performance.now()
+  if (remaining <= 0) throw new Error('Production check deadline exceeded')
+  return execFileSync('docker', args, {
+    encoding: 'utf8',
+    stdio: 'pipe',
+    killSignal: 'SIGKILL',
+    timeout: Math.ceil(Math.min(600000, remaining)),
+  })
+}
+function logs(deadline: number, id: string) {
+  const remaining = deadline - performance.now()
+  if (remaining <= 0) throw new Error('Production check deadline exceeded')
   const result = spawnSync('docker', ['logs', id], {
     encoding: 'utf8',
-    timeout: 10000,
+    stdio: 'pipe',
+    killSignal: 'SIGKILL',
+    timeout: Math.ceil(Math.min(10000, remaining)),
   })
+  if (result.error !== undefined) throw result.error
   assert.equal(result.status, 0)
   return result.stdout + result.stderr
 }
-function removeOwned(id: string | undefined, owner: string) {
-  if (id === undefined) return
-  assert.equal(
-    docker(
-      'inspect',
-      '--format',
-      '{{index .Config.Labels "vid.check.owner"}}',
-      id,
-    ).trim(),
-    owner,
-  )
-  docker('rm', '-f', id)
+function inspectOwned(entry: OwnedContainer, command: DockerCommand, candidate?: string) {
+  const metadata = JSON.parse(command('inspect', '--format', '{{json .}}', entry.name)) as {
+    Id: string
+    Name: string
+    Config: { Labels: Record<string, string> | null }
+  }
+  assert.equal(metadata.Name, `/${entry.name}`)
+  assert.equal(metadata.Config.Labels?.['vid.check.owner'], entry.owner)
+  assert.match(metadata.Id, /^[a-f0-9]{64}$/)
+  if (entry.id !== undefined) assert.equal(metadata.Id, entry.id)
+  if (candidate !== undefined) assert.equal(metadata.Id, candidate)
+  entry.id = metadata.Id
+  return metadata.Id
 }
-
-function cleanup(id: string | undefined, owner: string, context: string) {
+function createOwned(
+  entries: OwnedContainer[],
+  owner: string,
+  command: DockerCommand,
+  args: string[],
+) {
+  const entry: OwnedContainer = {
+    name: `${owner}-${entries.length}`,
+    owner,
+    removalAttempted: false,
+  }
+  entries.push(entry)
+  const candidate = command(
+    'create',
+    '--name',
+    entry.name,
+    '--label',
+    `vid.check.owner=${owner}`,
+    ...args,
+  ).trim()
+  return inspectOwned(entry, command, candidate)
+}
+function removeOwned(entry: OwnedContainer, command: DockerCommand) {
+  if (entry.removalAttempted) return
+  entry.removalAttempted = true
+  const id = inspectOwned(entry, command)
+  command('rm', '-f', id)
+}
+function cleanup(entries: OwnedContainer[], context: string, failures: unknown[]) {
+  const command = (...args: string[]) => docker(performance.now() + 10000, ...args)
+  for (const entry of entries) {
+    try {
+      removeOwned(entry, command)
+    } catch (cause) {
+      failures.push(cause)
+    }
+  }
   try {
-    removeOwned(id, owner)
-  } finally {
     rmSync(context, { recursive: true, force: true })
+  } catch (cause) {
+    failures.push(cause)
   }
 }
 
@@ -130,18 +186,19 @@ for (const service of ['server', 'worker']) {
     () => {
       const context = mkdtempSync(join(tmpdir(), 'vid-production-'))
       const owner = `vid-production-${crypto.randomUUID()}`
-      let id: string | undefined
+      const entries: OwnedContainer[] = []
+      const failures: unknown[] = []
+      const deadline = performance.now() + 600000
+      const command = (...args: string[]) => docker(deadline, ...args)
       try {
         for (const path of contextPaths) {
           cpSync(path, join(context, path), {
             recursive: true,
             filter: (source) =>
-              !/(?:^|\/)(?:node_modules|\.cache|dist|coverage|\.env[^/]*)(?:\/|$)/.test(
-                source,
-              ),
+              !/(?:^|\/)(?:node_modules|\.cache|dist|coverage|\.env[^/]*)(?:\/|$)/.test(source),
           })
         }
-        const image = docker(
+        const image = command(
           'build',
           '--quiet',
           '--label',
@@ -154,91 +211,70 @@ for (const service of ['server', 'worker']) {
         ).trim()
         assert.match(image, /^sha256:[a-f0-9]{64}$/)
         console.info(`${service} production image: ${image}`)
-        const installed = execFileSync(
-          'docker',
-          [
-            'run',
-            '--rm',
-            '-i',
-            '--network',
-            'none',
-            '--label',
-            `vid.check.owner=${owner}`,
-            '--user',
-            'root',
-            '--entrypoint',
-            'bun',
-            image,
-            '--eval',
-            inventory,
-          ],
-          {
-            encoding: 'utf8',
-            timeout: 600000,
-          },
-        )
+        const inventoryID = createOwned(entries, owner, command, [
+          '--network',
+          'none',
+          '--user',
+          'root',
+          '--entrypoint',
+          'bun',
+          image,
+          '--eval',
+          inventory,
+        ])
+        const installed = command('start', '--attach', inventoryID)
+        assert.equal(command('wait', inventoryID).trim(), '0')
         assert.match(installed, /production-inventory-ok/)
         assert.match(installed, /official-e2b-ok 2\.52\.0/)
         // Node remains a real executable, not a Bun symlink; exercise native Pi/E2B ESM exports.
         if (service === 'worker') {
           assert.match(
-            docker(
-              'run',
-              '--rm',
-              '--network',
-              'none',
-              '--label',
-              `vid.check.owner=${owner}`,
-              '--workdir',
-              '/app/apps/agent',
-              '--entrypoint',
-              'bun',
-              image,
-              '--eval',
-              `const { spawnSync } = await import('node:child_process');
-const child = spawnSync('node', ['--input-type=module', '--eval', "await import('@earendil-works/pi-coding-agent'); await import('e2b'); console.log('node-native-ok', process.release.name)"], { encoding: 'utf8' });
+            command(
+              'start',
+              '--attach',
+              createOwned(entries, owner, command, [
+                '--network',
+                'none',
+                '--workdir',
+                '/app/apps/agent',
+                '--entrypoint',
+                'bun',
+                image,
+                '--eval',
+                `const { spawnSync } = await import('node:child_process');
+const child = spawnSync('node', ['--input-type=module', '--eval', "await import('@earendil-works/pi-coding-agent'); await import('e2b'); console.log('node-native-ok', process.release.name)"], { encoding: 'utf8', timeout: 10000, killSignal: 'SIGKILL' });
 if (child.status !== 0) throw new Error(child.stderr || String(child.error));
 console.log(child.stdout);`,
+              ]),
             ),
             /node-native-ok node/,
           )
         }
         const entry = service === 'worker' ? 'agent' : 'server'
         const cmd = JSON.parse(
-          docker('image', 'inspect', '--format', '{{json .Config.Cmd}}', image),
+          command('image', 'inspect', '--format', '{{json .Config.Cmd}}', image),
         ) as string[]
         assert.deepEqual(cmd, ['bun', `apps/${entry}/src/main.ts`])
         const env = Object.entries(environment)
           .filter(([key]) =>
-            service === 'worker'
-              ? !/^(AUTH_|GITHUB_)/.test(key)
-              : !/^(MODEL_|E2B_)/.test(key),
+            service === 'worker' ? !/^(AUTH_|GITHUB_)/.test(key) : !/^(MODEL_|E2B_)/.test(key),
           )
           .flatMap(([key, value]) => ['--env', `${key}=${value}`])
-        id = docker(
-          'create',
-          '--network',
-          'none',
-          '--label',
-          `vid.check.owner=${owner}`,
-          ...env,
-          image,
-        ).trim()
-        docker('start', id)
+        const id = createOwned(entries, owner, command, ['--network', 'none', ...env, image])
+        command('start', id)
         // The unchanged CMD must fail privately when native services are absent.
-        assert.equal(docker('wait', id).trim(), '1')
-        assert.match(logs(id), /Process stopped after failure/)
-        assert.match(logs(id), new RegExp(`${service}-entrypoint`))
-        assert.doesNotMatch(logs(id), /ECONNREFUSED|postgres:\/\/|redis:\/\//)
-        assert.doesNotMatch(
-          logs(id),
-          /Cannot find|ModuleNotFound|ENOENT|Invalid environment/,
-        )
-        removeOwned(id, owner)
-        id = undefined
-      } finally {
-        cleanup(id, owner, context)
+        assert.equal(command('wait', id).trim(), '1')
+        const diagnostic = logs(deadline, id)
+        assert.match(diagnostic, /Process stopped after failure/)
+        assert.match(diagnostic, new RegExp(`${service}-entrypoint`))
+        assert.doesNotMatch(diagnostic, /ECONNREFUSED|postgres:\/\/|redis:\/\//)
+        assert.doesNotMatch(diagnostic, /Cannot find|ModuleNotFound|ENOENT|Invalid environment/)
+      } catch (cause) {
+        failures.push(cause)
       }
+      cleanup(entries, context, failures)
+      if (failures.length > 1) throw new AggregateError(failures, 'Production image check failed')
+      if (failures.length === 1) throw failures[0]
     },
   )
 }

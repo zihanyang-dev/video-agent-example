@@ -124,12 +124,9 @@ test('inbound delivery upgrades artifacts and retains absent versus explicit emp
     },
   })
   expect(
-    deliverySchema.parse({ ordinal: 7, event: { ...event, artifacts: [] } })
-      .event,
+    deliverySchema.parse({ ordinal: 7, event: { ...event, artifacts: [] } }).event,
   ).toHaveProperty('assets', [])
-  expect(deliverySchema.parse({ ordinal: 7, event }).event).not.toHaveProperty(
-    'assets',
-  )
+  expect(deliverySchema.parse({ ordinal: 7, event }).event).not.toHaveProperty('assets')
   expect(
     execution.executionDeliverySchema.safeParse({
       ordinal: 7,
@@ -141,9 +138,7 @@ test('inbound delivery upgrades artifacts and retains absent versus explicit emp
 test('inbound schemas accept current envelopes and reject ambiguous aliases and unknown fields', () => {
   const asset = { assetID: id, ...file }
   const current = { ...command, input: { ...command.input, assets: [asset] } }
-  expect(commandSchema.parse(current)).toEqual(
-    execution.executionCommandSchema.parse(current),
-  )
+  expect(commandSchema.parse(current)).toEqual(execution.executionCommandSchema.parse(current))
   const currentDelivery = { ordinal: 2, event: { ...event, assets: [asset] } }
   expect(deliverySchema.parse(currentDelivery)).toEqual(
     execution.executionDeliverySchema.parse(currentDelivery),
@@ -166,16 +161,11 @@ test('inbound schemas accept current envelopes and reject ambiguous aliases and 
     { artifacts: [{ artifactID: id, ...file, private: true }] },
     { artifacts: [], private: true },
   ])
-    expect(
-      deliverySchema.safeParse({ ordinal: 2, event: { ...event, ...extra } })
-        .success,
-    ).toBe(false)
-  expect(
-    deliverySchema.safeParse({ ordinal: 2, event, private: true }).success,
-  ).toBe(false)
-  expect(commandSchema.safeParse({ ...command, private: true }).success).toBe(
-    false,
-  )
+    expect(deliverySchema.safeParse({ ordinal: 2, event: { ...event, ...extra } }).success).toBe(
+      false,
+    )
+  expect(deliverySchema.safeParse({ ordinal: 2, event, private: true }).success).toBe(false)
+  expect(commandSchema.safeParse({ ...command, private: true }).success).toBe(false)
   expect(
     commandSchema.parse({
       version: 1,
@@ -194,11 +184,7 @@ test('normative foreign wire schemas do not advertise inbound legacy aliases', (
   const validateCommand = ajv.compile(schemas.command)
   const validateDelivery = ajv.compile(schemas.delivery)
   expect(validateCommand(command)).toBe(true)
-  expect(
-    validateCommand({ ...command, input: { ...command.input, materials: [] } }),
-  ).toBe(false)
+  expect(validateCommand({ ...command, input: { ...command.input, materials: [] } })).toBe(false)
   expect(validateDelivery({ ordinal: 1, event })).toBe(true)
-  expect(
-    validateDelivery({ ordinal: 1, event: { ...event, artifacts: [] } }),
-  ).toBe(false)
+  expect(validateDelivery({ ordinal: 1, event: { ...event, artifacts: [] } })).toBe(false)
 })

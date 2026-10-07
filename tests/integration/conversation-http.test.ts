@@ -10,10 +10,7 @@ import { signedTestIdentity, serverTestEnv } from './authentication-fixture'
 import { sql } from 'kysely'
 import { startServer } from '../../apps/server/src/server'
 import { createHTTP } from '../../apps/server/src/http'
-import {
-  acceptExecutionEvent,
-  readPublicEvents,
-} from '../../apps/server/src/db/execution-events'
+import { acceptExecutionEvent, readPublicEvents } from '../../apps/server/src/db/execution-events'
 import { openTestDatabase, settleTestCleanup } from './database-fixture'
 
 const { db, close } = openTestDatabase()
@@ -62,8 +59,7 @@ afterAll(async () => {
         'product.threads',
       ] as const
     ).map((table) => async () => {
-      if (threads.length)
-        await db.deleteFrom(table).where('thread_id', 'in', threads).execute()
+      if (threads.length) await db.deleteFrom(table).where('thread_id', 'in', threads).execute()
     }),
     close,
   ])
@@ -94,8 +90,7 @@ async function submit(threadID: string) {
   const body = { messageID: crypto.randomUUID(), text: ' Hello ' }
   const response = await request(`/api/threads/${threadID}/messages`, body)
   expect(response.status).toBe(202)
-  const value: { runID: string; commandID: string; messageID: string } =
-    await response.json()
+  const value: { runID: string; commandID: string; messageID: string } = await response.json()
   return { body, value }
 }
 function observe(threadID: string, runID: string) {
@@ -127,11 +122,7 @@ test.each([
         return
       }
       if (kind === 'timed-out' || kind === 'stopping') return
-      controller.enqueue(
-        new TextEncoder().encode(
-          kind === 'too-large' ? 'x'.repeat(65537) : '{',
-        ),
-      )
+      controller.enqueue(new TextEncoder().encode(kind === 'too-large' ? 'x'.repeat(65537) : '{'))
       controller.close()
     },
   })
@@ -152,8 +143,7 @@ test.each([
       }),
     ).catch((cause: unknown) => cause)
     expect(response).toBeInstanceOf(Response)
-    if (!(response instanceof Response))
-      throw new Error('Expected body rejection response')
+    if (!(response instanceof Response)) throw new Error('Expected body rejection response')
     expect(response.status).toBe(status)
     expect(await response.text()).not.toContain('Private transport diagnostic')
     expect(body.locked).toBe(false)
@@ -179,8 +169,7 @@ test.each([
   const body = new ReadableStream<Uint8Array>({
     start(controller) {
       source = controller
-      if (kind === 'transport-failed')
-        controller.error(new Error('Private upload diagnostic'))
+      if (kind === 'transport-failed') controller.error(new Error('Private upload diagnostic'))
       if (kind === 'too-large') controller.enqueue(new Uint8Array(1025))
     },
   })
@@ -246,9 +235,7 @@ test('owned thread snapshots, durable submission replay and malformed input', as
   const id = await thread()
   expect((await request(`/api/threads/${id}`)).status).toBe(200)
   const { body, value } = await submit(id)
-  expect(
-    await (await request(`/api/threads/${id}/messages`, body)).json(),
-  ).toEqual(value)
+  expect(await (await request(`/api/threads/${id}/messages`, body)).json()).toEqual(value)
   expect(
     (
       await request(`/api/threads/${id}/messages`, {
@@ -265,18 +252,12 @@ test('owned thread snapshots, durable submission replay and malformed input', as
       })
     ).status,
   ).toBe(400)
-  expect(
-    (await request(`/api/threads/${id}/runs/${value.runID}/events`, {})).status,
-  ).toBe(400)
-  expect(
-    await (await request(`/api/threads/${id}/messages`)).json(),
-  ).toMatchObject({
+  expect((await request(`/api/threads/${id}/runs/${value.runID}/events`, {})).status).toBe(400)
+  expect(await (await request(`/api/threads/${id}/messages`)).json()).toMatchObject({
     messages: [{ messageID: body.messageID, role: 'user', text: 'Hello' }],
   })
   expect(await (await request('/api/threads')).json()).toMatchObject({
-    threads: expect.arrayContaining([
-      expect.objectContaining({ threadID: id }),
-    ]),
+    threads: expect.arrayContaining([expect.objectContaining({ threadID: id })]),
   })
 })
 
@@ -301,24 +282,17 @@ test('unknown and foreign threads and runs have identical unavailable responses'
   }
   const unknownRunID = crypto.randomUUID()
   expect(
-    (
-      await request(
-        `/api/threads/${id}/runs/${unknownRunID}/events`,
-        observe(id, unknownRunID),
-      )
-    ).status,
+    (await request(`/api/threads/${id}/runs/${unknownRunID}/events`, observe(id, unknownRunID)))
+      .status,
   ).toBe(404)
   expect(
     (
       await foreign(
-        new Request(
-          `http://local/api/threads/${id}/runs/${value.runID}/events`,
-          {
-            method: 'POST',
-            headers: other.headers,
-            body: JSON.stringify(observe(id, value.runID)),
-          },
-        ),
+        new Request(`http://local/api/threads/${id}/runs/${value.runID}/events`, {
+          method: 'POST',
+          headers: other.headers,
+          body: JSON.stringify(observe(id, value.runID)),
+        }),
       )
     ).status,
   ).toBe(404)
@@ -355,13 +329,8 @@ test('cancel is authorized, replayable and never creates product messages', asyn
     ).status,
   ).toBe(409)
   expect(
-    (
-      await db
-        .selectFrom('product.messages')
-        .selectAll()
-        .where('thread_id', '=', id)
-        .execute()
-    ).length,
+    (await db.selectFrom('product.messages').selectAll().where('thread_id', '=', id).execute())
+      .length,
   ).toBe(2)
 })
 
@@ -384,9 +353,7 @@ test.each(['events', 'cancel'] as const)(
       .executeTakeFirstOrThrow()
     const response = await request(
       `/api/threads/${id}/runs/${value.runID}/${action}`,
-      action === 'events'
-        ? observe(id, value.runID)
-        : { commandID: crypto.randomUUID() },
+      action === 'events' ? observe(id, value.runID) : { commandID: crypto.randomUUID() },
     )
     await response.body?.cancel()
     expect(response.status).toBe(action === 'events' ? 200 : 202)
@@ -471,9 +438,7 @@ test.each([
       for (const action of ['events', 'cancel']) {
         const response = await request(
           `/api/threads/${id}/runs/${value.runID}/${action}`,
-          action === 'events'
-            ? observe(id, value.runID)
-            : { commandID: crypto.randomUUID() },
+          action === 'events' ? observe(id, value.runID) : { commandID: crypto.randomUUID() },
         )
         await response.body?.cancel()
         statuses.push(response.status)
@@ -504,42 +469,39 @@ test.each([
   ['{runID}', crypto.randomUUID()],
   ['{commandID}', crypto.randomUUID()],
   ['{extra}', true],
-])(
-  'retained cancellation %s=%s is not an exact replay',
-  async (path, invalid) => {
-    const id = await thread()
-    const { value } = await submit(id)
-    const commandID = crypto.randomUUID()
-    const route = `/api/threads/${id}/runs/${value.runID}/cancel`
-    expect((await request(route, { commandID })).status).toBe(202)
-    const original = await db
-      .selectFrom('product.command_outbox')
-      .select('command')
-      .where('command_id', '=', commandID)
-      .executeTakeFirstOrThrow()
-    let status: number
-    try {
-      await sql`update product.command_outbox set command =
+])('retained cancellation %s=%s is not an exact replay', async (path, invalid) => {
+  const id = await thread()
+  const { value } = await submit(id)
+  const commandID = crypto.randomUUID()
+  const route = `/api/threads/${id}/runs/${value.runID}/cancel`
+  expect((await request(route, { commandID })).status).toBe(202)
+  const original = await db
+    .selectFrom('product.command_outbox')
+    .select('command')
+    .where('command_id', '=', commandID)
+    .executeTakeFirstOrThrow()
+  let status: number
+  try {
+    await sql`update product.command_outbox set command =
       jsonb_set(command, ${path}::text[], ${JSON.stringify(invalid)}::jsonb)
       where command_id = ${commandID}::uuid`.execute(db)
-      status = (await request(route, { commandID })).status
-    } finally {
-      await db
-        .updateTable('product.command_outbox')
-        .set({ command: original.command })
-        .where('command_id', '=', commandID)
-        .execute()
-    }
-    expect(status).toBe(409)
-    expect(
-      await db
-        .selectFrom('product.command_outbox')
-        .select('command_id')
-        .where('thread_id', '=', id)
-        .execute(),
-    ).toHaveLength(2)
-  },
-)
+    status = (await request(route, { commandID })).status
+  } finally {
+    await db
+      .updateTable('product.command_outbox')
+      .set({ command: original.command })
+      .where('command_id', '=', commandID)
+      .execute()
+  }
+  expect(status).toBe(409)
+  expect(
+    await db
+      .selectFrom('product.command_outbox')
+      .select('command_id')
+      .where('thread_id', '=', id)
+      .execute(),
+  ).toHaveLength(2)
+})
 
 test('foreign cancellation and colliding foreign command IDs preserve unavailable privacy', async () => {
   const id = await thread()
@@ -565,10 +527,9 @@ test('foreign cancellation and colliding foreign command IDs preserve unavailabl
       body: JSON.stringify({ commandID }),
     }),
   )
-  const missing = await request(
-    `/api/threads/${crypto.randomUUID()}/runs/${value.runID}/cancel`,
-    { commandID },
-  )
+  const missing = await request(`/api/threads/${crypto.randomUUID()}/runs/${value.runID}/cancel`, {
+    commandID,
+  })
   expect(response.status).toBe(404)
   expect(await response.text()).toBe(await missing.text())
   const owned = await thread()
@@ -578,10 +539,9 @@ test('foreign cancellation and colliding foreign command IDs preserve unavailabl
     .set({ owner_id: other.user.id })
     .where('thread_id', '=', id)
     .execute()
-  const collision = await request(
-    `/api/threads/${owned}/runs/${run.value.runID}/cancel`,
-    { commandID },
-  )
+  const collision = await request(`/api/threads/${owned}/runs/${run.value.runID}/cancel`, {
+    commandID,
+  })
   expect(collision.status).toBe(404)
   expect(await collision.json()).toEqual({ error: 'Not found' })
 })
@@ -682,13 +642,10 @@ test('official SSE completion emits full text once, final-frame cursor and durab
   expect(events.at(-1)?.type).toBe(EventType.RUN_FINISHED)
   expect(frames.filter((f) => f.includes('id: '))).toHaveLength(2)
   const cursor = lastFactCursor(text)
-  const replay = await request(
-    `/api/threads/${id}/runs/${value.runID}/events`,
-    {
-      ...observe(id, value.runID),
-      forwardedProps: { after: cursor },
-    },
-  )
+  const replay = await request(`/api/threads/${id}/runs/${value.runID}/events`, {
+    ...observe(id, value.runID),
+    forwardedProps: { after: cursor },
+  })
   expect(await replay.text()).toContain('RUN_STARTED')
 })
 
@@ -718,17 +675,13 @@ test.each(['run-cancelled', 'run-failed'] as const)(
     await acceptExecutionEvent(db, {
       ordinal: 1,
       event:
-        kind === 'run-failed'
-          ? { ...event, kind, reason: 'execution-error' }
-          : { ...event, kind },
+        kind === 'run-failed' ? { ...event, kind, reason: 'execution-error' } : { ...event, kind },
     })
     const response = await request(
       `/api/threads/${id}/runs/${value.runID}/events`,
       observe(id, value.runID),
     )
-    expect(await response.text()).toContain(
-      kind === 'run-failed' ? 'RUN_ERROR' : 'RUN_FINISHED',
-    )
+    expect(await response.text()).toContain(kind === 'run-failed' ? 'RUN_ERROR' : 'RUN_FINISHED')
   },
 )
 
@@ -754,14 +707,9 @@ test('first durable SSE read rejects early EOF instead of spinning', async () =>
       : { done: false as const, value: result.value }
   })
   try {
-    const failure: unknown = await readFirstFact(response).catch(
-      (error: unknown) => error,
-    )
+    const failure: unknown = await readFirstFact(response).catch((error: unknown) => error)
     expect(failure).toBeInstanceOf(Error)
-    expect(failure).toHaveProperty(
-      'message',
-      'SSE ended before its first durable cursor',
-    )
+    expect(failure).toHaveProperty('message', 'SSE ended before its first durable cursor')
   } finally {
     bounded.mockRestore()
     acquire.mockRestore()
@@ -797,8 +745,7 @@ async function readFirstFact(response: Response) {
       chunk = await reader.read()
       text += decoder.decode(chunk.value, { stream: true })
     } while (!chunk.done && !text.includes('\nid: '))
-    if (!text.includes('\nid: '))
-      throw new Error('SSE ended before its first durable cursor')
+    if (!text.includes('\nid: ')) throw new Error('SSE ended before its first durable cursor')
     return text
   } finally {
     try {
@@ -812,9 +759,7 @@ async function readFirstFact(response: Response) {
 async function emitText(
   identities: { threadID: string; runID: string; messageID: string },
   ordinal: number,
-  fact:
-    | { kind: 'assistant-text'; delta: string }
-    | { kind: 'run-completed'; text: string },
+  fact: { kind: 'assistant-text'; delta: string } | { kind: 'run-completed'; text: string },
 ) {
   expect(
     await acceptExecutionEvent(db, {
@@ -831,15 +776,9 @@ async function emitText(
 
 async function assertCompletedSnapshot(id: string, messageID: string) {
   expect(
-    await db
-      .selectFrom('product.command_outbox')
-      .selectAll()
-      .where('thread_id', '=', id)
-      .execute(),
+    await db.selectFrom('product.command_outbox').selectAll().where('thread_id', '=', id).execute(),
   ).toHaveLength(1)
-  expect(
-    await (await request(`/api/threads/${id}/messages`)).json(),
-  ).toMatchObject({
+  expect(await (await request(`/api/threads/${id}/messages`)).json()).toMatchObject({
     messages: expect.arrayContaining([
       expect.objectContaining({
         messageID,
@@ -858,20 +797,17 @@ test('live deltas resume at durable cursor without duplicating completion and ig
     kind: 'assistant-text',
     delta: 'Hello',
   })
-  const response = await request(
-    `/api/threads/${id}/runs/${value.runID}/events`,
-    {
-      ...observe(id, value.runID),
-      messages: [
-        {
-          id: crypto.randomUUID(),
-          role: 'user',
-          content: 'replace private history',
-        },
-      ],
-      state: { private: 'override' },
-    },
-  )
+  const response = await request(`/api/threads/${id}/runs/${value.runID}/events`, {
+    ...observe(id, value.runID),
+    messages: [
+      {
+        id: crypto.randomUUID(),
+        role: 'user',
+        content: 'replace private history',
+      },
+    ],
+    state: { private: 'override' },
+  })
   const first = await readFirstFact(response)
   const cursor = first
     .split('\n')
@@ -880,9 +816,7 @@ test('live deltas resume at durable cursor without duplicating completion and ig
   if (!cursor) throw new Error('Missing durable cursor')
   const frames = first.trim().split('\n\n')
   expect(frames).toHaveLength(3)
-  expect(frames.slice(0, -1).every((frame) => !frame.includes('id: '))).toBe(
-    true,
-  )
+  expect(frames.slice(0, -1).every((frame) => !frame.includes('id: '))).toBe(true)
   await emitText({ threadID: id, runID: value.runID, messageID }, 2, {
     kind: 'run-completed',
     text: 'Hello world',
@@ -928,11 +862,7 @@ test('process shutdown closes an owned stream without cancelling its durable run
   signal.abort()
   expect((await pending).done).toBe(true)
   expect(
-    await db
-      .selectFrom('product.command_outbox')
-      .selectAll()
-      .where('thread_id', '=', id)
-      .execute(),
+    await db.selectFrom('product.command_outbox').selectAll().where('thread_id', '=', id).execute(),
   ).toHaveLength(1)
 })
 
@@ -955,11 +885,7 @@ test('request abort closes a pending subscription without cancelling its run', a
   abort.abort()
   expect((await pending).done).toBe(true)
   expect(
-    await db
-      .selectFrom('product.command_outbox')
-      .selectAll()
-      .where('thread_id', '=', id)
-      .execute(),
+    await db.selectFrom('product.command_outbox').selectAll().where('thread_id', '=', id).execute(),
   ).toHaveLength(1)
 })
 
@@ -1043,9 +969,7 @@ async function lockPublicFactLedger() {
     locked = resolve
   })
   const done = db.transaction().execute(async (tx) => {
-    await sql`lock table product.execution_events in access exclusive mode`.execute(
-      tx,
-    )
+    await sql`lock table product.execution_events in access exclusive mode`.execute(tx)
     locked()
     await released
   })
@@ -1074,14 +998,11 @@ test('server shutdown retains DB connections until a real in-flight SSE query se
   const applicationName = `sse-shutdown-${crypto.randomUUID()}`
   const process = await startIdentifiedServer(applicationName)
   const lock = await lockPublicFactLedger()
-  const reading = fetch(
-    `${process.url}/api/threads/${id}/runs/${value.runID}/events`,
-    {
-      method: 'POST',
-      headers: login.headers,
-      body: JSON.stringify(observe(id, value.runID)),
-    },
-  )
+  const reading = fetch(`${process.url}/api/threads/${id}/runs/${value.runID}/events`, {
+    method: 'POST',
+    headers: login.headers,
+    body: JSON.stringify(observe(id, value.runID)),
+  })
     .then((response) => response.text())
     .catch(() => '')
   try {
@@ -1103,9 +1024,7 @@ test('server shutdown retains DB connections until a real in-flight SSE query se
     await lock.done
     await stopping
     await reading
-    expect(
-      await (await request(`/api/threads/${id}/messages`)).json(),
-    ).toMatchObject({
+    expect(await (await request(`/api/threads/${id}/messages`)).json()).toMatchObject({
       messages: [{ role: 'user', text: 'Hello' }],
     })
   } finally {
@@ -1134,9 +1053,7 @@ test('non-prefix completion reconciles from the canonical message snapshot', asy
   expect(stream).toContain('"delta":"Draft"')
   expect(stream).not.toContain('"delta":"Canonical answer"')
   expect(stream).toContain('RUN_FINISHED')
-  expect(
-    await (await request(`/api/threads/${id}/messages`)).json(),
-  ).toMatchObject({
+  expect(await (await request(`/api/threads/${id}/messages`)).json()).toMatchObject({
     messages: expect.arrayContaining([
       expect.objectContaining({
         messageID,
@@ -1169,10 +1086,7 @@ test('official AG-UI HttpAgent accepts cursor reconnect lifecycle and final curs
   try {
     const events: ReturnType<typeof EventSchema.parse>[] = []
     const agent = new HttpAgent({
-      url: new URL(
-        `/api/threads/${id}/runs/${value.runID}/events`,
-        server.url,
-      ).toString(),
+      url: new URL(`/api/threads/${id}/runs/${value.runID}/events`, server.url).toString(),
       threadId: id,
       headers: {
         Cookie: login.headers.get('cookie')!,
@@ -1195,9 +1109,7 @@ test('official AG-UI HttpAgent accepts cursor reconnect lifecycle and final curs
       EventType.RUN_FINISHED,
     ])
     expect(events.at(-1)?.metadata?.cursor).toMatch(/^[1-9][0-9]*$/)
-    expect(agent.messages).toMatchObject([
-      { id: messageID, role: 'assistant', content: ' world' },
-    ])
+    expect(agent.messages).toMatchObject([{ id: messageID, role: 'assistant', content: ' world' }])
   } finally {
     await server.stop(true)
   }
@@ -1214,35 +1126,30 @@ function lastFactCursor(text: string) {
 test('observation rejects a fabricated future cursor', async () => {
   const id = await thread()
   const { value } = await submit(id)
-  await emitText(
-    { threadID: id, runID: value.runID, messageID: crypto.randomUUID() },
-    1,
-    { kind: 'run-completed', text: 'done' },
-  )
+  await emitText({ threadID: id, runID: value.runID, messageID: crypto.randomUUID() }, 1, {
+    kind: 'run-completed',
+    text: 'done',
+  })
   const facts = await readPublicEvents(db, {
     ownerID: login.user.id,
     threadID: id,
   })
   const cursor = facts?.at(-1)?.cursor
   if (!cursor) throw new Error('Missing terminal cursor')
-  const response = await request(
-    `/api/threads/${id}/runs/${value.runID}/events`,
-    {
-      ...observe(id, value.runID),
-      forwardedProps: { after: String(BigInt(cursor) + 100n) },
-    },
-  )
+  const response = await request(`/api/threads/${id}/runs/${value.runID}/events`, {
+    ...observe(id, value.runID),
+    forwardedProps: { after: String(BigInt(cursor) + 100n) },
+  })
   expect(response.status).toBe(400)
 })
 
 test('Last-Event-ID takes precedence over an invalid forwarded cursor on reconnect', async () => {
   const id = await thread()
   const { value } = await submit(id)
-  await emitText(
-    { threadID: id, runID: value.runID, messageID: crypto.randomUUID() },
-    1,
-    { kind: 'run-completed', text: 'done' },
-  )
+  await emitText({ threadID: id, runID: value.runID, messageID: crypto.randomUUID() }, 1, {
+    kind: 'run-completed',
+    text: 'done',
+  })
   const facts = await readPublicEvents(db, {
     ownerID: login.user.id,
     threadID: id,
@@ -1306,14 +1213,11 @@ test('native Fetch creates, replays, reads, submits and durably logs out through
     })
     expect(read.status).toBe(200)
     expect((await read.json()).thread.threadID).toBe(threadID)
-    const submitted = await fetch(
-      new URL(`/api/threads/${threadID}/messages`, server.url),
-      {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({ messageID: crypto.randomUUID(), text: 'hello' }),
-      },
-    )
+    const submitted = await fetch(new URL(`/api/threads/${threadID}/messages`, server.url), {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ messageID: crypto.randomUUID(), text: 'hello' }),
+    })
     expect(submitted.status).toBe(202)
     expect((await submitted.json()).runID).toBeDefined()
     const signedOut = await fetch(new URL('/api/logout', server.url), {
@@ -1412,11 +1316,7 @@ test('server shutdown cancels a slow S3 response body before closing its owned c
   }
 }, 10000)
 
-test.each([
-  'execution-error',
-  'interrupted',
-  'sandbox-recovery-required',
-] as const)(
+test.each(['execution-error', 'interrupted', 'sandbox-recovery-required'] as const)(
   'fresh message snapshots retain durable %s failures without SSE or assistant messages',
   async (reason) => {
     const id = await thread()
@@ -1444,12 +1344,9 @@ test.each([
     const server = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: fresh })
     try {
       for (let reload = 0; reload < 2; reload++) {
-        const snapshot = await fetch(
-          new URL(`/api/threads/${id}/messages`, server.url),
-          {
-            headers: login.headers,
-          },
-        )
+        const snapshot = await fetch(new URL(`/api/threads/${id}/messages`, server.url), {
+          headers: login.headers,
+        })
         expect(snapshot.status).toBe(200)
         expect(messagesResponseSchema.parse(await snapshot.json())).toEqual({
           messages: [
@@ -1463,9 +1360,7 @@ test.each([
             },
           ],
           activeRuns: [],
-          failedRuns: [
-            { runID: value.runID, messageID: body.messageID, reason },
-          ],
+          failedRuns: [{ runID: value.runID, messageID: body.messageID, reason }],
         })
       }
     } finally {
@@ -1512,9 +1407,7 @@ test('snapshot retains failure authorized by legacy uppercase JSON headers', asy
       '{commandID}', to_jsonb(upper(command_id::text))),
       '{input,messageID}', to_jsonb(upper(message_id::text)))
     where thread_id = ${id}::uuid`.execute(db)
-  expect(
-    await (await request(`/api/threads/${id}/messages`)).json(),
-  ).toMatchObject({
+  expect(await (await request(`/api/threads/${id}/messages`)).json()).toMatchObject({
     activeRuns: [],
     failedRuns: [
       {
@@ -1548,9 +1441,7 @@ test.each(['{threadID}', '{runID}', '{commandID}', '{input,messageID}'])(
         jsonb_set(command, ${path}::text[], to_jsonb(${invalid}::text))
         where thread_id = ${id}::uuid`.execute(db)
       expect(await acceptExecutionEvent(db, delivery)).toBe('unknown-run')
-      expect(
-        await (await request(`/api/threads/${id}/messages`)).json(),
-      ).toMatchObject({
+      expect(await (await request(`/api/threads/${id}/messages`)).json()).toMatchObject({
         failedRuns: [],
       })
     }
@@ -1559,12 +1450,9 @@ test.each(['{threadID}', '{runID}', '{commandID}', '{input,messageID}'])(
 
 test('asset allocation and message snapshots use bounded reads while preserving request and link order', async () => {
   const { allocatedAssets } = await import('../../apps/server/src/db/assets')
-  const { snapshotOwnedMessages } =
-    await import('../../apps/server/src/db/conversations')
-  const { acceptMessageIntent } =
-    await import('../../apps/server/src/db/submissions')
-  const { threadUnavailable } =
-    await import('../../apps/server/src/db/thread-access')
+  const { snapshotOwnedMessages } = await import('../../apps/server/src/db/conversations')
+  const { acceptMessageIntent } = await import('../../apps/server/src/db/submissions')
+  const { threadUnavailable } = await import('../../apps/server/src/db/thread-access')
   const id = await thread()
   const foreignID = await thread()
   const assetIDs = Array.from({ length: 4 }, () => crypto.randomUUID())
@@ -1594,9 +1482,7 @@ test('asset allocation and message snapshots use bounded reads while preserving 
       return result
     },
   })
-  await counted
-    .transaction()
-    .execute((tx) => allocatedAssets(tx, id, ordered.slice(0, 1)))
+  await counted.transaction().execute((tx) => allocatedAssets(tx, id, ordered.slice(0, 1)))
   const singleAllocationReads = selects
   selects = 0
   const allocations = await counted.transaction().execute((tx) =>
@@ -1676,30 +1562,20 @@ test('asset allocation and message snapshots use bounded reads while preserving 
     })),
   ).toEqual(expectedMessages)
   expect(selects).toBeLessThanOrEqual(smallSnapshotReads * 2)
-  const { archiveThread } =
-    await import('../../apps/server/src/db/cancellations')
+  const { archiveThread } = await import('../../apps/server/src/db/cancellations')
   await archiveThread(db, query)
-  expect((await snapshotOwnedMessages(db, query))?.messages).toEqual(
-    largerSnapshot?.messages,
-  )
+  expect((await snapshotOwnedMessages(db, query))?.messages).toEqual(largerSnapshot?.messages)
 })
 
 test('terminal reconnect retains its durable cursor across batches, cursor gaps and another run while reauthorizing each batch', async () => {
-  const { observeEvents } =
-    await import('../../apps/server/src/conversation/event-stream')
+  const { observeEvents } = await import('../../apps/server/src/conversation/event-stream')
   const id = await thread()
   const target = await submit(id)
-  await emitText(
-    { threadID: id, runID: target.value.runID, messageID: crypto.randomUUID() },
-    1,
-    {
-      kind: 'run-completed',
-      text: 'done',
-    },
-  )
-  const terminal = (
-    await readPublicEvents(db, { ownerID: login.user.id, threadID: id })
-  )?.[0]
+  await emitText({ threadID: id, runID: target.value.runID, messageID: crypto.randomUUID() }, 1, {
+    kind: 'run-completed',
+    text: 'done',
+  })
+  const terminal = (await readPublicEvents(db, { ownerID: login.user.id, threadID: id }))?.[0]
   if (!terminal) throw new Error('Missing terminal')
   // Replay cursors are global: a different thread leaves a real SQL cursor gap.
   const gapThread = await thread()
@@ -1727,9 +1603,9 @@ test('terminal reconnect retains its durable cursor across batches, cursor gaps 
         delta: 'unrelated',
       },
     )
-  const after = (
-    await readPublicEvents(db, { ownerID: login.user.id, threadID: id })
-  )?.at(-1)?.cursor
+  const after = (await readPublicEvents(db, { ownerID: login.user.id, threadID: id }))?.at(
+    -1,
+  )?.cursor
   if (!after) throw new Error('Missing observation boundary')
   let authorizations = 0
   const response = await observeEvents(db, {
@@ -1763,9 +1639,9 @@ test('reconstruction includes the boundary fact but ignores later facts already 
     kind: 'assistant-text',
     delta: 'Hello',
   })
-  const after = (
-    await readPublicEvents(db, { ownerID: login.user.id, threadID: id })
-  )?.at(-1)?.cursor
+  const after = (await readPublicEvents(db, { ownerID: login.user.id, threadID: id }))?.at(
+    -1,
+  )?.cursor
   if (!after) throw new Error('Missing boundary')
   await emitText({ threadID: id, runID: value.runID, messageID }, 2, {
     kind: 'assistant-text',
@@ -1775,42 +1651,29 @@ test('reconstruction includes the boundary fact but ignores later facts already 
     kind: 'run-completed',
     text: 'Hello world',
   })
-  const response = await request(
-    `/api/threads/${id}/runs/${value.runID}/events`,
-    {
-      ...observe(id, value.runID),
-      forwardedProps: { after },
-    },
-  )
+  const response = await request(`/api/threads/${id}/runs/${value.runID}/events`, {
+    ...observe(id, value.runID),
+    forwardedProps: { after },
+  })
   const text = await response.text()
   expect(text).toContain('"delta":" world"')
   expect(text).not.toContain('"delta":"Hello"')
   expect(text).not.toContain('"delta":"Hello world"')
-  expect(text.indexOf('TEXT_MESSAGE_START')).toBeLessThan(
-    text.indexOf('TEXT_MESSAGE_CONTENT'),
-  )
+  expect(text.indexOf('TEXT_MESSAGE_START')).toBeLessThan(text.indexOf('TEXT_MESSAGE_CONTENT'))
   expect(text).toContain('RUN_FINISHED')
 })
 
 test('revoked ownership after a real reconstruction read emits no SSE bytes', async () => {
-  const { observeEvents } =
-    await import('../../apps/server/src/conversation/event-stream')
-  const { readOwnedThread } =
-    await import('../../apps/server/src/db/conversations')
+  const { observeEvents } = await import('../../apps/server/src/conversation/event-stream')
+  const { readOwnedThread } = await import('../../apps/server/src/db/conversations')
   const id = await thread()
   const { value } = await submit(id)
   const canary = 'PRIVATE_REVOKED_RECONSTRUCTION_TEXT'
-  await emitText(
-    { threadID: id, runID: value.runID, messageID: crypto.randomUUID() },
-    1,
-    {
-      kind: 'run-completed',
-      text: canary,
-    },
-  )
-  const terminal = (
-    await readPublicEvents(db, { ownerID: login.user.id, threadID: id })
-  )?.[0]
+  await emitText({ threadID: id, runID: value.runID, messageID: crypto.randomUUID() }, 1, {
+    kind: 'run-completed',
+    text: canary,
+  })
+  const terminal = (await readPublicEvents(db, { ownerID: login.user.id, threadID: id }))?.[0]
   if (!terminal) throw new Error('Missing terminal')
   let ledgerRead = false
   let revoked = false

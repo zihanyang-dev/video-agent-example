@@ -4,25 +4,20 @@ import { createServer, type Socket } from 'node:net'
 import * as objectStorage from '@vid/object-storage'
 import { readWorkerEnv, readMigrationEnv } from '@vid/config'
 import { executionStreams } from '@vid/contract/execution'
+import { messagesResponseSchema } from '@vid/contract/http'
 import { createClient } from 'redis'
 import { sql } from 'kysely'
-import {
-  executeRun,
-  type ExecutionLease,
-  type SandboxSessionPort,
-} from '../../apps/agent/src/execute-run'
+import { executeRun } from '../../apps/agent/src/execution/execute-run'
+import type { ExecutionLease, SandboxSessionPort } from '../../apps/agent/src/execution/contract'
 import { assignFileTools } from '../../apps/agent/src/harness/files'
 import { createPiHarness } from '../../apps/agent/src/harness/pi'
 import { WorkerProcess } from '../../apps/agent/src/worker'
 import { startServer } from '../../apps/server/src/server'
 import { startWorker } from '../../apps/agent/src/worker'
-import {
-  signedTestIdentity,
-  serverTestEnv,
-  storageSettings,
-} from './authentication-fixture'
+import { signedTestIdentity, serverTestEnv, storageSettings } from './authentication-fixture'
 import { openTestDatabase } from './database-fixture'
 import { postgresProxy, eventually } from './postgres-proxy-fixture'
+import { modelStream } from './model-stream-fixture'
 
 function workerEnv(baseURL = 'http://unused/v1') {
   return readWorkerEnv({
@@ -34,8 +29,7 @@ function workerEnv(baseURL = 'http://unused/v1') {
     MODEL_ID: 'local',
     MODEL_CONTEXT_WINDOW: '8192',
     MODEL_MAX_OUTPUT_TOKENS: '1024',
-    MODEL_PROMPT_PATH: new URL('../../apps/agent/prompt.md', import.meta.url)
-      .pathname,
+    MODEL_PROMPT_PATH: new URL('../../apps/agent/prompt.md', import.meta.url).pathname,
     E2B_API_URL: 'http://unused',
     E2B_SANDBOX_URL: 'http://unused',
     E2B_API_KEY: 'test',
@@ -57,14 +51,13 @@ function localModel() {
         },
         { delta: {}, finish_reason: 'stop' },
       ]
-      return new Response(
-        chunks
-          .map(
-            (chunk) =>
-              `data: ${JSON.stringify({ id: 'local', object: 'chat.completion.chunk', model: 'local', choices: [{ index: 0, ...chunk }] })}\n\n`,
-          )
-          .join('') + 'data: [DONE]\n\n',
-        { headers: { 'content-type': 'text/event-stream' } },
+      return modelStream(
+        chunks.map((chunk) => ({
+          id: 'local',
+          object: 'chat.completion.chunk',
+          model: 'local',
+          choices: [{ index: 0, ...chunk }],
+        })),
       )
     },
   })
@@ -90,7 +83,16 @@ function sandbox(close: () => Promise<void>) {
 const identities = new Map<string, Headers>()
 async function submit(url: string) {
   const { db, close } = openTestDatabase()
-  const login = await signedTestIdentity(db)
+  const login = await signedTestIdentity(db).catch(async (cause: unknown) => {
+    try {
+      await close()
+    } catch (cleanup) {
+      throw new AggregateError([cause, cleanup], 'Test identity setup failed', {
+        cause,
+      })
+    }
+    throw cause
+  })
   await close()
   const headers = login.headers
   const response = await fetch(`${url}/api/threads`, {
@@ -116,15 +118,85 @@ async function submit(url: string) {
 async function answer(url: string, threadID: string) {
   const deadline = performance.now() + 5000
   while (performance.now() < deadline) {
-    const result = await (
-      await fetch(`${url}/api/threads/${threadID}/messages`, {
-        headers: identities.get(threadID)!,
-      })
-    ).text()
-    if (result.includes('reply: hello')) return result
+    const response = await fetch(`${url}/api/threads/${threadID}/messages`, {
+      headers: identities.get(threadID)!,
+    })
+    const result = await response.text()
+    expect(response.status).toBe(200)
+    const snapshot = messagesResponseSchema.parse(JSON.parse(result))
+    if (
+      snapshot.messages.some(
+        (message) => message.role === 'assistant' && message.text === 'reply: hello',
+      )
+    )
+      return result
     await Bun.sleep(20)
   }
   throw new Error('No stored answer')
+}
+
+test('answer polling requires the exact assistant message rather than a canary elsewhere', async () => {
+  let requests = 0
+  const message = {
+    messageID: 'abcdefab-cdef-4abc-8def-abcdefabcdef',
+    createdAt: '2026-10-07T00:00:00.000Z',
+  }
+  const snapshots = [
+    {
+      messages: [{ ...message, role: 'user', text: 'reply: hello' }],
+      activeRuns: [],
+      failedRuns: [],
+    },
+    {
+      messages: [{ ...message, role: 'assistant', text: 'reply: hello extra' }],
+      activeRuns: [],
+      failedRuns: [],
+    },
+    {
+      messages: [{ ...message, role: 'assistant', text: 'reply: hello' }],
+      activeRuns: [],
+      failedRuns: [],
+    },
+  ]
+  const server = Bun.serve({
+    hostname: '127.0.0.1',
+    port: 0,
+    fetch() {
+      return Response.json(snapshots[requests++])
+    },
+  })
+  const threadID = crypto.randomUUID()
+  identities.set(threadID, new Headers())
+  try {
+    const result = await answer(`http://127.0.0.1:${server.port}`, threadID)
+    expect(requests).toBe(3)
+    expect(JSON.parse(result)).toEqual(snapshots[2])
+  } finally {
+    identities.delete(threadID)
+    await server.stop(true)
+  }
+})
+
+for (const status of [401, 500]) {
+  test(`answer polling rejects HTTP ${status} even when its body contains the canary`, async () => {
+    const server = Bun.serve({
+      hostname: '127.0.0.1',
+      port: 0,
+      fetch: () => Response.json({ error: 'reply: hello' }, { status }),
+    })
+    const threadID = crypto.randomUUID()
+    identities.set(threadID, new Headers())
+    try {
+      const failure = await answer(`http://127.0.0.1:${server.port}`, threadID).then(
+        () => undefined,
+        (cause: unknown) => cause,
+      )
+      expect(failure).toBeInstanceOf(Error)
+    } finally {
+      identities.delete(threadID)
+      await server.stop(true)
+    }
+  })
 }
 
 test('server releases every allocated object store when native client construction fails', async () => {
@@ -132,20 +204,18 @@ test('server releases every allocated object store when native client constructi
   const released = new Set<objectStorage.ObjectStore>()
   const closes: ReturnType<typeof spyOn>[] = []
   const nativeConnect = objectStorage.connectObjects
-  const connect = spyOn(objectStorage, 'connectObjects').mockImplementation(
-    (options) => {
-      const store = nativeConnect(options)
-      const nativeClose = store.close.bind(store)
-      created.push(store)
-      closes.push(
-        spyOn(store, 'close').mockImplementation(() => {
-          nativeClose()
-          released.add(store)
-        }),
-      )
-      return store
-    },
-  )
+  const connect = spyOn(objectStorage, 'connectObjects').mockImplementation((options) => {
+    const store = nativeConnect(options)
+    const nativeClose = store.close.bind(store)
+    created.push(store)
+    closes.push(
+      spyOn(store, 'close').mockImplementation(() => {
+        nativeClose()
+        released.add(store)
+      }),
+    )
+    return store
+  })
   try {
     const failure = await startServer(
       { ...serverTestEnv(), REDIS_URL: 'ftp://127.0.0.1:6379' },
@@ -157,18 +227,14 @@ test('server releases every allocated object store when native client constructi
   } finally {
     connect.mockRestore()
     for (const close of closes) close.mockRestore()
-    for (const store of created.filter((store) => !released.has(store)))
-      store.close()
+    for (const store of created.filter((store) => !released.has(store))) store.close()
   }
 })
 
 test('server closes its PostgreSQL sockets even when native storage close throws', async () => {
   const env = serverTestEnv()
   const proxy = await postgresProxy(env.DATABASE_URL)
-  const server = await startServer(
-    { ...env, DATABASE_URL: proxy.databaseURL },
-    { port: 0 },
-  )
+  const server = await startServer({ ...env, DATABASE_URL: proxy.databaseURL }, { port: 0 })
   const cleanupFailure = new Error('Injected native storage close failure')
   const storageClose = spyOn(S3Client.prototype, 'destroy')
   storageClose.mockImplementation(function (this: S3Client) {
@@ -183,8 +249,7 @@ test('server closes its PostgreSQL sockets even when native storage close throws
     await eventually(() => proxy.closedClients === proxy.connections, 500)
     expect(proxy.closedClients).toBe(proxy.connections)
     expect(failure).toBeInstanceOf(AggregateError)
-    if (!(failure instanceof AggregateError))
-      throw new Error('Expected cleanup failure')
+    if (!(failure instanceof AggregateError)) throw new Error('Expected cleanup failure')
     expect(failure.errors).toContain(cleanupFailure)
     expect(await server.stop().catch((cause: unknown) => cause)).toBe(failure)
   } finally {
@@ -208,15 +273,13 @@ test('server startup retains the connection failure when cleanup also fails', as
       { port: 0 },
     ).catch((cause: unknown) => cause)
     expect(failure).toBeInstanceOf(AggregateError)
-    if (!(failure instanceof AggregateError))
-      throw new Error('Expected startup failure')
+    if (!(failure instanceof AggregateError)) throw new Error('Expected startup failure')
     const primary: unknown = failure.errors[0]
     expect(primary).toBeInstanceOf(Error)
     expect(String(primary)).toContain('ECONNREFUSED')
     const cleanup: unknown = failure.errors[1]
     expect(cleanup).toBeInstanceOf(AggregateError)
-    if (!(cleanup instanceof AggregateError))
-      throw new Error('Expected cleanup failure')
+    if (!(cleanup instanceof AggregateError)) throw new Error('Expected cleanup failure')
     expect(cleanup.errors).toContain(cleanupFailure)
   } finally {
     storageClose.mockRestore()
@@ -308,15 +371,12 @@ test('server caps owned file work without blocking ordinary reads and releases a
     }
     expect(blocked).toBe(4)
     expect((await file()).status).toBe(429)
-    expect(
-      (await fetch(`${server.url}/api/session`, { headers: login.headers }))
-        .status,
-    ).toBe(200)
+    expect((await fetch(`${server.url}/api/session`, { headers: login.headers })).status).toBe(200)
     unlock()
     await locking
-    expect(
-      (await Promise.all(requests)).map((response) => response.status),
-    ).toEqual([404, 404, 404, 404])
+    expect((await Promise.all(requests)).map((response) => response.status)).toEqual([
+      404, 404, 404, 404,
+    ])
     expect((await file()).status).toBe(404)
   } finally {
     unlock()
@@ -355,10 +415,9 @@ test('unsupported inherited MIME headers are rejected without stopping HTTP', as
           })
         ).status,
       ).toBe(415)
-      expect(
-        (await fetch(`${server.url}/api/session`, { headers: login.headers }))
-          .status,
-      ).toBe(200)
+      expect((await fetch(`${server.url}/api/session`, { headers: login.headers })).status).toBe(
+        200,
+      )
     }
     expect(
       await db
@@ -403,10 +462,9 @@ test.each(['hello\u0000world', '\ud800', '\udc00'])(
           body: JSON.stringify(input),
         })
         expect(response.status).toBe(400)
-        expect(
-          (await fetch(`${server.url}/api/session`, { headers: login.headers }))
-            .status,
-        ).toBe(200)
+        expect((await fetch(`${server.url}/api/session`, { headers: login.headers })).status).toBe(
+          200,
+        )
       }
       expect(
         await db
@@ -484,9 +542,7 @@ test('HTTP -> command -> leased Pi -> private history -> event -> stored public 
     expect(model.requests).toHaveLength(1)
     expect(model.requests[0]).toHaveProperty(
       'messages.0.content',
-      expect.stringContaining(
-        (await Bun.file(workerEnv().MODEL_PROMPT_PATH).text()).trim(),
-      ),
+      expect.stringContaining((await Bun.file(workerEnv().MODEL_PROMPT_PATH).text()).trim()),
     )
   } finally {
     await Promise.all([worker.stop(), server.stop()])
@@ -552,20 +608,13 @@ test('poison delivery fails the owning process and remains pending, without ACK 
     )
     expect(recovered[0]?.deliveriesCounter).toBe(2)
   } finally {
-    await Promise.allSettled([
-      worker.stop(),
-      ...(replacement ? [replacement.stop()] : []),
-    ])
+    await Promise.allSettled([worker.stop(), ...(replacement ? [replacement.stop()] : [])])
     const poisonID = id
     const removed =
       poisonID === undefined
         ? Promise.resolve()
         : commands
-            .xAck(
-              executionStreams.commands,
-              executionStreams.commandGroup,
-              poisonID,
-            )
+            .xAck(executionStreams.commands, executionStreams.commandGroup, poisonID)
             .then(() => commands.xDel(executionStreams.commands, poisonID))
     await removed.finally(() => {
       if (commands.isOpen) commands.destroy()
@@ -673,11 +722,8 @@ test('worker process waits for SQL cancellation before disconnecting and reports
   const [firstFailure, secondFailure] = await Promise.all([first, second])
   expect(firstFailure).toBeInstanceOf(AggregateError)
   expect(secondFailure).toBeInstanceOf(AggregateError)
-  if (!(firstFailure instanceof AggregateError))
-    throw new Error('Expected SQL failure')
-  expect(firstFailure.errors.map(String).join(' ')).toContain(
-    'statement timeout',
-  )
+  if (!(firstFailure instanceof AggregateError)) throw new Error('Expected SQL failure')
+  expect(firstFailure.errors.map(String).join(' ')).toContain('statement timeout')
 })
 
 test('established PostgreSQL response blackhole settles owned SQL and worker shutdown, closing the physical socket', async () => {
@@ -946,9 +992,9 @@ test('process S3 closes after actual slow file export and native pause settlemen
         quarantine: async () => {},
         renew: async () => 'renewed',
         appendText: async () => true,
-        complete: async () => true,
-        fail: async () => true,
-        cancel: async () => true,
+        complete: async () => 'completed',
+        fail: async () => 'failed',
+        cancel: async () => 'cancelled',
       },
       openSandbox: async () => assigned,
       fileTools: assignFileTools(objects, {

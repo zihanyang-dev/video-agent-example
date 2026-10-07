@@ -48,8 +48,7 @@ export async function startServer(
   }
   async function settle(tasks: readonly Promise<unknown>[]) {
     const settled = await Promise.allSettled(tasks)
-    for (const task of settled)
-      if (task.status === 'rejected') failures.push(task.reason)
+    for (const task of settled) if (task.status === 'rejected') failures.push(task.reason)
   }
   function close(): Promise<void> {
     // Install the shared receipt before abort or native cleanup can reenter.
@@ -86,9 +85,7 @@ export async function startServer(
       accessKeyID: env.OBJECT_STORAGE_ACCESS_KEY_ID,
       secretAccessKey: env.OBJECT_STORAGE_SECRET_ACCESS_KEY,
     }))
-    const db = (database = openDatabase(env, (cause) =>
-      fail('dbtransport', cause),
-    ))
+    const db = (database = openDatabase(env, (cause) => fail('dbtransport', cause)))
     const redisOptions = {
       url: env.REDIS_URL,
       disableOfflineQueue: true,
@@ -107,24 +104,13 @@ export async function startServer(
       connectBounded(commands, env.IO_TIMEOUT_MS),
       connectBounded(blockingReader, env.IO_TIMEOUT_MS),
     ])
-    const failed = connected.find(
-      (connection) => connection.status === 'rejected',
-    )
+    const failed = connected.find((connection) => connection.status === 'rejected')
     if (failed) throw failed.reason
     shutdown.signal.throwIfAborted()
     await commands
-      .xGroupCreate(
-        executionStreams.events,
-        executionStreams.eventGroup,
-        '0-0',
-        { MKSTREAM: true },
-      )
+      .xGroupCreate(executionStreams.events, executionStreams.eventGroup, '0-0', { MKSTREAM: true })
       .catch((cause: unknown) => {
-        if (
-          !(cause instanceof Error) ||
-          !cause.message.startsWith('BUSYGROUP ')
-        )
-          throw cause
+        if (!(cause instanceof Error) || !cause.message.startsWith('BUSYGROUP ')) throw cause
       })
     shutdown.signal.throwIfAborted()
     const route = createHTTP(db, {
@@ -164,24 +150,18 @@ export async function startServer(
           return new Response('Too many active requests. Try again.', {
             status: 429,
           })
-        const fileRequest = /\/assets(?:\/|$)/.test(
-          new URL(request.url).pathname,
-        )
+        const fileRequest = /\/assets(?:\/|$)/.test(new URL(request.url).pathname)
         if (fileRequest && [...requests.values()].filter(Boolean).length >= 4)
           return new Response('Too many active file requests. Try again.', {
             status: 429,
           })
         const pending = (async () => {
-          if (shutdown.signal.aborted)
-            return new Response('Stopping', { status: 503 })
+          if (shutdown.signal.aborted) return new Response('Stopping', { status: 503 })
           try {
             return await route(request)
           } catch (cause) {
             fail('httphandler', cause)
-            return new Response(
-              'Server unavailable. Try again after restart.',
-              { status: 503 },
-            )
+            return new Response('Server unavailable. Try again after restart.', { status: 503 })
           }
         })()
         requests.set(pending, fileRequest)
@@ -194,8 +174,7 @@ export async function startServer(
       maxBytes: env.ASSET_MAX_BYTES,
       maxFiles: env.ASSET_MAX_FILES,
     }
-    let eventStage: 'rediscommand' | 'redisread' | 'eventreceipt' =
-      'rediscommand'
+    let eventStage: 'rediscommand' | 'redisread' | 'eventreceipt' = 'rediscommand'
     async function acceptEventDeliveries() {
       const consumer = crypto.randomUUID()
       let startID = '0-0'
@@ -239,9 +218,7 @@ export async function startServer(
       }
     }
     background.push(
-      acceptEventDeliveries().catch((cause: unknown) =>
-        fail(eventStage, cause),
-      ),
+      acceptEventDeliveries().catch((cause: unknown) => fail(eventStage, cause)),
       publishPendingCommands(db, commands, {
         signal: shutdown.signal,
         pollMs: env.POLL_MS,
@@ -258,10 +235,7 @@ export async function startServer(
     try {
       await close()
     } catch (cleanup) {
-      throw new AggregateError(
-        [cause, cleanup],
-        'Server startup failed and cleanup also failed',
-      )
+      throw new AggregateError([cause, cleanup], 'Server startup failed and cleanup also failed')
     }
     throw cause
   }

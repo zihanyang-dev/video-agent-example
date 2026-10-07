@@ -1,12 +1,5 @@
 import { expect, test } from 'bun:test'
-import {
-  mkdir,
-  mkdtemp,
-  readFile,
-  readdir,
-  rm,
-  writeFile,
-} from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
@@ -38,10 +31,10 @@ test('offline document generation replaces the complete tree reproducibly in an 
     await mkdir(output)
     await writeFile(join(output, 'obsolete.txt'), 'old artifact')
     const generate = () =>
-      Bun.spawn(
-        ['bun', join(root, 'scripts/generate-api.ts'), '--outdir', output],
-        { stdout: 'ignore', stderr: 'inherit' },
-      ).exited
+      Bun.spawn(['bun', join(root, 'scripts/generate-api.ts'), '--outdir', output], {
+        stdout: 'ignore',
+        stderr: 'inherit',
+      }).exited
     expect(await generate()).toBe(0)
     const first = await snapshot(output)
     expect(first['obsolete.txt']).toBeUndefined()

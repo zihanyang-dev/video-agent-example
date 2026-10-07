@@ -1,11 +1,6 @@
 import { expect, test } from 'bun:test'
 import { runWorker } from './run-loop'
-import type {
-  AgentHarness,
-  ExecutionLease,
-  ExecutionWrites,
-  SandboxSessionPort,
-} from './execute-run'
+import type { AgentHarness, ExecutionLease, ExecutionWrites, SandboxSessionPort } from './contract'
 
 function controlledHarness() {
   const release = Promise.withResolvers<void>()
@@ -36,13 +31,13 @@ function recordingWrites() {
     appendText: async () => true,
     complete: async (lease) => {
       completed.push(lease.runID)
-      return true
+      return 'completed'
     },
     fail: async (lease) => {
       interrupted.push(lease.runID)
-      return true
+      return 'failed'
     },
-    cancel: async () => true,
+    cancel: async () => 'cancelled',
   }
   return { writes, completed, interrupted }
 }
@@ -172,6 +167,91 @@ test('a claim failure aborts and settles active runs before rejecting the worker
   expect(f.completed).toEqual([])
   expect(f.interrupted.sort()).toEqual(['run-0', 'run-1'])
 })
+
+test('shutdown during an empty claim does not wait for the polling interval', async () => {
+  const f = fixture()
+  let claims = 0
+  f.deps.claim = async () => {
+    claims += 1
+    f.controller.abort()
+    return null
+  }
+  const worker = runWorker(f.deps, { ...f.options, pollMs: 60000 })
+  const timeout = Promise.withResolvers<never>()
+  const watchdog = setTimeout(
+    () => timeout.reject(new Error('Idle worker did not settle after shutdown')),
+    500,
+  )
+  try {
+    await Promise.race([worker, timeout.promise])
+    expect(claims).toBe(1)
+    expect(f.accepted).toEqual([])
+  } finally {
+    clearTimeout(watchdog)
+    f.controller.abort()
+    f.release.resolve()
+    await worker
+  }
+}, 1000)
+
+test('each claimed run reads its current timeout without changing an active run', async () => {
+  const f = fixture()
+  const firstStarted = Promise.withResolvers<AbortSignal>()
+  const secondStarted = Promise.withResolvers<AbortSignal>()
+  const release = Promise.withResolvers<void>()
+  const options = { ...f.options, concurrency: 1, runTimeoutMs: 10000 }
+  let turns = 0
+  f.deps.harness = {
+    async turn({ signal }) {
+      turns += 1
+      if (turns === 1) {
+        firstStarted.resolve(signal)
+        await release.promise
+      } else {
+        secondStarted.resolve(signal)
+        await new Promise<void>((resolve) => {
+          if (signal.aborted) {
+            resolve()
+            return
+          }
+          signal.addEventListener('abort', () => resolve(), { once: true })
+        })
+      }
+      signal.throwIfAborted()
+      return { text: 'answer', history: [] }
+    },
+  }
+  const claim = f.deps.claim
+  f.deps.claim = async (input) => {
+    if (f.accepted.length === 2) {
+      f.controller.abort()
+      return null
+    }
+    return await claim(input)
+  }
+  const worker = runWorker(f.deps, options)
+  const timeout = Promise.withResolvers<never>()
+  const watchdog = setTimeout(
+    () => timeout.reject(new Error('Worker did not enter the expected turn')),
+    500,
+  )
+  try {
+    const firstSignal = await Promise.race([firstStarted.promise, timeout.promise])
+    options.runTimeoutMs = 20
+    expect(firstSignal.aborted).toBe(false)
+    release.resolve()
+    const secondSignal = await Promise.race([secondStarted.promise, timeout.promise])
+    await Bun.sleep(75)
+    expect(secondSignal.aborted).toBe(true)
+  } finally {
+    clearTimeout(watchdog)
+    f.controller.abort()
+    release.resolve()
+    await worker
+  }
+  expect(f.completed).toEqual(['run-0'])
+  expect(f.interrupted).toEqual([])
+}, 1000)
 
 test('a claim returning after shutdown is settled without inference', async () => {
   const f = fixture()

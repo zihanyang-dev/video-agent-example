@@ -3,23 +3,19 @@ import {
   executionCommandSchema,
   type ExecutionCommand,
   type StartCommand,
+  type CancelCommand,
 } from '@vid/contract/execution'
 import { sql, type Kysely, type Transaction } from 'kysely'
 import { enqueueEvent, eventIdentities } from './event-outbox'
 
-const commandConflict = new Error(
-  'Execution command conflicts with accepted identity',
-)
+const commandConflict = new Error('Execution command conflicts with accepted identity')
 
 /** Inbox acceptance and cancellation share conversation authority with claims.
  * Lock order is inbox identity, then conversation, then run mutation. This also
  * serializes pre-start cancellation with a later start on the same thread.
  * A conflict rolls back the inbox insert too; ACK is allowed only after commit.
  */
-export async function acceptExecutionCommand(
-  db: Kysely<DB>,
-  input: ExecutionCommand,
-) {
+export async function acceptExecutionCommand(db: Kysely<DB>, input: ExecutionCommand) {
   const command = executionCommandSchema.parse(input)
   try {
     return await db.transaction().execute((tx) => acceptCommand(tx, command))
@@ -126,7 +122,7 @@ async function acceptStart(tx: Transaction<DB>, command: StartCommand) {
     })
 }
 
-async function acceptCancel(tx: Transaction<DB>, command: ExecutionCommand) {
+async function acceptCancel(tx: Transaction<DB>, command: CancelCommand) {
   const run = await tx
     .updateTable('execution.runs')
     .set({ cancel_requested: true })

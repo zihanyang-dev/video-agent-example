@@ -1,6 +1,6 @@
 import { Type } from '@earendil-works/pi-ai'
 import { defineTool } from '@earendil-works/pi-coding-agent'
-import type { FileTools } from '../execute-run'
+import type { FileTools } from '../execution/contract'
 
 export function fileToolDefinitions(
   files: FileTools,
@@ -19,37 +19,38 @@ export function fileToolDefinitions(
         path: Type.String({ maxLength: 4 * 1024 }),
       }),
       async execute(_id, { assetID, path }, sdkSignal) {
-        signal.throwIfAborted()
-        sdkSignal?.throwIfAborted()
+        const cancellation = sdkSignal === undefined ? signal : AbortSignal.any([signal, sdkSignal])
+        cancellation.throwIfAborted()
         const file = await files.importFile({
           assetID,
           path,
-          signal: sdkSignal ?? signal,
+          signal: cancellation,
         })
         const image =
           supportsImages &&
-          ['image/png', 'image/jpeg', 'image/webp', 'image/gif'].includes(
-            file.mimeType,
-          )
+          ['image/png', 'image/jpeg', 'image/webp', 'image/gif'].includes(file.mimeType)
         const bytes = image ? file.bytes : undefined
-        if (bytes !== undefined && bytes.byteLength > 1024 * 1024) onLimit()
+        if (bytes === undefined) {
+          return {
+            content: [
+              {
+                type: 'text',
+                text: `Imported to ${path}. Use tools to inspect; importing does not establish understanding.`,
+              },
+            ],
+            details: {},
+          }
+        }
+        if (bytes.byteLength > 1024 * 1024) onLimit()
         return {
-          content:
-            bytes !== undefined
-              ? [
-                  { type: 'text', text: `Imported to ${path}` },
-                  {
-                    type: 'image',
-                    data: Buffer.from(bytes).toString('base64'),
-                    mimeType: file.mimeType,
-                  },
-                ]
-              : [
-                  {
-                    type: 'text',
-                    text: `Imported to ${path}. Use tools to inspect; importing does not establish understanding.`,
-                  },
-                ],
+          content: [
+            { type: 'text', text: `Imported to ${path}` },
+            {
+              type: 'image',
+              data: Buffer.from(bytes).toString('base64'),
+              mimeType: file.mimeType,
+            },
+          ],
           details: {},
         }
       },
@@ -65,13 +66,13 @@ export function fileToolDefinitions(
         mimeType: Type.String({ maxLength: 127 }),
       }),
       async execute(_id, { path, name, mimeType }, sdkSignal) {
-        signal.throwIfAborted()
-        sdkSignal?.throwIfAborted()
+        const cancellation = sdkSignal === undefined ? signal : AbortSignal.any([signal, sdkSignal])
+        cancellation.throwIfAborted()
         const reference = await files.exportFile({
           path,
           name,
           mimeType,
-          signal: sdkSignal ?? signal,
+          signal: cancellation,
         })
         return {
           content: [

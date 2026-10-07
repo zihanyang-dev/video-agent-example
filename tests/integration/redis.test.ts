@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { createClient, type RedisClientType } from 'redis'
+import { connectRedisFixture, destroyRedisFixture } from './redis-connection-fixture'
 
 const redisURL = process.env.REDIS_URL
 if (!redisURL) throw new Error('Dedicated REDIS_URL required')
@@ -7,8 +8,10 @@ let commands: RedisClientType
 let reader: RedisClientType
 let stream: string
 let group: string
+let admitted = false
 
 beforeEach(async () => {
+  admitted = false
   stream = `redis-test:${crypto.randomUUID()}`
   group = `group:${crypto.randomUUID()}`
   commands = createClient({
@@ -16,23 +19,24 @@ beforeEach(async () => {
     socket: { reconnectStrategy: false },
   })
   reader = createClient({ url: redisURL, socket: { reconnectStrategy: false } })
-  await Promise.all([commands.connect(), reader.connect()])
+  await connectRedisFixture(commands, reader)
+  admitted = true
 })
 afterEach(async () => {
-  if (reader.isOpen) reader.destroy()
-  try {
-    await commands.del(stream)
-  } finally {
-    if (commands.isOpen) commands.destroy()
-  }
+  const failures: unknown[] = []
+  if (admitted)
+    await commands.del(stream).catch((cause: unknown) => {
+      failures.push(cause)
+    })
+  failures.push(...destroyRedisFixture(commands, reader))
+  if (failures.length) throw new AggregateError(failures, 'Owned Redis cleanup failed')
 })
 
 async function initialize() {
   try {
     await commands.xGroupCreate(stream, group, '0-0', { MKSTREAM: true })
   } catch (cause) {
-    if (!(cause instanceof Error) || !cause.message.startsWith('BUSYGROUP '))
-      throw cause
+    if (!(cause instanceof Error) || !cause.message.startsWith('BUSYGROUP ')) throw cause
   }
 }
 async function read(count = 1, blockMs = 10) {
@@ -86,9 +90,7 @@ test('native reclaim honors idle eligibility, cursor continuation and consumer o
   const first = await commands.xAutoClaim(stream, group, 'second', 0, '0-0', {
     COUNT: 1,
   })
-  expect(first.messages).toEqual([
-    { id: firstID, message: { command: 'first' } },
-  ])
+  expect(first.messages).toEqual([{ id: firstID, message: { command: 'first' } }])
   expect(
     await commands.xAutoClaim(stream, group, 'second', 0, first.nextId, {
       COUNT: 1,
@@ -108,19 +110,18 @@ test('native reclaim preserves malformed application content and explicitly repo
     command: '{invalid json',
     unexpected: 'raw',
   })
-  const messages = [
-    { id, message: { command: '{invalid json', unexpected: 'raw' } },
-  ]
+  const messages = [{ id, message: { command: '{invalid json', unexpected: 'raw' } }]
   expect(await read()).toEqual(messages)
   expect((await commands.xPending(stream, group)).pending).toBe(1)
   expect(
-    (await commands.xAutoClaim(stream, group, 'second', 0, '0-0', { COUNT: 1 }))
-      .messages,
+    (await commands.xAutoClaim(stream, group, 'second', 0, '0-0', { COUNT: 1 })).messages,
   ).toEqual(messages)
   await commands.xDel(stream, id)
-  expect(
-    await commands.xAutoClaim(stream, group, 'second', 0, '0-0', { COUNT: 1 }),
-  ).toEqual({ nextId: '0-0', messages: [], deletedMessages: [id] })
+  expect(await commands.xAutoClaim(stream, group, 'second', 0, '0-0', { COUNT: 1 })).toEqual({
+    nextId: '0-0',
+    messages: [],
+    deletedMessages: [id],
+  })
   expect((await commands.xPending(stream, group)).pending).toBe(0)
 })
 
@@ -133,9 +134,7 @@ test('a server-confirmed blocked native reader does not block command traffic', 
     let blocked = false
     for (let attempt = 0; attempt < 50 && !blocked; attempt++) {
       const clients = await commands.clientList()
-      blocked = clients.some(
-        (client) => client.name === readerName && client.flags.includes('b'),
-      )
+      blocked = clients.some((client) => client.name === readerName && client.flags.includes('b'))
       await Bun.sleep(blocked ? 0 : 10)
     }
     expect(blocked).toBeTrue()

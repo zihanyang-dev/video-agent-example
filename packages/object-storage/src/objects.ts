@@ -1,10 +1,6 @@
 import { createHash } from 'node:crypto'
 import { Readable } from 'node:stream'
-import {
-  S3Client,
-  GetObjectCommand,
-  PutObjectCommand,
-} from '@aws-sdk/client-s3'
+import { S3Client, GetObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3'
 
 export type ObjectConnection = Readonly<{
   endpoint: string
@@ -50,19 +46,14 @@ export function connectObjects(connection: ObjectConnection) {
 
   return {
     async read(objectKey: string, maxBytes: number, signal: AbortSignal) {
-      const response = await s3.send(
-        new GetObjectCommand({ Bucket: bucket, Key: objectKey }),
-        { abortSignal: signal },
-      )
+      const response = await s3.send(new GetObjectCommand({ Bucket: bucket, Key: objectKey }), {
+        abortSignal: signal,
+      })
       const body = response.Body
-      if (!(body instanceof Readable))
-        throw new Error('Missing streaming object body')
+      if (!(body instanceof Readable)) throw new Error('Missing streaming object body')
 
       try {
-        if (
-          response.ContentLength !== undefined &&
-          response.ContentLength > maxBytes
-        )
+        if (response.ContentLength !== undefined && response.ContentLength > maxBytes)
           throw new Error('Object byte limit exceeded')
         return await boundedBytes(body, maxBytes)
       } finally {
@@ -70,12 +61,7 @@ export function connectObjects(connection: ObjectConnection) {
       }
     },
 
-    async put(
-      objectKey: string,
-      bytes: Uint8Array,
-      mimeType: string,
-      signal: AbortSignal,
-    ) {
+    async put(objectKey: string, bytes: Uint8Array, mimeType: string, signal: AbortSignal) {
       const digest = { byteLength: bytes.byteLength, sha256: sha256(bytes) }
       // Exact retries must not overwrite an assigned asset's bytes.
       await s3.send(

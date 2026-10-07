@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test'
 import { sha256, type ObjectStore } from '@vid/object-storage'
-import type { ExecutionLease, SandboxSessionPort } from '../execute-run'
+import type { ExecutionLease, SandboxSessionPort } from '../execution/contract'
 import { assignFileTools } from './files'
 import { fileToolDefinitions } from './file-tools'
 
@@ -100,9 +100,9 @@ test('unassigned asset and digest mismatch never write guest bytes', async () =>
     files.importFile({ assetID: crypto.randomUUID(), path: '/chosen', signal }),
   ).rejects.toThrow('not assigned')
   f.stored.set('allocated-input', new Uint8Array([1, 2, 3, 4, 5]))
-  expect(
-    files.importFile({ assetID: f.assetID, path: '/chosen', signal }),
-  ).rejects.toThrow('digest mismatch')
+  expect(files.importFile({ assetID: f.assetID, path: '/chosen', signal })).rejects.toThrow(
+    'digest mismatch',
+  )
   expect(f.guest.size).toBe(0)
 })
 
@@ -181,13 +181,9 @@ for (const budget of ['count', 'bytes'] as const) {
       signal: new AbortController().signal,
     }
     await files.exportFile(request)
-    const rejection = await files
-      .exportFile(request)
-      .catch((cause: unknown) => cause)
+    const rejection = await files.exportFile(request).catch((cause: unknown) => cause)
     expect(rejection).toBeInstanceOf(Error)
-    expect(rejection instanceof Error && rejection.message).toContain(
-      'budget exceeded',
-    )
+    expect(rejection instanceof Error && rejection.message).toContain('budget exceeded')
     expect(reads).toBe(1)
     expect(f.stored.size).toBe(2)
     expect(stops).toBe(0)
@@ -256,6 +252,52 @@ for (const action of ['import', 'export'] as const) {
   })
 }
 
+test('file import retains owner cancellation while an independent SDK signal is active', async () => {
+  const owner = new AbortController()
+  const sdk = new AbortController()
+  const started = Promise.withResolvers<AbortSignal>()
+  const files = {
+    assigned: [],
+    prepared: [],
+    hasUnknownOutcome: () => false,
+    importFile: async ({ signal }: { signal: AbortSignal }) => {
+      started.resolve(signal)
+      await new Promise<void>((resolve) => {
+        signal.addEventListener('abort', () => resolve(), { once: true })
+        if (signal.aborted) resolve()
+      })
+      signal.throwIfAborted()
+      return { bytes: new Uint8Array(), mimeType: 'text/plain' }
+    },
+    exportFile: async () => {
+      throw new Error('Unexpected export')
+    },
+  }
+  const tool = fileToolDefinitions(files, owner.signal, false, () => {
+    throw new Error('Unexpected budget refusal')
+  })[0]!
+  const context = {} as Parameters<typeof tool.execute>[4]
+  const reason = new Error('assigned owner cancellation')
+  const pending = tool.execute(
+    'fixture',
+    { assetID: crypto.randomUUID(), path: '/chosen' },
+    sdk.signal,
+    undefined,
+    context,
+  )
+  void pending.catch(() => {})
+  try {
+    const cancellation = await started.promise
+    owner.abort(reason)
+    expect(cancellation.aborted).toBe(true)
+    expect(cancellation.reason).toBe(reason)
+    expect(await pending.catch((cause: unknown) => cause)).toBe(reason)
+  } finally {
+    sdk.abort(reason)
+    await pending.catch(() => {})
+  }
+})
+
 test('native file definitions guard SDK cancellation before capabilities', async () => {
   let invoked = 0
   const files = {
@@ -271,14 +313,9 @@ test('native file definitions guard SDK cancellation before capabilities', async
       throw new Error('unexpected')
     },
   }
-  const definitions = fileToolDefinitions(
-    files,
-    new AbortController().signal,
-    true,
-    () => {
-      throw new Error('Unexpected byte limit')
-    },
-  )
+  const definitions = fileToolDefinitions(files, new AbortController().signal, true, () => {
+    throw new Error('Unexpected byte limit')
+  })
   const importTool = definitions[0]!
   const context = {} as Parameters<typeof importTool.execute>[4]
   const reason = new Error('owner cancellation')

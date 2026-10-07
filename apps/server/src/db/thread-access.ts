@@ -1,9 +1,6 @@
 import type { DB } from '@vid/database/types'
 import type { Transaction } from 'kysely'
-import {
-  decideThreadAccess,
-  type OwnedThread,
-} from '../conversation/submission'
+import { decideThreadAccess, type OwnedThread } from '../conversation/submission'
 export const threadUnavailable = new Error('Thread unavailable')
 export const threadConflict = new Error('Thread conflict')
 /** Every writer locks the same existing thread before checking ownership and
@@ -22,9 +19,7 @@ export async function lockThread(
     .executeTakeFirst()
   const access = decideThreadAccess(
     query.ownerID,
-    thread
-      ? { ownerID: thread.owner_id, archived: thread.archived_at !== null }
-      : null,
+    thread ? { ownerID: thread.owner_id, archived: thread.archived_at !== null } : null,
     action,
   )
   if (access === 'unavailable') throw threadUnavailable

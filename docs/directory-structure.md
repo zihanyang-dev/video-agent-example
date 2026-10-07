@@ -25,16 +25,22 @@ apps/agent/prompt.md        worker 的系统提示词
 apps/agent/src/
   main.ts                   读取配置和进程信号
   worker.ts                 连接、后台循环、活跃任务与关闭
-  execute-run.ts            执行一个已领取任务、取消与收尾
-  run-loop.ts               并发预算、领取与等待运行
-  commands.ts               Redis 命令接收、持久接受后 ACK
-  events.ts                 执行 outbox 的 Redis 投递
-  db/                       租约、环境引用、私有历史和 outbox
+  worker-health.ts          进程存活与就绪探针
+  execution/                持久执行路径，相邻测试随 owner 放置
+    contract.ts             进程内执行能力与 SQL-issued lease
+    commands.ts             Redis 命令接收、inbox 接受后 ACK
+    run-loop.ts             并发预算、领取与 owned run 收尾
+    execute-run.ts          一轮执行、取消、暂停与未知结果隔离
+    events.ts               execution outbox 的 Redis 投递
+    wait-for-poll.ts         调度与续租共用的有界等待
+    db/                     inbox、租约、fenced 写入、历史与 outbox
   harness/                  官方 pi、历史与明确工具
   sandbox/                  环境操作及具体 E2B 实现
 ```
 
-agent 没有用户侧 conversation 或资产领域。它接受已授权任务并执行；相关流程先用清楚的文件表达，不为两三个文件再建 execution、conversation 或 transport 目录。
+agent 没有用户侧 conversation 或资产领域。`execution/` 聚合完整的持久执行 owner：命令接受 → lease 领取 → 执行/隔离 → 终态与 outbox → 结果投递。这里已经有稳定的一组一起变化的流程和 SQL，不再把它们散落在进程入口旁；也不拆成 application/infrastructure/transport 多层或独立 recovery 框架。
+
+`worker.ts` 仍拥有连接、能力绑定、后台任务和停机生命周期，不移进 execution；harness/sandbox 仍拥有具体 SDK 行为。模块直接导入实际文件，旧路径没有 compatibility re-export，目录没有 barrel。`contract.ts` 是能力声明而非转发入口，与共享 wire schema 的归属不同。
 
 文件导入与交付是 harness 的工具行为：只使用已分配引用，guest 路径由 Agent 决定。没有独立 assets/workspace 模块。沙箱原生保存整个执行环境，数据库保存原生引用。
 
@@ -57,7 +63,7 @@ Redis 直接使用官方 SDK；不维护另一套 messaging SDK。存储包不�
 
 - 应用不互相 import 源码；共享包不依赖应用。
 - 纯规则不导入 HTTP、Redis、Kysely 或 SDK。HTTP 可以直接调用具名事务操作。
-- 应用 SQL 位于各自 db；迁移位于 packages/database/migrations。
+- SQL 位于明确 owner 的 db：server/src/db 与 agent/src/execution/db；迁移位于 packages/database/migrations。
 - SDK 参数只在具体适配与装配出现，消费者只要求实际使用的能力。
 - class 只为真实资源身份与生命周期存在，不为命名空间或转发存在。
 - 不创建通用 service/repository、provider registry、插件引擎、生命周期框架或 common/utils。

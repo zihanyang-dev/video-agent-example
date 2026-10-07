@@ -51,10 +51,7 @@ export async function listOwnedThreads(db: Kysely<DB>, ownerID: string) {
 
 /** Stable client ID and immutable creation title define retry identity. The
  * global UUID collision cannot disclose a foreign thread or overwrite it. */
-export async function createOwnedThread(
-  db: Kysely<DB>,
-  input: OwnedThread & { title: string },
-) {
+export async function createOwnedThread(db: Kysely<DB>, input: OwnedThread & { title: string }) {
   return await db.transaction().execute(async (tx) => {
     const inserted = await tx
       .insertInto('product.threads')
@@ -73,10 +70,7 @@ export async function createOwnedThread(
   })
 }
 
-export async function updateOwnedThread(
-  db: Kysely<DB>,
-  input: OwnedThread & { title: string },
-) {
+export async function updateOwnedThread(db: Kysely<DB>, input: OwnedThread & { title: string }) {
   return await db.transaction().execute(async (tx) => {
     await lockThread(tx, input, 'write')
     const thread = await tx
@@ -89,10 +83,7 @@ export async function updateOwnedThread(
   })
 }
 
-export async function snapshotOwnedMessages(
-  db: Kysely<DB>,
-  query: OwnedThread,
-) {
+export async function snapshotOwnedMessages(db: Kysely<DB>, query: OwnedThread) {
   try {
     return await db.transaction().execute(async (tx) => {
       await lockThread(tx, query, 'read')
@@ -140,9 +131,7 @@ export async function snapshotOwnedMessages(
         // Completion payloads can contain large text already read above. Transfer
         // only their product identity; failures retain strict envelope validation.
         .select(sql<string>`terminal.payload ->> 'kind'`.as('kind'))
-        .select(
-          sql<unknown>`terminal.payload -> 'messageID'`.as('output_message_id'),
-        )
+        .select(sql<unknown>`terminal.payload -> 'messageID'`.as('output_message_id'))
         .select(
           sql<unknown>`case when terminal.payload ->> 'kind' = 'run-failed' then terminal.payload end`.as(
             'failure_payload',
@@ -159,29 +148,19 @@ export async function snapshotOwnedMessages(
         .orderBy('start.created_at')
         .orderBy('start.run_id')
         .execute()
-      const outcomes = new Map<
-        string,
-        { runID: string; status: 'completed' | 'cancelled' }
-      >([
-        ...terminals
-          .filter((terminal) => terminal.kind === 'run-completed')
-          .map(
-            (terminal) =>
-              [
-                publicUUIDSchema.parse(terminal.output_message_id),
-                { runID: terminal.run_id, status: 'completed' },
-              ] as const,
-          ),
-        ...terminals
-          .filter((terminal) => terminal.kind === 'run-cancelled')
-          .map(
-            (terminal) =>
-              [
-                terminal.message_id,
-                { runID: terminal.run_id, status: 'cancelled' },
-              ] as const,
-          ),
-      ])
+      const outcomes = new Map<string, { runID: string; status: 'completed' | 'cancelled' }>()
+      for (const terminal of terminals) {
+        if (terminal.kind !== 'run-completed') continue
+        const messageID = publicUUIDSchema.parse(terminal.output_message_id)
+        outcomes.set(messageID, { runID: terminal.run_id, status: 'completed' })
+      }
+      for (const terminal of terminals) {
+        if (terminal.kind !== 'run-cancelled') continue
+        outcomes.set(terminal.message_id, {
+          runID: terminal.run_id,
+          status: 'cancelled',
+        })
+      }
       const messages = rows.map((message) => {
         const runOutcome = outcomes.get(message.message_id)
         return {
@@ -201,8 +180,7 @@ export async function snapshotOwnedMessages(
           .filter((terminal) => terminal.kind === 'run-failed')
           .map((failure) => {
             const event = executionEventSchema.parse(failure.failure_payload)
-            if (event.kind !== 'run-failed')
-              throw new Error('Expected a durable run failure')
+            if (event.kind !== 'run-failed') throw new Error('Expected a durable run failure')
             return {
               runID: failure.run_id,
               messageID: failure.message_id,
@@ -219,10 +197,7 @@ export async function snapshotOwnedMessages(
 
 /** Accepted commands and public receipts, never worker lease state, supply the
  * reload view. Stop requests stay active until a durable terminal arrives. */
-export async function readActiveRuns(
-  db: Kysely<DB>,
-  threadID: string,
-): Promise<ActiveRun[]> {
+export async function readActiveRuns(db: Kysely<DB>, threadID: string): Promise<ActiveRun[]> {
   const runs = await db
     .selectFrom('product.command_outbox as start')
     .select(['start.run_id', 'start.message_id'])
@@ -239,28 +214,28 @@ export async function readActiveRuns(
       )`.as('is_stopping'),
     )
     .select(
-      sql<boolean>`exists (select 1 from product.execution_events e where e.run_id = start.run_id and e.thread_id = start.thread_id and e.payload ->> 'kind' = 'run-started')`.as(
-        'is_running',
-      ),
+      sql<boolean>`exists (
+        select 1 from product.execution_events e
+        where e.run_id = start.run_id and e.thread_id = start.thread_id
+          and e.payload ->> 'kind' = 'run-started'
+      )`.as('is_running'),
     )
     .where('start.thread_id', '=', threadID)
     .where(acceptedStartIdentity())
     .where(
-      sql<boolean>`not exists (select 1 from product.execution_events e where e.run_id = start.run_id and e.thread_id = start.thread_id and e.payload ->> 'kind' in ('run-completed','run-cancelled','run-failed'))`,
+      sql<boolean>`not exists (
+        select 1 from product.execution_events e
+        where e.run_id = start.run_id and e.thread_id = start.thread_id
+          and e.payload ->> 'kind' in ('run-completed','run-cancelled','run-failed')
+      )`,
     )
     .orderBy('start.created_at')
     .execute()
   return runs.map((run) => {
-    if (!run.message_id)
-      throw new Error('Accepted start lacks message identity')
-    return {
-      runID: run.run_id,
-      messageID: run.message_id,
-      status: run.is_stopping
-        ? 'stopping'
-        : run.is_running
-          ? 'running'
-          : 'accepted',
-    }
+    if (!run.message_id) throw new Error('Accepted start lacks message identity')
+    let status: ActiveRun['status'] = 'accepted'
+    if (run.is_running) status = 'running'
+    if (run.is_stopping) status = 'stopping'
+    return { runID: run.run_id, messageID: run.message_id, status }
   })
 }

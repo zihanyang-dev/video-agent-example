@@ -14,5 +14,5 @@ bun x --no-install kysely-codegen --dialect postgres --default-schema public \
   --env-file /dev/null --include-pattern '{auth,product,execution}.*' --out-file "$staging/db.ts"
 
 # Generated artifacts are formatted by their generator, not by the source formatter.
-bun x --no-install prettier --write --ignore-path /dev/null "$staging/db.ts"
+bun x --no-install prettier --write --print-width 80 --ignore-path /dev/null "$staging/db.ts"
 mv -f "$staging/db.ts" generated/db.ts

@@ -22,15 +22,12 @@ export async function acceptExecutionEvent(
     maxFiles: assetBudgetDefaults.ASSET_MAX_FILES,
   },
 ): Promise<ReceiptOutcome> {
-  if (!Number.isSafeInteger(delivery.ordinal) || delivery.ordinal < 1)
-    return 'conflict'
+  if (!Number.isSafeInteger(delivery.ordinal) || delivery.ordinal < 1) return 'conflict'
   const event = publicEvent(delivery.event)
   try {
     return await db
       .transaction()
-      .execute((tx) =>
-        acceptReceipt(tx, { event, ordinal: delivery.ordinal }, limits),
-      )
+      .execute((tx) => acceptReceipt(tx, { event, ordinal: delivery.ordinal }, limits))
   } catch (error) {
     if (error === receiptConflict) return 'conflict'
     throw error
@@ -60,8 +57,7 @@ async function acceptReceipt(
       .orderBy('ordinal', 'asc')
       .limit(1)
       .executeTakeFirst()
-    if (prior !== undefined && prior.messageID !== event.messageID)
-      throw receiptConflict
+    if (prior !== undefined && prior.messageID !== event.messageID) throw receiptConflict
   }
 
   const inserted = await tx
@@ -90,20 +86,14 @@ async function acceptReceipt(
     return 'accepted'
   }
 
-  if (
-    event.kind === 'run-completed' &&
-    !validGeneratedAssets(event, event.assets ?? [], limits)
-  )
+  if (event.kind === 'run-completed' && !validGeneratedAssets(event, event.assets ?? [], limits))
     throw receiptConflict
   await storeFinalMessage(tx, event)
   await publishContiguousReceipts(tx, event)
   return 'accepted'
 }
 
-async function authorizedRun(
-  tx: Transaction<DB>,
-  event: ExecutionEvent,
-): Promise<boolean> {
+async function authorizedRun(tx: Transaction<DB>, event: ExecutionEvent): Promise<boolean> {
   // Serializes receipt effects AND cursor allocation through commit for this thread.
   const thread = await tx
     .selectFrom('product.threads')
@@ -170,27 +160,23 @@ async function publishContiguousReceipts(
   `.execute(tx)
 }
 
-async function storeFinalMessage(
-  tx: Transaction<DB>,
-  event: ExecutionEvent,
-): Promise<void> {
-  if (event.kind === 'run-completed') {
-    // Never adopt an existing message ID, even if its text happens to match.
-    const message = await tx
-      .insertInto('product.messages')
-      .values({
-        message_id: event.messageID,
-        thread_id: event.threadID,
-        role: 'assistant',
-        text: event.text,
-        sources: sql`${JSON.stringify(event.sources ?? [])}::jsonb`,
-      })
-      .onConflict((conflict) => conflict.doNothing())
-      .returning('message_id')
-      .executeTakeFirst()
-    if (!message) throw receiptConflict
-    await storeAssets(tx, event)
-  }
+async function storeFinalMessage(tx: Transaction<DB>, event: ExecutionEvent): Promise<void> {
+  if (event.kind !== 'run-completed') return
+  // Never adopt an existing message ID, even if its text happens to match.
+  const message = await tx
+    .insertInto('product.messages')
+    .values({
+      message_id: event.messageID,
+      thread_id: event.threadID,
+      role: 'assistant',
+      text: event.text,
+      sources: sql`${JSON.stringify(event.sources ?? [])}::jsonb`,
+    })
+    .onConflict((conflict) => conflict.doNothing())
+    .returning('message_id')
+    .executeTakeFirst()
+  if (!message) throw receiptConflict
+  await storeAssets(tx, event)
 }
 
 /** Cursor scope is one owned thread. null means the thread is missing or not owned. */
@@ -217,11 +203,7 @@ export async function readPublicEvents(
   if (!thread) return null
   const rows = await db
     .selectFrom('product.execution_events')
-    .innerJoin(
-      'product.threads',
-      'product.threads.thread_id',
-      'product.execution_events.thread_id',
-    )
+    .innerJoin('product.threads', 'product.threads.thread_id', 'product.execution_events.thread_id')
     .select(['payload', 'ordinal', 'replay_cursor'])
     .where('product.threads.owner_id', '=', query.ownerID)
     .where('product.execution_events.thread_id', '=', query.threadID)
@@ -233,8 +215,7 @@ export async function readPublicEvents(
     .limit(query.limit ?? 1000)
     .execute()
   return rows.map((row) => {
-    if (row.replay_cursor === null)
-      throw new Error('Missing published replay cursor')
+    if (row.replay_cursor === null) throw new Error('Missing published replay cursor')
     return {
       cursor: row.replay_cursor,
       ordinal: Number(row.ordinal),

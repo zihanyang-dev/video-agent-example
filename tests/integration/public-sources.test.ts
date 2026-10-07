@@ -1,15 +1,16 @@
 import { afterAll, expect, test } from 'bun:test'
 import { executionEventSchema } from '@vid/contract/execution'
 import { publicMessageSchema } from '@vid/contract/http'
-import { acceptExecutionCommand } from '../../apps/agent/src/db/command-acceptance'
-import { claimExecutionRun } from '../../apps/agent/src/db/execution-leases'
-import { bindExecutionWrites } from '../../apps/agent/src/db/run-writes'
-import { executeRun } from '../../apps/agent/src/execute-run'
+import { acceptExecutionCommand } from '../../apps/agent/src/execution/db/command-acceptance'
+import { claimExecutionRun } from '../../apps/agent/src/execution/db/execution-leases'
+import { bindExecutionWrites } from '../../apps/agent/src/execution/db/run-writes'
+import { executeRun } from '../../apps/agent/src/execution/execute-run'
 import { createPiHarness } from '../../apps/agent/src/harness/pi'
 import { acceptExecutionEvent } from '../../apps/server/src/db/execution-events'
 import { snapshotOwnedMessages } from '../../apps/server/src/db/conversations'
 import { acceptMessageIntent } from '../../apps/server/src/db/submissions'
 import { openTestDatabase, seedTestUser } from './database-fixture'
+import { modelStream } from './model-stream-fixture'
 
 const { db, close } = openTestDatabase()
 const threads: string[] = []
@@ -22,38 +23,14 @@ afterAll(async () => {
         .set({ active_run_id: null, lease_owner: null, lease_until: null })
         .where('thread_id', '=', threadID)
         .execute()
-      await db
-        .deleteFrom('execution.event_outbox')
-        .where('thread_id', '=', threadID)
-        .execute()
-      await db
-        .deleteFrom('execution.runs')
-        .where('thread_id', '=', threadID)
-        .execute()
-      await db
-        .deleteFrom('execution.command_inbox')
-        .where('thread_id', '=', threadID)
-        .execute()
-      await db
-        .deleteFrom('execution.conversations')
-        .where('thread_id', '=', threadID)
-        .execute()
-      await db
-        .deleteFrom('product.execution_events')
-        .where('thread_id', '=', threadID)
-        .execute()
-      await db
-        .deleteFrom('product.command_outbox')
-        .where('thread_id', '=', threadID)
-        .execute()
-      await db
-        .deleteFrom('product.messages')
-        .where('thread_id', '=', threadID)
-        .execute()
-      await db
-        .deleteFrom('product.threads')
-        .where('thread_id', '=', threadID)
-        .execute()
+      await db.deleteFrom('execution.event_outbox').where('thread_id', '=', threadID).execute()
+      await db.deleteFrom('execution.runs').where('thread_id', '=', threadID).execute()
+      await db.deleteFrom('execution.command_inbox').where('thread_id', '=', threadID).execute()
+      await db.deleteFrom('execution.conversations').where('thread_id', '=', threadID).execute()
+      await db.deleteFrom('product.execution_events').where('thread_id', '=', threadID).execute()
+      await db.deleteFrom('product.command_outbox').where('thread_id', '=', threadID).execute()
+      await db.deleteFrom('product.messages').where('thread_id', '=', threadID).execute()
+      await db.deleteFrom('product.threads').where('thread_id', '=', threadID).execute()
     }
     await db.deleteFrom('auth.user').where('id', '=', ownerID).execute()
   } finally {
@@ -97,8 +74,7 @@ test('actual native sources survive canonical completion SQL and immutable snaps
     ownerID: 'sources-worker',
     leaseMs: 10000,
   })
-  if (!lease || lease.runID !== intent.runID)
-    throw new Error('Expected assigned lease')
+  if (!lease || lease.runID !== intent.runID) throw new Error('Expected assigned lease')
   let requests = 0
   const model = Bun.serve({
     hostname: '127.0.0.1',
@@ -133,20 +109,16 @@ test('actual native sources survive canonical completion SQL and immutable snaps
         { delta, finish_reason: null },
         { delta: {}, finish_reason: requests === 1 ? 'tool_calls' : 'stop' },
       ]
-      return new Response(
-        chunks
-          .map(
-            (chunk) =>
-              `data: ${JSON.stringify({ id: 'fixture', model: 'fixture', choices: [{ index: 0, ...chunk }] })}\n\n`,
-          )
-          .join('') + 'data: [DONE]\n\n',
-        { headers: { 'content-type': 'text/event-stream' } },
+      return modelStream(
+        chunks.map((chunk) => ({
+          id: 'fixture',
+          model: 'fixture',
+          choices: [{ index: 0, ...chunk }],
+        })),
       )
     },
   })
-  const sources = [
-    { title: 'Public source', url: 'https://example.org/source' },
-  ]
+  const sources = [{ title: 'Public source', url: 'https://example.org/source' }]
   try {
     const outcome = await executeRun(
       lease,
@@ -198,8 +170,7 @@ test('actual native sources survive canonical completion SQL and immutable snaps
     const completed = outbox
       .map((row) => executionEventSchema.parse(row.event))
       .find((event) => event.kind === 'run-completed')
-    if (!completed || completed.kind !== 'run-completed')
-      throw new Error('Missing completion')
+    if (!completed || completed.kind !== 'run-completed') throw new Error('Missing completion')
     expect(completed.sources).toEqual(sources)
     expect(JSON.stringify(completed)).not.toContain('PRIVATE')
     for (const row of outbox)
@@ -210,9 +181,7 @@ test('actual native sources survive canonical completion SQL and immutable snaps
         }),
       ).toBe('accepted')
     const snapshot = await snapshotOwnedMessages(db, intent)
-    const final = snapshot?.messages.find(
-      (message) => message.role === 'assistant',
-    )
+    const final = snapshot?.messages.find((message) => message.role === 'assistant')
     expect(final).toMatchObject({ text: 'Final answer', sources })
     expect(publicMessageSchema.safeParse(final).success).toBe(true)
     expect(JSON.stringify(final)).not.toContain('PRIVATE')

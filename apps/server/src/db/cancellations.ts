@@ -2,27 +2,17 @@ import { readActiveRuns, publicThread } from './conversations'
 import { acceptedStartIdentity } from './accepted-start'
 import { lockThread, threadUnavailable } from './thread-access'
 import type { DB } from '@vid/database/types'
-import {
-  cancelCommandSchema,
-  type CancelCommand,
-} from '@vid/contract/execution'
+import { cancelCommandSchema, type CancelCommand } from '@vid/contract/execution'
 import { sql, type Kysely, type Transaction } from 'kysely'
 import type { OwnedThread } from '../conversation/submission'
 
 export type OwnedRun = OwnedThread & Readonly<{ runID: string }>
 export type CancelRun = OwnedRun & Readonly<{ commandID: string }>
 
-export async function hasAcceptedRun(
-  db: Kysely<DB>,
-  { ownerID, threadID, runID }: OwnedRun,
-) {
+export async function hasAcceptedRun(db: Kysely<DB>, { ownerID, threadID, runID }: OwnedRun) {
   const row = await db
     .selectFrom('product.command_outbox as start')
-    .innerJoin(
-      'product.threads as thread',
-      'thread.thread_id',
-      'start.thread_id',
-    )
+    .innerJoin('product.threads as thread', 'thread.thread_id', 'start.thread_id')
     .select('start.command_id')
     .where('thread.owner_id', '=', ownerID)
     .where('start.thread_id', '=', threadID)
@@ -81,11 +71,7 @@ async function replayCancellation(
   // rather than returning an observable conflict from another user's run.
   const scope = await tx
     .selectFrom('product.command_outbox as command')
-    .innerJoin(
-      'product.threads as thread',
-      'thread.thread_id',
-      'command.thread_id',
-    )
+    .innerJoin('product.threads as thread', 'thread.thread_id', 'command.thread_id')
     .select('thread.owner_id')
     .where('command.command_id', '=', command.commandID)
     .executeTakeFirst()
@@ -99,8 +85,7 @@ async function replayCancellation(
     .where('message_id', 'is', null)
     .executeTakeFirst()
   const retained = cancelCommandSchema.safeParse(replay?.command)
-  return retained.success &&
-    JSON.stringify(retained.data) === JSON.stringify(command)
+  return retained.success && JSON.stringify(retained.data) === JSON.stringify(command)
     ? 'accepted'
     : 'conflict'
 }

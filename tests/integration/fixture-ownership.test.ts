@@ -43,18 +43,13 @@ test('actual unmarked target rejects mutation even with the launcher token', asy
     await target.connect()
     await target.query(`CREATE TABLE "${table}" (value integer)`)
     fixture = openTestDatabase(4, url.toString())
-    const error = await sql`insert into ${sql.id(table)} values (1)`
-      .execute(fixture.db)
-      .then(
-        () => undefined,
-        (cause: unknown) => cause,
-      )
+    const error = await sql`insert into ${sql.id(table)} values (1)`.execute(fixture.db).then(
+      () => undefined,
+      (cause: unknown) => cause,
+    )
     expect(error).toBeInstanceOf(Error)
     expect((error as Error).message).toBe('Owned test database required')
-    expect(
-      (await target.query(`SELECT count(*)::int AS n FROM "${table}"`)).rows[0]
-        .n,
-    ).toBe(0)
+    expect((await target.query(`SELECT count(*)::int AS n FROM "${table}"`)).rows[0].n).toBe(0)
   } finally {
     restore()
     await settleTestCleanup([

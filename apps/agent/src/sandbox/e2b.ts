@@ -1,10 +1,6 @@
 import { sandboxRequestTimeoutMs } from '@vid/config'
 import { CommandExitError, FileNotFoundError, E2B, type Sandbox } from 'e2b'
-import {
-  type ExecutionLease,
-  type SandboxSessionPort,
-  type SandboxTools,
-} from '../execute-run'
+import type { ExecutionLease, SandboxSessionPort, SandboxTools } from '../execution/contract'
 
 export type E2BSandboxOptions = Readonly<{
   apiURL: string
@@ -65,7 +61,7 @@ class E2BSandboxSession implements SandboxSessionPort {
     private readonly owner: AbortSignal,
     private readonly timeoutMs: number,
   ) {
-    this.nativeRef = { provider: 'e2b', id: remote.sandboxId }
+    this.nativeRef = Object.freeze({ provider: 'e2b', id: remote.sandboxId })
   }
 
   close(): Promise<void> {
@@ -104,17 +100,13 @@ class E2BSandboxSession implements SandboxSessionPort {
     return await this.operation(
       signal,
       async (cancellation) => {
-        const deadline = AbortSignal.any([
-          cancellation,
-          AbortSignal.timeout(this.timeoutMs),
-        ])
+        const deadline = AbortSignal.any([cancellation, AbortSignal.timeout(this.timeoutMs)])
         let outputBytes = 0
         // The official SDK retains the current decoded event before callbacks.
         // This caps continued output, not transport frames or peak SDK memory.
         const onOutput = (chunk: string) => {
           outputBytes += Buffer.byteLength(chunk)
-          if (outputBytes > 256 * 1024)
-            throw new Error('Sandbox command output limit exceeded')
+          if (outputBytes > 256 * 1024) throw new Error('Sandbox command output limit exceeded')
         }
         const handle = await this.remote.commands.run(command, {
           background: true,
@@ -157,16 +149,13 @@ class E2BSandboxSession implements SandboxSessionPort {
   }
 
   async read({ path, signal }: Parameters<SandboxTools['read']>[0]) {
-    return new TextDecoder().decode(
-      await this.readBytes(path, signal, 256 * 1024),
-    )
+    return new TextDecoder().decode(await this.readBytes(path, signal, 256 * 1024))
   }
 
   async write({ path, content, signal }: Parameters<SandboxTools['write']>[0]) {
     await this.operation(
       signal,
-      (cancellation) =>
-        this.remote.files.write(path, content, { signal: cancellation }),
+      (cancellation) => this.remote.files.write(path, content, { signal: cancellation }),
       true,
     )
   }
@@ -176,8 +165,7 @@ class E2BSandboxSession implements SandboxSessionPort {
       const stream = await this.remote.files
         .read(path, { format: 'stream', signal: cancellation })
         .catch((error: unknown) => {
-          if (error instanceof FileNotFoundError)
-            throw new Error('Sandbox file not found')
+          if (error instanceof FileNotFoundError) throw new Error('Sandbox file not found')
           throw error
         })
       const reader = stream.getReader()
@@ -207,8 +195,7 @@ class E2BSandboxSession implements SandboxSessionPort {
     new Uint8Array(buffer).set(bytes)
     await this.operation(
       signal,
-      (cancellation) =>
-        this.remote.files.write(path, buffer, { signal: cancellation }),
+      (cancellation) => this.remote.files.write(path, buffer, { signal: cancellation }),
       true,
     )
   }

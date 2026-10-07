@@ -23,10 +23,7 @@ type Observation = Readonly<{
 }>
 type Fact = NonNullable<Awaited<ReturnType<typeof readPublicEvents>>>[number]
 
-export async function observeEvents(
-  db: Kysely<DB>,
-  query: Observation,
-): Promise<Response> {
+export async function observeEvents(db: Kysely<DB>, query: Observation): Promise<Response> {
   const subscription = new PublicEventSubscription(db, query)
   return await subscription.open()
 }
@@ -84,11 +81,7 @@ class PublicEventSubscription {
       {
         start: (controller) => {
           this.controller = controller
-          if (
-            this.closed ||
-            this.query.requestSignal.aborted ||
-            this.query.processSignal.aborted
-          )
+          if (this.closed || this.query.requestSignal.aborted || this.query.processSignal.aborted)
             this.stop()
         },
         pull: (controller) => {
@@ -114,19 +107,12 @@ class PublicEventSubscription {
   }
 
   private async reconstructObservation() {
-    const rebuilt = await reconstruct(
-      this.db,
-      this.query,
-      this.events,
-      (stage) => {
-        this.stage = stage
-      },
-    )
+    const rebuilt = await reconstruct(this.db, this.query, this.events, (stage) => {
+      this.stage = stage
+    })
     this.stage = 'fold'
     this.events =
-      rebuilt.state.phase === 'unopened'
-        ? { ...rebuilt.state, phase: 'open' }
-        : rebuilt.state
+      rebuilt.state.phase === 'unopened' ? { ...rebuilt.state, phase: 'open' } : rebuilt.state
     this.initialFrames = [
       {
         type: EventType.RUN_STARTED,
@@ -139,9 +125,7 @@ class PublicEventSubscription {
       // A caller's cursor is not a new fact. Even terminal reconnects publish
       // the durable terminal's actual cursor, never the requested offset.
       this.cursor = rebuilt.terminalFact.cursor
-      this.initialFrames.push(
-        ...projectPublicRunEvent(this.events, rebuilt.terminalFact.event),
-      )
+      this.initialFrames.push(...projectPublicRunEvent(this.events, rebuilt.terminalFact.event))
     }
   }
 
@@ -166,9 +150,7 @@ class PublicEventSubscription {
     this.controller = undefined
   }
 
-  private async readNext(
-    controller: ReadableStreamDefaultController<Uint8Array>,
-  ) {
+  private async readNext(controller: ReadableStreamDefaultController<Uint8Array>) {
     if (this.closed) return
     try {
       const chunk = await this.readNextFact()
@@ -180,9 +162,7 @@ class PublicEventSubscription {
       // Keep diagnostics classified: the query's private parameters and driver
       // error text are not public stream prose or log fields.
       this.diagnose(cause)
-      controller.error(
-        new Error('Event stream unavailable. Reconnect to try again.'),
-      )
+      controller.error(new Error('Event stream unavailable. Reconnect to try again.'))
       this.controller = undefined
       this.stop()
     }
@@ -193,8 +173,7 @@ class PublicEventSubscription {
   private lifecycleFrames(frames: Event[]): Event[] {
     const ordered: Event[] = []
     for (const frame of frames) {
-      if (frame.type === EventType.TEXT_MESSAGE_START)
-        this.openedMessages.add(frame.messageId)
+      if (frame.type === EventType.TEXT_MESSAGE_START) this.openedMessages.add(frame.messageId)
       if (
         (frame.type === EventType.TEXT_MESSAGE_CONTENT ||
           frame.type === EventType.TEXT_MESSAGE_END) &&
@@ -255,11 +234,7 @@ class PublicEventSubscription {
       const mapped = mapPublicRunEvent(this.events, fact.event)
       this.events = mapped.state
       return this.utf8.encode(
-        encodeFact(
-          fact.cursor,
-          this.lifecycleFrames(mapped.frames),
-          this.encoder,
-        ),
+        encodeFact(fact.cursor, this.lifecycleFrames(mapped.frames), this.encoder),
       )
     }
     return null
@@ -281,8 +256,7 @@ async function reconstruct(
   let replay: ReplayState = { state, cursor: '0', terminalFact: undefined }
   const boundary = BigInt(query.after)
   while (BigInt(replay.cursor) < boundary) {
-    if (query.requestSignal.aborted || query.processSignal.aborted)
-      return replay
+    if (query.requestSignal.aborted || query.processSignal.aborted) return replay
     observeStage('authority')
     if (!(await query.authorize())) return replay
     observeStage('read')
@@ -293,8 +267,7 @@ async function reconstruct(
       after: replay.cursor,
       limit: 100,
     })
-    if (query.requestSignal.aborted || query.processSignal.aborted)
-      return replay
+    if (query.requestSignal.aborted || query.processSignal.aborted) return replay
     observeStage('authority')
     if (!(await query.authorize())) return replay
     if (!facts?.length) return replay
@@ -334,9 +307,10 @@ function encodeFact(cursor: string, frames: Event[], encoder: EventEncoder) {
   let encoded = ''
   for (const frame of frames.slice(0, -1)) encoded += encoder.encodeSSE(frame)
   const final = frames.at(-1)
-  if (final)
-    encoded += `${encoder.encodeSSE({ ...final, metadata: { ...final.metadata, cursor } }).trimEnd()}\nid: ${cursor}\n\n`
-  return encoded
+  if (!final) return encoded
+  const lastFrame = { ...final, metadata: { ...final.metadata, cursor } }
+  const finalSSE = encoder.encodeSSE(lastFrame).trimEnd()
+  return `${encoded}${finalSSE}\nid: ${cursor}\n\n`
 }
 
 function waitForPoll(ms: number, signal: AbortSignal): Promise<void> {

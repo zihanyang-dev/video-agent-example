@@ -1,9 +1,5 @@
 import { expect, test } from 'bun:test'
-import {
-  collectRequestBody,
-  readBody,
-  requestBodyRejection,
-} from './request-body'
+import { collectRequestBody, readBody, requestBodyRejection } from './request-body'
 
 const policy = { signal: new AbortController().signal, timeoutMs: 1000 }
 
@@ -21,9 +17,9 @@ test('JSON body size comes from bytes, not Content-Length', async () => {
     headers: { 'content-length': '2' },
     body: JSON.stringify('x'.repeat(65536)),
   })
-  expect(
-    await readBody(request, policy).catch((cause: unknown) => cause),
-  ).toMatchObject({ name: 'QuotaExceededError' })
+  expect(await readBody(request, policy).catch((cause: unknown) => cause)).toMatchObject({
+    name: 'QuotaExceededError',
+  })
   expect(
     await readBody(
       new Request('http://localhost', {
@@ -62,9 +58,7 @@ test('collection counts every chunk and releases an oversized body', async () =>
     },
   })
   expect(
-    await collectRequestBody(body, 3, new AbortController().signal).catch(
-      () => null,
-    ),
+    await collectRequestBody(body, 3, new AbortController().signal).catch(() => null),
   ).toBeNull()
   expect(cancelled).toBe(true)
   expect(body.locked).toBe(false)
@@ -125,10 +119,10 @@ test('progressing JSON stops on shutdown and awaits underlying cancellation', as
     },
   })
   let settled = false
-  const result = readBody(
-    new Request('http://localhost', { method: 'POST', body }),
-    { signal: shutdown.signal, timeoutMs: 1000 },
-  )
+  const result = readBody(new Request('http://localhost', { method: 'POST', body }), {
+    signal: shutdown.signal,
+    timeoutMs: 1000,
+  })
     .catch((cause: unknown) => cause)
     .finally(() => {
       settled = true
@@ -137,10 +131,7 @@ test('progressing JSON stops on shutdown and awaits underlying cancellation', as
     await progressed.promise
     shutdown.abort()
     expect(
-      await Promise.race([
-        cancellation.promise.then(() => true),
-        Bun.sleep(150).then(() => false),
-      ]),
+      await Promise.race([cancellation.promise.then(() => true), Bun.sleep(150).then(() => false)]),
     ).toBe(true)
     expect(chunks).toBe(2)
     expect(settled).toBe(false)
@@ -169,14 +160,14 @@ test('a stalled JSON body uses its deadline rather than malformed-input recovery
       source = controller
     },
   })
-  const result = readBody(
-    new Request('http://localhost', { method: 'POST', body }),
-    { signal: new AbortController().signal, timeoutMs: 10 },
-  ).catch((cause: unknown) => cause)
+  const result = readBody(new Request('http://localhost', { method: 'POST', body }), {
+    signal: new AbortController().signal,
+    timeoutMs: 10,
+  }).catch((cause: unknown) => cause)
   try {
-    expect(
-      await Promise.race([result, Bun.sleep(150).then(() => null)]),
-    ).toMatchObject({ name: 'TimeoutError' })
+    expect(await Promise.race([result, Bun.sleep(150).then(() => null)])).toMatchObject({
+      name: 'TimeoutError',
+    })
     expect(body.locked).toBe(false)
   } finally {
     try {
@@ -196,15 +187,12 @@ test('process shutdown cancels an unfinished JSON reader', async () => {
       cancelled = true
     },
   })
-  const result = readBody(
-    new Request('http://localhost', { method: 'POST', body }),
-    { signal: shutdown.signal, timeoutMs: 1000 },
-  ).catch((cause: unknown) => cause)
+  const result = readBody(new Request('http://localhost', { method: 'POST', body }), {
+    signal: shutdown.signal,
+    timeoutMs: 1000,
+  }).catch((cause: unknown) => cause)
   shutdown.abort()
-  const finished = await Promise.race([
-    result.then(() => true),
-    Bun.sleep(150).then(() => false),
-  ])
+  const finished = await Promise.race([result.then(() => true), Bun.sleep(150).then(() => false)])
   expect(finished).toBe(true)
   expect(cancelled).toBe(true)
   expect(body.locked).toBe(false)
@@ -221,11 +209,9 @@ test('native errored body keeps private details out of its HTTP rejection', asyn
       cancelCalls++
     },
   })
-  const failure = await collectRequestBody(
-    body,
-    3,
-    new AbortController().signal,
-  ).catch((cause: unknown) => cause)
+  const failure = await collectRequestBody(body, 3, new AbortController().signal).catch(
+    (cause: unknown) => cause,
+  )
   expect(failure).toMatchObject({ name: 'NetworkError' })
   expect(body.locked).toBe(false)
   // An already errored native stream does not call underlying cancel().

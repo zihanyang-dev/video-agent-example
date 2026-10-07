@@ -20,9 +20,7 @@ import {
 const id = 'A4C9C419-1C7F-4F87-863D-4261C6089985'
 
 test('public creation canonicalizes retry identity and trims the thread title', () => {
-  expect(
-    threadCreationSchema.parse({ threadID: id, title: '  Film  ' }),
-  ).toEqual({
+  expect(threadCreationSchema.parse({ threadID: id, title: '  Film  ' })).toEqual({
     threadID: id.toLowerCase(),
     title: 'Film',
   })
@@ -35,16 +33,8 @@ test.each(['hello\u0000world', '\u0000', '\ud800', '\udc00'])(
     addFormats(ajv)
     const schemas = publicJSONSchemas()
     for (const [schema, document, input] of [
-      [
-        messageSubmissionSchema,
-        schemas.MessageSubmissionInput!,
-        { messageID: id, text },
-      ],
-      [
-        threadCreationSchema,
-        schemas.ThreadCreationInput!,
-        { threadID: id, title: text },
-      ],
+      [messageSubmissionSchema, schemas.MessageSubmissionInput!, { messageID: id, text }],
+      [threadCreationSchema, schemas.ThreadCreationInput!, { threadID: id, title: text }],
       [threadUpdateSchema, schemas.ThreadUpdateInput!, { title: text }],
     ] as const) {
       expect(schema.safeParse(input).success).toBe(false)
@@ -56,18 +46,12 @@ test.each(['hello\u0000world', '\u0000', '\ud800', '\udc00'])(
 test('public persisted text preserves valid Unicode without lossy replacement', () => {
   const text = '  Film 🎬 电影 𝄞\n  '
   expect(messageSubmissionSchema.parse({ messageID: id, text }).text).toBe(text)
-  expect(threadCreationSchema.parse({ threadID: id, title: text }).title).toBe(
-    text.trim(),
-  )
+  expect(threadCreationSchema.parse({ threadID: id, title: text }).title).toBe(text.trim())
   const ajv = new Ajv({ strict: false })
   addFormats(ajv)
   const schemas = publicJSONSchemas()
-  expect(
-    ajv.compile(schemas.MessageSubmissionInput!)({ messageID: id, text }),
-  ).toBe(true)
-  expect(
-    ajv.compile(schemas.ThreadCreationInput!)({ threadID: id, title: text }),
-  ).toBe(true)
+  expect(ajv.compile(schemas.MessageSubmissionInput!)({ messageID: id, text })).toBe(true)
+  expect(ajv.compile(schemas.ThreadCreationInput!)({ threadID: id, title: text })).toBe(true)
 })
 
 test('public requests cannot supply an authenticated actor or ownership', () => {
@@ -95,9 +79,7 @@ test('an asset-only message is input, but an empty message is not', () => {
       assetIDs: [id],
     }).success,
   ).toBe(true)
-  expect(
-    messageSubmissionSchema.safeParse({ messageID: id, text: '  ' }).success,
-  ).toBe(false)
+  expect(messageSubmissionSchema.safeParse({ messageID: id, text: '  ' }).success).toBe(false)
 })
 
 test('an asset reference occurs once and never expands beyond the message budget', () => {
@@ -162,9 +144,9 @@ test('public file DTOs reject private allocation authority and accepted results 
     commandID: id.toLowerCase(),
     runID: id.toLowerCase(),
   })
-  expect(
-    cancellationAcceptedSchema.parse({ commandID: id, runID: id }).runID,
-  ).toBe(id.toLowerCase())
+  expect(cancellationAcceptedSchema.parse({ commandID: id, runID: id }).runID).toBe(
+    id.toLowerCase(),
+  )
   const asset = {
     assetID: id,
     source: 'upload',
@@ -174,13 +156,8 @@ test('public file DTOs reject private allocation authority and accepted results 
     createdAt: '2026-10-04T00:00:00.000Z',
   }
   expect(publicAssetSchema.safeParse(asset).success).toBe(true)
-  for (const privateField of [
-    { objectKey: 'private' },
-    { sha256: 'a'.repeat(64) },
-  ])
-    expect(
-      publicAssetSchema.safeParse({ ...asset, ...privateField }).success,
-    ).toBe(false)
+  for (const privateField of [{ objectKey: 'private' }, { sha256: 'a'.repeat(64) }])
+    expect(publicAssetSchema.safeParse({ ...asset, ...privateField }).success).toBe(false)
   expect(
     messageSubmissionSchema.safeParse({
       messageID: id,
@@ -194,9 +171,7 @@ test('native DTOs preserve optional snapshots, readonly sources and defaulted ou
   expectTypeOf<PublicMessage['sources']>().toEqualTypeOf<
     ReadonlyArray<Readonly<{ title: string; url: string }>> | undefined
   >()
-  expectTypeOf<PublicMessage['assets']>().toEqualTypeOf<
-    PublicAsset[] | undefined
-  >()
+  expectTypeOf<PublicMessage['assets']>().toEqualTypeOf<PublicAsset[] | undefined>()
   expectTypeOf<MessagesResponse['messages']>().toEqualTypeOf<PublicMessage[]>()
   const submission = messageSubmissionSchema.parse({
     messageID: id,
@@ -253,9 +228,7 @@ test('generated cross-language document resolves every local reference and valid
 function schemaReferences(value: unknown): string[] {
   if (typeof value !== 'object' || value === null) return []
   return Object.entries(value).flatMap(([key, child]) =>
-    key === '$ref' && typeof child === 'string'
-      ? [child]
-      : schemaReferences(child),
+    key === '$ref' && typeof child === 'string' ? [child] : schemaReferences(child),
   )
 }
 
@@ -317,9 +290,7 @@ test('public assets discriminate upload from original generated message and run 
     [{ source: 'upload', messageID: id }, false],
     [{ source: 'upload', runID: id }, false],
   ] as const) {
-    expect(publicAssetSchema.safeParse({ ...base, ...extra }).success).toBe(
-      valid,
-    )
+    expect(publicAssetSchema.safeParse({ ...base, ...extra }).success).toBe(valid)
     expect(validate({ ...base, ...extra })).toBe(valid)
   }
 })

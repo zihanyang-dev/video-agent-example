@@ -1,9 +1,6 @@
 import type { DB } from '@vid/database/types'
-import {
-  executionDeliverySchema,
-  type ExecutionDelivery,
-} from '@vid/contract/execution'
-import type { Kysely, Transaction } from 'kysely'
+import { executionDeliverySchema, type ExecutionDelivery } from '@vid/contract/execution'
+import { sql, type Kysely, type Transaction } from 'kysely'
 
 type Publication = Readonly<{
   eventID: string
@@ -21,9 +18,7 @@ export async function publishEvent(
   db: Kysely<DB>,
   publication: Publication,
 ): Promise<'published' | 'skipped'> {
-  return await db
-    .transaction()
-    .execute((tx) => publishLockedEvent(tx, publication))
+  return await db.transaction().execute((tx) => publishLockedEvent(tx, publication))
 }
 
 async function publishLockedEvent(
@@ -81,4 +76,35 @@ export async function pendingEventIDs(db: Kysely<DB>) {
     .orderBy('ordinal')
     .limit(32)
     .execute()
+}
+
+/** Delete at most 128 expired publications per cadence, using database time.
+ * Active runs retain their ordinal-allocation evidence until terminal. The
+ * indexed candidate window also bounds run lookups; active candidates may
+ * defer later cleanup. DB statement/lock deadlines still bound waiting. */
+export async function sweepPublishedEvents(db: Kysely<DB>, retentionMs: number) {
+  const result = await db
+    .with('expired', (query) =>
+      query
+        .selectFrom('execution.event_outbox')
+        .select('event_id')
+        .where(
+          'published_at',
+          '<',
+          sql<Date>`statement_timestamp() - (${retentionMs} * interval '1 millisecond')`,
+        )
+        .orderBy('published_at')
+        .orderBy('event_id')
+        .limit(128),
+    )
+    .deleteFrom('execution.event_outbox')
+    .where('event_id', 'in', (query) => query.selectFrom('expired').select('event_id'))
+    .where('run_id', 'in', (query) =>
+      query
+        .selectFrom('execution.runs')
+        .select('run_id')
+        .where('status', 'in', ['completed', 'failed', 'cancelled']),
+    )
+    .executeTakeFirst()
+  return Number(result.numDeletedRows ?? 0)
 }

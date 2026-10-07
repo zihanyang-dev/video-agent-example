@@ -28,9 +28,7 @@ export async function consumeEventBatch(
 ): Promise<number> {
   // XAUTOCLAIM itself removes deleted entries from the PEL; never hide data loss.
   if (batch.deletedMessages?.length)
-    throw new Error(
-      `Deleted pending delivery payloads: ${batch.deletedMessages.join(', ')}`,
-    )
+    throw new Error(`Deleted pending delivery payloads: ${batch.deletedMessages.join(', ')}`)
 
   let accepted = 0
   for (const entry of batch.messages) {
@@ -39,8 +37,7 @@ export async function consumeEventBatch(
     if (batch.signal?.aborted) break
     if (entry === null) throw new Error('Deleted pending delivery payload')
     const body = entry.message?.delivery
-    if (body === undefined)
-      throw new Error(`Missing pending delivery payload: ${entry.id}`)
+    if (body === undefined) throw new Error(`Missing pending delivery payload: ${entry.id}`)
     let delivery: ExecutionDelivery
     try {
       delivery = inboundExecutionDeliverySchema.parse(JSON.parse(body))
@@ -51,11 +48,7 @@ export async function consumeEventBatch(
     const outcome = await acceptExecutionEvent(db, delivery, batch.assetLimits)
     if (outcome !== 'accepted')
       throw new Error(`Execution delivery rejected (${outcome}): ${entry.id}`)
-    await batch.commands.xAck(
-      executionStreams.events,
-      executionStreams.eventGroup,
-      entry.id,
-    )
+    await batch.commands.xAck(executionStreams.events, executionStreams.eventGroup, entry.id)
     accepted += 1
   }
   return accepted

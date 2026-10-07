@@ -2,6 +2,7 @@ import { z } from 'zod'
 import { webSourcesSchema } from './web-source'
 import { fileNameSchema } from './file-name'
 import { publicFailureReasonSchema } from './failure-reason'
+import { ASSET_MAX_INPUT_FILES } from './asset-limits'
 
 const file = {
   objectKey: z.string().min(1).max(1024),
@@ -22,24 +23,17 @@ export const assetReferenceSchema = z
   .readonly()
 export type AssetReference = z.infer<typeof assetReferenceSchema>
 
-const ASSET_MAX_INPUT_FILES = 16
 export const ASSET_MAX_OUTPUT_FILES = 32
 
 const startInputSchema = z
   .strictObject({
     messageID: z.uuid().toLowerCase(),
     text: z.string(),
-    assets: z
-      .array(assetReferenceSchema)
-      .min(1)
-      .max(ASSET_MAX_INPUT_FILES)
-      .readonly()
-      .optional(),
+    assets: z.array(assetReferenceSchema).min(1).max(ASSET_MAX_INPUT_FILES).readonly().optional(),
   })
-  .refine(
-    (input) => input.text.trim().length > 0 || input.assets !== undefined,
-    { error: 'Message text must not be blank' },
-  )
+  .refine((input) => input.text.trim().length > 0 || input.assets !== undefined, {
+    error: 'Message text must not be blank',
+  })
   .readonly()
 
 /**
@@ -92,11 +86,7 @@ const completedEventSchema = z
     sources: webSourcesSchema.optional(),
     messageID: z.uuid().toLowerCase(),
     text: z.string(),
-    assets: z
-      .array(assetReferenceSchema)
-      .max(ASSET_MAX_OUTPUT_FILES)
-      .readonly()
-      .optional(),
+    assets: z.array(assetReferenceSchema).max(ASSET_MAX_OUTPUT_FILES).readonly().optional(),
   })
   .readonly()
 
@@ -113,9 +103,7 @@ export const executionEventSchema = z.discriminatedUnion('kind', [
     })
     .readonly(),
   completedEventSchema,
-  z
-    .strictObject({ ...identities, kind: z.literal('run-cancelled') })
-    .readonly(),
+  z.strictObject({ ...identities, kind: z.literal('run-cancelled') }).readonly(),
   z
     .strictObject({
       ...identities,
@@ -152,10 +140,7 @@ const legacyStartInputSchema = z
   .strictObject({
     messageID: z.uuid().toLowerCase(),
     text: z.string(),
-    materials: z
-      .array(legacyMaterialSchema)
-      .max(ASSET_MAX_INPUT_FILES)
-      .optional(),
+    materials: z.array(legacyMaterialSchema).max(ASSET_MAX_INPUT_FILES).optional(),
   })
   .transform(({ materials, ...input }): z.input<typeof startInputSchema> => ({
     ...input,
@@ -184,29 +169,21 @@ const legacyCompletedEventSchema = completedEventSchema
   .unwrap()
   .omit({ assets: true })
   .extend({
-    artifacts: z
-      .array(legacyArtifactSchema)
-      .max(ASSET_MAX_OUTPUT_FILES)
-      .optional(),
+    artifacts: z.array(legacyArtifactSchema).max(ASSET_MAX_OUTPUT_FILES).optional(),
   })
-  .transform(
-    ({ artifacts, ...event }): z.input<typeof completedEventSchema> => ({
-      ...event,
-      ...(artifacts !== undefined
-        ? {
-            assets: artifacts.map(({ artifactID, ...reference }) => ({
-              assetID: artifactID,
-              ...reference,
-            })),
-          }
-        : {}),
-    }),
-  )
+  .transform(({ artifacts, ...event }): z.input<typeof completedEventSchema> => ({
+    ...event,
+    ...(artifacts !== undefined
+      ? {
+          assets: artifacts.map(({ artifactID, ...reference }) => ({
+            assetID: artifactID,
+            ...reference,
+          })),
+        }
+      : {}),
+  }))
   .pipe(completedEventSchema)
-const inboundExecutionEventSchema = z.union([
-  executionEventSchema,
-  legacyCompletedEventSchema,
-])
+const inboundExecutionEventSchema = z.union([executionEventSchema, legacyCompletedEventSchema])
 
 /** Preserves the retained ordinal; output is current ExecutionDelivery. */
 export const inboundExecutionDeliverySchema = executionDeliverySchema

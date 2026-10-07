@@ -2,17 +2,10 @@ import { afterAll, expect, test } from 'bun:test'
 import type { ExecutionEvent } from '@vid/contract/execution'
 import { sql, type KyselyPlugin } from 'kysely'
 import { observeEvents } from '../../apps/server/src/conversation/event-stream'
-import {
-  acceptExecutionEvent,
-  readPublicEvents,
-} from '../../apps/server/src/db/execution-events'
+import { acceptExecutionEvent, readPublicEvents } from '../../apps/server/src/db/execution-events'
 import { readOwnedThread } from '../../apps/server/src/db/conversations'
 import { acceptMessageIntent } from '../../apps/server/src/db/submissions'
-import {
-  openTestDatabase,
-  seedTestUser,
-  settleTestCleanup,
-} from './database-fixture'
+import { openTestDatabase, seedTestUser, settleTestCleanup } from './database-fixture'
 
 const { db, close } = openTestDatabase()
 const threads: string[] = []
@@ -34,10 +27,7 @@ afterAll(async () => {
         )
       }),
       async () => {
-        await db
-          .deleteFrom('auth.user')
-          .where('id', 'in', [ownerID, foreignOwnerID])
-          .execute()
+        await db.deleteFrom('auth.user').where('id', 'in', [ownerID, foreignOwnerID]).execute()
       },
     ])
   } finally {
@@ -76,8 +66,7 @@ async function fixture() {
     ownerID,
     threadID,
     runID,
-    start: () =>
-      emit(1, { ...base, eventID: crypto.randomUUID(), kind: 'run-started' }),
+    start: () => emit(1, { ...base, eventID: crypto.randomUUID(), kind: 'run-started' }),
     text: () =>
       emit(2, {
         ...base,
@@ -158,9 +147,7 @@ test.each([0, 301])(
     await f.text()
     await noise(f, count)
     await f.finish()
-    const terminal = (await allFacts(f))?.find(
-      (fact) => fact.event.kind === 'run-completed',
-    )
+    const terminal = (await allFacts(f))?.find((fact) => fact.event.kind === 'run-completed')
     const stream = await observation(f, '0')
     try {
       const text = await stream.response.text()
@@ -191,8 +178,7 @@ test.each([0, 301])(
     const terminal = (await allFacts(f))?.at(-1)
     await noise(f, count)
     const boundary = (await allFacts(f))?.at(-1)?.cursor
-    if (!boundary || !terminal)
-      throw new Error('Missing durable fixture cursor')
+    if (!boundary || !terminal) throw new Error('Missing durable fixture cursor')
     const stream = await observation(f, boundary)
     try {
       const text = await stream.response.text()
@@ -223,18 +209,10 @@ test('optional scope uses stored run_id, retains all-thread reads and enforces o
     threadID: f.threadID.toUpperCase(),
   }
   expect(await readPublicEvents(db, scopedQuery)).toHaveLength(1)
-  expect(
-    await readPublicEvents(db, { ownerID, threadID: f.threadID }),
-  ).toHaveLength(3)
-  expect(
-    await readPublicEvents(db, { ...scopedQuery, runID: other.runID }),
-  ).toEqual([])
-  expect(
-    await readPublicEvents(db, { ...scopedQuery, threadID: other.threadID }),
-  ).toEqual([])
-  expect(
-    await readPublicEvents(db, { ...scopedQuery, ownerID: foreignOwnerID }),
-  ).toBeNull()
+  expect(await readPublicEvents(db, { ownerID, threadID: f.threadID })).toHaveLength(3)
+  expect(await readPublicEvents(db, { ...scopedQuery, runID: other.runID })).toEqual([])
+  expect(await readPublicEvents(db, { ...scopedQuery, threadID: other.threadID })).toEqual([])
+  expect(await readPublicEvents(db, { ...scopedQuery, ownerID: foreignOwnerID })).toBeNull()
 })
 
 test('reconstruction retains text before an unrelated-run boundary but does not fold future target facts', async () => {
@@ -251,9 +229,11 @@ test('reconstruction retains text before an unrelated-run boundary but does not 
     expect(text).toContain('"delta":" world"')
     expect(text).not.toContain('"delta":"Hello"')
     expect(text).not.toContain('"delta":"Hello world"')
-    expect(text.indexOf('TEXT_MESSAGE_START')).toBeLessThan(
-      text.indexOf('TEXT_MESSAGE_CONTENT'),
-    )
+    const start = text.indexOf('TEXT_MESSAGE_START')
+    const content = text.indexOf('TEXT_MESSAGE_CONTENT')
+    expect(start).toBeGreaterThanOrEqual(0)
+    expect(content).toBeGreaterThanOrEqual(0)
+    expect(start).toBeLessThan(content)
     expect(text).toContain('RUN_FINISHED')
   } finally {
     stream.request.abort()

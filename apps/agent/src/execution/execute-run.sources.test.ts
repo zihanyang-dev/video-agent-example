@@ -1,11 +1,11 @@
 import { expect, test } from 'bun:test'
-import {
-  executeRun,
-  type ExecutionCompletion,
-  type ExecutionLease,
-  type ExecutionWrites,
-  type SandboxSessionPort,
-} from './execute-run'
+import { executeRun } from './execute-run'
+import type {
+  ExecutionCompletion,
+  ExecutionLease,
+  ExecutionWrites,
+  SandboxSessionPort,
+} from './contract'
 
 const lease: ExecutionLease = {
   runID: 'run',
@@ -17,12 +17,7 @@ const lease: ExecutionLease = {
 }
 const sources = [{ title: 'Found', url: 'https://example.org/source' }]
 
-for (const terminal of [
-  'completed',
-  'cancelled',
-  'failed',
-  'unknown',
-] as const) {
+for (const terminal of ['completed', 'cancelled', 'failed', 'unknown'] as const) {
   test(`source products are only offered to successful canonical completion (${terminal})`, async () => {
     const completed: ExecutionCompletion[] = []
     let cancelling = terminal === 'cancelled'
@@ -34,10 +29,10 @@ for (const terminal of [
       complete: async (_lease, completion) => {
         completed.push(completion)
         if (terminal === 'unknown') throw new Error('Unknown COMMIT')
-        return true
+        return 'completed'
       },
-      cancel: async () => true,
-      fail: async () => true,
+      cancel: async () => 'cancelled',
+      fail: async () => 'failed',
     }
     const sandbox: SandboxSessionPort = {
       nativeRef: { provider: 'e2b', id: 'fixture' },

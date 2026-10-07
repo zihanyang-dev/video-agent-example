@@ -1,12 +1,5 @@
 import { expect, test } from 'bun:test'
-import {
-  copyFile,
-  mkdir,
-  mkdtemp,
-  rm,
-  symlink,
-  writeFile,
-} from 'node:fs/promises'
+import { copyFile, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
 import { join, dirname } from 'node:path'
 import { tmpdir } from 'node:os'
 import type { ICruiseResult } from 'dependency-cruiser'
@@ -22,10 +15,7 @@ async function fixture<T>(
   const directory = await mkdtemp(join(tmpdir(), 'vid-architecture-'))
   try {
     await Promise.all([
-      copyFile(
-        join(root, '.dependency-cruiser.cjs'),
-        join(directory, '.dependency-cruiser.cjs'),
-      ),
+      copyFile(join(root, '.dependency-cruiser.cjs'), join(directory, '.dependency-cruiser.cjs')),
       copyFile(join(root, 'tsconfig.json'), join(directory, 'tsconfig.json')),
       copyFile(join(root, '.oxlintrc.json'), join(directory, '.oxlintrc.json')),
       symlink(join(root, 'node_modules'), join(directory, 'node_modules')),
@@ -69,8 +59,7 @@ const cases: {
   {
     name: 'shared packages cannot depend on applications',
     files: {
-      'packages/config/src/env.ts':
-        'export { value } from "../../../apps/server/private"',
+      'packages/config/src/env.ts': 'export { value } from "../../../apps/server/private"',
       'apps/server/private.ts': 'export const value = 1',
     },
     rules: ['shared-not-app'],
@@ -78,10 +67,8 @@ const cases: {
   {
     name: 'public HTTP schemas cannot expose execution types',
     files: {
-      'packages/contract/src/http.ts':
-        'export type { Private } from "./execution"',
-      'packages/contract/src/execution.ts':
-        'export type Private = { secret: string }',
+      'packages/contract/src/http.ts': 'export type { Private } from "./execution"',
+      'packages/contract/src/execution.ts': 'export type Private = { secret: string }',
     },
     rules: ['http-no-execution-contract'],
   },
@@ -107,10 +94,7 @@ for (const scenario of cases) {
       const process = Bun.spawn(
         [
           'node',
-          join(
-            root,
-            'node_modules/dependency-cruiser/bin/dependency-cruiser.mjs',
-          ),
+          join(root, 'node_modules/dependency-cruiser/bin/dependency-cruiser.mjs'),
           '--config',
           '.dependency-cruiser.cjs',
           '--output-type',
@@ -133,11 +117,7 @@ for (const scenario of cases) {
       ])
       const report = JSON.parse(output) as ICruiseResult
       expect(
-        [
-          ...new Set(
-            report.summary.violations.map((violation) => violation.rule.name),
-          ),
-        ].sort(),
+        [...new Set(report.summary.violations.map((violation) => violation.rule.name))].sort(),
         errors,
       ).toEqual(scenario.rules)
       // The native JSON reporter always exits 0. Actual rule records, not a
@@ -193,8 +173,7 @@ for (const scenario of [
         process.exited,
       ])
       expect(status).toBe(scenario.allowed ? 0 : 1)
-      if (!scenario.allowed)
-        expect(output + errors).toContain('no-restricted-properties')
+      if (!scenario.allowed) expect(output + errors).toContain('no-restricted-properties')
     })
   })
 }

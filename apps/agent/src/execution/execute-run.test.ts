@@ -1,22 +1,13 @@
 import { expect, test } from 'bun:test'
-import { createPiHarness } from './harness/pi'
-import { assignFileTools } from './harness/files'
+import { createPiHarness } from '../harness/pi'
+import { assignFileTools } from '../harness/files'
 import { sha256, type ObjectStore } from '@vid/object-storage'
 import type { AssetReference } from '@vid/contract/execution'
-import {
-  executeRun,
-  type AgentHarness,
-  type ExecutionLease,
-  type ExecutionWrites,
-  type SandboxSessionPort,
-} from './execute-run'
+import { executeRun } from './execute-run'
+import type { AgentHarness, ExecutionLease, ExecutionWrites, SandboxSessionPort } from './contract'
 
 function deferred<T>() {
-  let resolve!: (value: T) => void
-  const promise = new Promise<T>((done) => {
-    resolve = done
-  })
-  return { promise, resolve }
+  return Promise.withResolvers<T>()
 }
 
 const lease: ExecutionLease = {
@@ -49,15 +40,15 @@ function recordingWrites(events: unknown[]): ExecutionWrites {
     },
     complete: async (_owned, input) => {
       events.push(input)
-      return true
+      return 'completed'
     },
     fail: async (_owned, reason) => {
       events.push({ reason })
-      return true
+      return 'failed'
     },
     cancel: async () => {
       events.push('cancelled')
-      return true
+      return 'cancelled'
     },
   }
 }
@@ -193,8 +184,7 @@ for (const status of ['cancel', 'lost', 'error', 'shutdown'] as const) {
     input.onText('late')
     expect(f.events).toEqual([])
     f.end.resolve({ text: 'late', history: { private: 'discard' } })
-    const expected =
-      status === 'lost' ? 'lost' : status === 'cancel' ? 'cancelled' : 'failed'
+    const expected = status === 'lost' ? 'lost' : status === 'cancel' ? 'cancelled' : 'failed'
     expect(await run).toBe(expected)
     const terminal =
       status === 'lost'
@@ -203,8 +193,7 @@ for (const status of ['cancel', 'lost', 'error', 'shutdown'] as const) {
           ? ['cancelled']
           : [
               {
-                reason:
-                  status === 'shutdown' ? 'interrupted' : 'execution-error',
+                reason: status === 'shutdown' ? 'interrupted' : 'execution-error',
               },
             ]
     expect(f.events).toEqual(['closed', ...terminal])
@@ -240,13 +229,7 @@ test('cancellation during allocation aborts opener and awaits its cleanup withou
   expect(f.events).toEqual(['cancelled'])
 })
 
-for (const failure of [
-  'close',
-  'append',
-  'append-lost',
-  'turn',
-  'open',
-] as const) {
+for (const failure of ['close', 'append', 'append-lost', 'turn', 'open'] as const) {
   test(`${failure} failure never commits history or replays a paid turn`, async () => {
     const f = fixture()
     if (failure === 'close')
@@ -277,13 +260,11 @@ for (const failure of [
       text: 'text',
       history: 'must not commit',
     })
-    const terminal =
-      failure === 'append-lost' ? [] : [{ reason: 'execution-error' }]
+    const terminal = failure === 'append-lost' ? [] : [{ reason: 'execution-error' }]
     expect(
       f.events.filter(
         (event) =>
-          event !== 'closed' &&
-          !(typeof event === 'object' && event !== null && 'delta' in event),
+          event !== 'closed' && !(typeof event === 'object' && event !== null && 'delta' in event),
       ),
     ).toEqual(terminal)
   })
@@ -439,9 +420,7 @@ test('an unknown terminal database outcome is surfaced after cleanup, never retr
   const run = executeRun(lease, f.deps, f.options)
   await f.started.promise
   f.end.resolve({ text: '', history: 'private' })
-  expect(await run.catch((error: unknown) => error)).toEqual(
-    new Error('commit outcome unknown'),
-  )
+  expect(await run.catch((error: unknown) => error)).toEqual(new Error('commit outcome unknown'))
   expect(attempts).toBe(1)
   expect(f.events).toEqual(['closed'])
 })
@@ -555,11 +534,7 @@ for (const terminal of ['complete', 'cancel', 'unknown-upload'] as const) {
       return { text: 'delivered', history: ['private'] }
     }
     expect(await executeRun(lease, deps, f.options)).toBe(
-      terminal === 'complete'
-        ? 'completed'
-        : terminal === 'cancel'
-          ? 'cancelled'
-          : 'failed',
+      terminal === 'complete' ? 'completed' : terminal === 'cancel' ? 'cancelled' : 'failed',
     )
     expect(uploaded.size).toBe(1)
     expect(f.events).toEqual([
@@ -586,10 +561,7 @@ for (const authority of ['cancel', 'lost'] as const) {
     expect(await executeRun(lease, f.deps, f.options)).toBe(
       authority === 'cancel' ? 'cancelled' : 'lost',
     )
-    expect(f.events).toEqual([
-      'closed',
-      ...(authority === 'cancel' ? ['cancelled'] : []),
-    ])
+    expect(f.events).toEqual(['closed', ...(authority === 'cancel' ? ['cancelled'] : [])])
   })
 }
 
@@ -611,8 +583,7 @@ test('terminal and quarantine failures retain both causes after cleanup without 
   f.end.resolve({ text: '', history: [] })
   const failure = await run.catch((cause: unknown) => cause)
   expect(failure).toBeInstanceOf(AggregateError)
-  if (!(failure instanceof AggregateError))
-    throw new Error('Expected both failures')
+  if (!(failure instanceof AggregateError)) throw new Error('Expected both failures')
   expect(failure.errors).toEqual([terminal, quarantine])
   expect(attempts).toBe(1)
 })
@@ -687,11 +658,7 @@ test('pending UTF8 overflow aborts synchronously, discards unsent content and jo
   }
   expect(await run).toBe('failed')
   expect(deltas).toEqual(['issued'])
-  expect(f.events).toEqual([
-    'closed',
-    'append-settled',
-    { reason: 'execution-error' },
-  ])
+  expect(f.events).toEqual(['closed', 'append-settled', { reason: 'execution-error' }])
 })
 
 for (const returned of [false, true]) {
@@ -723,10 +690,7 @@ for (const returned of [false, true]) {
     }
     expect(f.events.at(-1)).toEqual({ reason: 'execution-error' })
     expect(
-      f.events.some(
-        (event) =>
-          typeof event === 'object' && event !== null && 'history' in event,
-      ),
+      f.events.some((event) => typeof event === 'object' && event !== null && 'history' in event),
     ).toBe(false)
   })
 }
@@ -923,8 +887,7 @@ for (const mode of ['coalesce', 'overflow', 'provider-failure'] as const) {
           onText: (delta) => {
             input.onText(delta)
             fragments++
-            if (fragments === (mode === 'coalesce' ? 10001 : 2))
-              produced.resolve()
+            if (fragments === (mode === 'coalesce' ? 10001 : 2)) produced.resolve()
           },
         })
       } finally {
@@ -967,8 +930,7 @@ for (const mode of ['coalesce', 'overflow', 'provider-failure'] as const) {
             runID: 'run',
             fence: 7,
             stage: mode === 'overflow' ? 'text-budget' : 'turn',
-            classification:
-              mode === 'overflow' ? 'text-budget-exceeded' : 'unknown-outcome',
+            classification: mode === 'overflow' ? 'text-budget-exceeded' : 'unknown-outcome',
           },
         ])
         expect(deltas).toEqual(mode === 'overflow' ? ['first:'] : [])
@@ -1112,8 +1074,7 @@ test('native Pi inference admission stops spending after sixteen drained batches
     port: 0,
     fetch() {
       requests++
-      if (requests > 17)
-        return Response.json({ error: { message: canary } }, { status: 500 })
+      if (requests > 17) return Response.json({ error: { message: canary } }, { status: 500 })
       const chunk = (delta: unknown, finish_reason: string | null = null) =>
         `data: ${JSON.stringify({ id: 'fixture', object: 'chat.completion.chunk', model: 'fixture-model', choices: [{ index: 0, delta, finish_reason }] })}\n\n`
       return new Response(
@@ -1151,9 +1112,7 @@ test('native Pi inference admission stops spending after sixteen drained batches
     systemPrompt: canary,
   })
   try {
-    expect(
-      await executeRun({ ...lease, history: null }, f.deps, f.options),
-    ).toBe('failed')
+    expect(await executeRun({ ...lease, history: null }, f.deps, f.options)).toBe('failed')
     expect(appendedBytes).toBe(1048576)
     expect(requests).toBe(16)
     expect(tools).toBe(16)
@@ -1183,7 +1142,7 @@ test('readonly transport failure is an ordinary tool error without VM quarantine
 
 test('history size rejection fails independently without quarantining a settled VM', async () => {
   const f = fixture()
-  const { admitPiHistory } = await import('./harness/pi-history')
+  const { admitPiHistory } = await import('../harness/pi-history')
   f.deps.harness.turn = async () => {
     admitPiHistory({ private: 'x'.repeat(4 * 1024 * 1024) })
     return { text: '', history: [] }
@@ -1206,8 +1165,6 @@ test('run deadline aborts spending while SQL heartbeat retains separate cleanup 
     signal.throwIfAborted()
     return { text: '', history: [] }
   }
-  expect(
-    await executeRun(lease, f.deps, { ...f.options, runTimeoutMs: 10 }),
-  ).toBe('failed')
+  expect(await executeRun(lease, f.deps, { ...f.options, runTimeoutMs: 10 })).toBe('failed')
   expect(f.events).toEqual(['closed', { reason: 'execution-error' }])
 })

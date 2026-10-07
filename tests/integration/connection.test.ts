@@ -8,17 +8,14 @@ import { postgresProxy } from './postgres-proxy-fixture'
 test('unknown query transport failure notifies the owner without retrying', async () => {
   const proxy = await postgresProxy(readMigrationEnv().DATABASE_URL)
   const failures: unknown[] = []
-  const db = openDatabase(
-    { DATABASE_URL: proxy.databaseURL, IO_TIMEOUT_MS: 200 },
-    (cause) => failures.push(cause),
+  const db = openDatabase({ DATABASE_URL: proxy.databaseURL, IO_TIMEOUT_MS: 200 }, (cause) =>
+    failures.push(cause),
   )
   try {
     await sql`select 1`.execute(db)
     proxy.blackhole()
     const started = Date.now()
-    const failure = await sql`select 2`
-      .execute(db)
-      .catch((cause: unknown) => cause)
+    const failure = await sql`select 2`.execute(db).catch((cause: unknown) => cause)
     expect(failure).toBeInstanceOf(Error)
     expect(failures).toContain(failure)
     expect(Date.now() - started).toBeLessThan(1500)
@@ -31,9 +28,8 @@ test('unknown query transport failure notifies the owner without retrying', asyn
 test('checked-out connection loss notifies its owner without an unhandled client error', async () => {
   const proxy = await postgresProxy(readMigrationEnv().DATABASE_URL)
   const failures: unknown[] = []
-  const db = openDatabase(
-    { DATABASE_URL: proxy.databaseURL, IO_TIMEOUT_MS: 200 },
-    (cause) => failures.push(cause),
+  const db = openDatabase({ DATABASE_URL: proxy.databaseURL, IO_TIMEOUT_MS: 200 }, (cause) =>
+    failures.push(cause),
   )
   try {
     const failure = await db
@@ -54,19 +50,12 @@ test('checked-out connection loss notifies its owner without an unhandled client
 
 test('lost COMMIT response reports failure without replaying a committed write', async () => {
   const proxy = await postgresProxy(readMigrationEnv().DATABASE_URL)
-  const db = openDatabase(
-    { DATABASE_URL: proxy.databaseURL, IO_TIMEOUT_MS: 200 },
-    () => {},
-  )
+  const db = openDatabase({ DATABASE_URL: proxy.databaseURL, IO_TIMEOUT_MS: 200 }, () => {})
   const observer = openTestDatabase()
-  const table = sql.id(
-    `connection_fixture_${crypto.randomUUID().replaceAll('-', '')}`,
-  )
+  const table = sql.id(`connection_fixture_${crypto.randomUUID().replaceAll('-', '')}`)
   let attempts = 0
   try {
-    await sql`create table ${table} (value integer not null)`.execute(
-      observer.db,
-    )
+    await sql`create table ${table} (value integer not null)`.execute(observer.db)
     const failure = await db
       .transaction()
       .execute(async (trx) => {
@@ -99,9 +88,8 @@ test('ordinary business and SQL failures rollback without replacing the error or
   url.searchParams.set('application_name', 'deadline-owner-fixture')
   url.searchParams.set('options', '-c search_path=pg_catalog')
   const failures: unknown[] = []
-  const db = openDatabase(
-    { DATABASE_URL: url.toString(), IO_TIMEOUT_MS: 200 },
-    (cause) => failures.push(cause),
+  const db = openDatabase({ DATABASE_URL: url.toString(), IO_TIMEOUT_MS: 200 }, (cause) =>
+    failures.push(cause),
   )
   try {
     const initial = await sql<{
@@ -118,9 +106,7 @@ test('ordinary business and SQL failures rollback without replacing the error or
       current_setting('search_path') as path,
       current_setting('statement_timeout') as statement,
       current_setting('lock_timeout') as lock,
-      current_setting('idle_in_transaction_session_timeout') as idle`.execute(
-      db,
-    )
+      current_setting('idle_in_transaction_session_timeout') as idle`.execute(db)
     expect(settings.rows).toEqual([
       {
         application: 'deadline-owner-fixture',

@@ -2,32 +2,27 @@ import { z } from 'zod'
 import { webSourcesSchema } from './web-source'
 import { fileNameSchema } from './file-name'
 import { publicFailureReasonSchema } from './failure-reason'
+import { ASSET_MAX_INPUT_FILES } from './asset-limits'
+import { productTextSchema as productText } from './product-text'
 
 export const publicUUIDSchema = z.uuid().toLowerCase()
 const uuid = publicUUIDSchema
-// Unicode mode preserves surrogate pairs but rejects lone surrogates, which
-// PostgreSQL JSONB cannot represent. Reject NUL rather than lossy replacement.
-const productText = z.string().regex(
-  // oxlint-disable-next-line no-control-regex -- PostgreSQL rejects NUL; keep the runtime and JSON Schema boundary aligned.
-  /^[^\u0000\ud800-\udfff]*$/u,
-  'Text must be representable in PostgreSQL',
-)
 
 export const messageSubmissionSchema = z
   .strictObject({
     messageID: uuid,
     // Preserve text for exact replay; trimming here only tests for empty input.
     text: productText.max(32768),
-    assetIDs: z.array(uuid).max(16).default([]).meta({
+    assetIDs: z.array(uuid).max(ASSET_MAX_INPUT_FILES).default([]).meta({
       uniqueItems: true,
       description:
         'Unique after lowercase UUID canonicalization; case-insensitive equality is additionally enforced at runtime.',
     }),
   })
-  .refine(
-    (input) => input.text.trim().length > 0 || input.assetIDs.length > 0,
-    { message: 'Provide text or at least one asset', path: ['text'] },
-  )
+  .refine((input) => input.text.trim().length > 0 || input.assetIDs.length > 0, {
+    message: 'Provide text or at least one asset',
+    path: ['text'],
+  })
   .refine((input) => new Set(input.assetIDs).size === input.assetIDs.length, {
     message: 'Asset references must be unique',
     path: ['assetIDs'],
@@ -199,14 +194,17 @@ export type PublicAsset = z.output<typeof publicAssetSchema>
 export type AssetResponse = z.output<typeof assetResponseSchema>
 export type AssetsResponse = z.output<typeof assetsResponseSchema>
 
-const inboundNames = new Set([
+const inboundSchemaNames = [
   'UUID',
   'EmptyRequest',
   'ThreadCreation',
   'ThreadUpdate',
   'MessageSubmission',
   'RunCancellation',
-])
+] as const satisfies readonly (keyof typeof publicSchemas)[]
+const inboundNames: ReadonlySet<string> = new Set(inboundSchemaNames)
+export type PublicSchemaName =
+  keyof typeof publicSchemas | `${(typeof inboundSchemaNames)[number]}Input`
 
 export function publicJSONSchemas() {
   const schemas: Record<string, z.core.JSONSchema.BaseSchema> = {}
@@ -223,9 +221,7 @@ export function publicJSONSchemas() {
         if (context.zodSchema !== title) return
         delete context.jsonSchema.minLength
         delete context.jsonSchema.maxLength
-        context.jsonSchema.allOf = [
-          { pattern: '^\\s*\\S(?:[\\s\\S]{0,158}\\S)?\\s*$' },
-        ]
+        context.jsonSchema.allOf = [{ pattern: '^\\s*\\S(?:[\\s\\S]{0,158}\\S)?\\s*$' }]
       },
     })
   }

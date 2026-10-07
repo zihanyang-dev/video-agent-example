@@ -1,26 +1,19 @@
 import { afterAll, expect, test } from 'bun:test'
-import { seedTestUser, openTestDatabase } from './database-fixture'
+import { seedTestUser, openTestDatabase, settleTestCleanup } from './database-fixture'
 
 const { db, close } = openTestDatabase()
 const threadIDs: string[] = []
 afterAll(async () => {
-  try {
-    if (threadIDs.length === 0) return
-    await db
-      .deleteFrom('product.command_outbox')
-      .where('thread_id', 'in', threadIDs)
-      .execute()
-    await db
-      .deleteFrom('product.messages')
-      .where('thread_id', 'in', threadIDs)
-      .execute()
-    await db
-      .deleteFrom('product.threads')
-      .where('thread_id', 'in', threadIDs)
-      .execute()
-  } finally {
+  if (threadIDs.length === 0) {
     await close()
+    return
   }
+  await settleTestCleanup([
+    () => db.deleteFrom('product.command_outbox').where('thread_id', 'in', threadIDs).execute(),
+    () => db.deleteFrom('product.messages').where('thread_id', 'in', threadIDs).execute(),
+    () => db.deleteFrom('product.threads').where('thread_id', 'in', threadIDs).execute(),
+    close,
+  ])
 })
 
 async function createThread() {

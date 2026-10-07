@@ -1,8 +1,6 @@
-import {
-  executeRun,
-  type ExecuteRunDependencies,
-  type ExecutionLease,
-} from './execute-run'
+import { executeRun } from './execute-run'
+import { waitForPoll } from './wait-for-poll'
+import type { ExecuteRunDependencies, ExecuteRunOptions, ExecutionLease } from './contract'
 
 type WorkerDependencies = ExecuteRunDependencies &
   Readonly<{
@@ -20,10 +18,7 @@ type WorkerOptions = Readonly<{
 }>
 
 /** The process owns claims and every active run; shutdown never detaches cleanup. */
-export async function runWorker(
-  deps: WorkerDependencies,
-  options: WorkerOptions,
-): Promise<void> {
+export async function runWorker(deps: WorkerDependencies, options: WorkerOptions): Promise<void> {
   const stop = new AbortController()
   const signal = AbortSignal.any([options.signal, stop.signal])
   const active = new Map<string, Promise<void>>()
@@ -31,14 +26,13 @@ export async function runWorker(
 
   async function superviseRun(lease: ExecutionLease) {
     try {
-      await executeRun(lease, deps, {
+      const runOptions: ExecuteRunOptions = {
         leaseMs: options.leaseMs,
         pollMs: options.pollMs,
         signal,
-        ...(options.runTimeoutMs === undefined
-          ? {}
-          : { runTimeoutMs: options.runTimeoutMs }),
-      })
+        ...(options.runTimeoutMs === undefined ? {} : { runTimeoutMs: options.runTimeoutMs }),
+      }
+      await executeRun(lease, deps, runOptions)
     } catch (error) {
       failures.push(error)
       stop.abort()
@@ -84,17 +78,4 @@ export async function runWorker(
   if (failures.length > 1) {
     throw new AggregateError(failures, 'Worker execution failed')
   }
-}
-
-function waitForPoll(ms: number, signal: AbortSignal): Promise<void> {
-  return new Promise((resolve) => {
-    const finish = () => {
-      clearTimeout(timer)
-      signal.removeEventListener('abort', finish)
-      resolve()
-    }
-    const timer = setTimeout(finish, ms)
-    signal.addEventListener('abort', finish, { once: true })
-    if (signal.aborted) finish()
-  })
 }

@@ -34,18 +34,14 @@ test('completion suffix does not append already streamed text twice', () => {
     messageID,
     text: 'Hello world',
   })
-  const events = [...first.frames, ...last.frames].map((event) =>
-    EventSchema.parse(event),
-  )
+  const events = [...first.frames, ...last.frames].map((event) => EventSchema.parse(event))
   expect(
     events
       .filter((event) => event.type === EventType.TEXT_MESSAGE_CONTENT)
       .map((event) => event.delta)
       .join(''),
   ).toBe('Hello world')
-  expect(
-    events.filter((event) => event.type === EventType.TEXT_MESSAGE_START),
-  ).toHaveLength(1)
+  expect(events.filter((event) => event.type === EventType.TEXT_MESSAGE_START)).toHaveLength(1)
   expect(last.state.phase).toBe('terminal')
   expect(first.state.messages.get(messageID)).toBe('Hello')
   expect(initial.messages.size).toBe(0)
@@ -65,12 +61,43 @@ test('zero-delta completion emits the whole answer and stable frame identities',
     eventID: `${fact.eventID}:RUN_STARTED:`,
     factID: fact.eventID,
   })
-  expect(
-    first.filter((event) => event.type === EventType.TEXT_MESSAGE_CONTENT),
-  ).toMatchObject([{ delta: 'Answer' }])
+  expect(first.filter((event) => event.type === EventType.TEXT_MESSAGE_CONTENT)).toMatchObject([
+    { delta: 'Answer' },
+  ])
   expect(first.at(-1)?.type).toBe(EventType.RUN_FINISHED)
-  for (const event of first)
-    expect(EventSchema.safeParse(event).success).toBe(true)
+  for (const event of first) expect(EventSchema.safeParse(event).success).toBe(true)
+})
+
+test('text frame identities include the message dimension without changing the fact identity', () => {
+  const factID = 'd2000000-0000-4000-8000-000000000001'
+  const firstMessage = 'd2000000-0000-4000-8000-000000000002'
+  const secondMessage = 'd2000000-0000-4000-8000-000000000003'
+  for (const id of [firstMessage, secondMessage]) {
+    const mapped = mapPublicRunEvent(initial, {
+      ...base,
+      eventID: factID,
+      kind: 'assistant-text',
+      messageID: id,
+      delta: 'text',
+    })
+    expect(mapped.frames.map((frame) => frame.metadata)).toEqual([
+      {
+        mappingVersion: 'ag-ui-1.0.1-v1',
+        eventID: `${factID}:RUN_STARTED:`,
+        factID,
+      },
+      {
+        mappingVersion: 'ag-ui-1.0.1-v1',
+        eventID: `${factID}:TEXT_MESSAGE_START:${id}`,
+        factID,
+      },
+      {
+        mappingVersion: 'ag-ui-1.0.1-v1',
+        eventID: `${factID}:TEXT_MESSAGE_CONTENT:${id}`,
+        factID,
+      },
+    ])
+  }
 })
 
 test.each(['run-cancelled', 'run-failed'] as const)(
@@ -78,16 +105,13 @@ test.each(['run-cancelled', 'run-failed'] as const)(
   (kind) => {
     const mapped = mapPublicRunEvent(
       initial,
-      kind === 'run-failed'
-        ? { ...base, kind, reason: 'execution-error' }
-        : { ...base, kind },
+      kind === 'run-failed' ? { ...base, kind, reason: 'execution-error' } : { ...base, kind },
     )
     expect(mapped.frames[0]?.type).toBe(EventType.RUN_STARTED)
     expect(mapped.frames.at(-1)?.type).toBe(
       kind === 'run-failed' ? EventType.RUN_ERROR : EventType.RUN_FINISHED,
     )
-    for (const frame of mapped.frames)
-      expect(EventSchema.safeParse(frame).success).toBe(true)
+    for (const frame of mapped.frames) expect(EventSchema.safeParse(frame).success).toBe(true)
     expect(mapped.state.phase).toBe('terminal')
   },
 )
@@ -119,9 +143,7 @@ test('non-prefix completion does not append a conflicting canonical answer', () 
     messageID,
     text: 'Final',
   })
-  expect(
-    final.frames.some((frame) => frame.type === EventType.TEXT_MESSAGE_CONTENT),
-  ).toBe(false)
+  expect(final.frames.some((frame) => frame.type === EventType.TEXT_MESSAGE_CONTENT)).toBe(false)
   expect(final.frames.at(-1)?.type).toBe(EventType.RUN_FINISHED)
   expect(final.state.messages.get(messageID)).toBe('Final')
 })
@@ -173,8 +195,7 @@ test('cancel closes every opened message without changing prior text', () => {
     { messageId: secondMessageID },
   ])
   expect([...second.state.messages.values()]).toEqual(['first', 'second'])
-  for (const frame of cancelled.frames)
-    expect(EventSchema.safeParse(frame).success).toBe(true)
+  for (const frame of cancelled.frames) expect(EventSchema.safeParse(frame).success).toBe(true)
 })
 
 test('content dedup identity is independent of reconstructed lifecycle frames', () => {

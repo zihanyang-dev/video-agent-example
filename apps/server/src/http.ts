@@ -1,8 +1,4 @@
-import {
-  readBody,
-  requestBodyRejection,
-  type BodyCollectionPolicy,
-} from './request-body'
+import { readBody, requestBodyRejection, type BodyCollectionPolicy } from './request-body'
 import type { DB } from '@vid/database/types'
 import type { Kysely } from 'kysely'
 import { Hono, type Context } from 'hono'
@@ -15,12 +11,9 @@ import {
   threadUpdateSchema,
   type SessionResponse,
   type AssetsResponse,
+  type PublicSchemaName,
 } from '@vid/contract/http'
-import {
-  createAuthentication,
-  readIdentity,
-  signOut,
-} from './identity/authentication'
+import { createAuthentication, readIdentity, signOut } from './identity/authentication'
 import {
   listOwnedThreads,
   createOwnedThread,
@@ -29,17 +22,13 @@ import {
   snapshotOwnedMessages,
 } from './db/conversations'
 import { archiveThread } from './db/cancellations'
-import {
-  threadUnavailable,
-  threadConflict,
-  lockThread,
-} from './db/thread-access'
+import { threadUnavailable, threadConflict } from './db/thread-access'
 import { listAssets } from './db/assets'
 import { uploadAsset, downloadAsset } from './assets/http'
 import type { FileHTTP } from './assets/uploads'
 import {
   submitMessage,
-  cancelObservation,
+  requestRunCancellation,
   openObservation,
   type ConversationOptions,
 } from './conversation/http'
@@ -57,7 +46,7 @@ export type HTTPResources = ConversationOptions & {
 }
 type HTTPEnv = { Bindings: HTTPResources; Variables: { ownerID: string } }
 
-const json = (name: string) => ({
+const json = (name: PublicSchemaName) => ({
   'application/json': { schema: { $ref: `#/components/schemas/${name}` } },
 })
 const uuid = publicUUIDSchema
@@ -99,8 +88,7 @@ export function createRouter() {
         503: { description: 'Collection stopped or transport failed' },
       },
     }),
-    (c) =>
-      signOut(c.env.authentication, c.env.db, c.req.raw, c.env.bodyCollection),
+    (c) => signOut(c.env.authentication, c.env.db, c.req.raw, c.env.bodyCollection),
   )
   app.all(
     '/api/logout',
@@ -155,11 +143,7 @@ export function createRouter() {
     }),
     async (c, next) => {
       const user = await readIdentity(c.env.authentication, c.req.raw.headers)
-      if (!user)
-        return Response.json(
-          { error: 'Authentication required' },
-          { status: 401 },
-        )
+      if (!user) return Response.json({ error: 'Authentication required' }, { status: 401 })
       c.set('ownerID', user.id)
       if (
         c.req.method !== 'GET' &&
@@ -195,18 +179,13 @@ export function createRouter() {
     async (c) => {
       const rejection = requireJSON(c.req.raw)
       if (rejection) return rejection
-      const input = threadCreationSchema.safeParse(
-        await readBody(c.req.raw, c.env.bodyCollection),
-      )
+      const input = threadCreationSchema.safeParse(await readBody(c.req.raw, c.env.bodyCollection))
       if (!input.success) return invalid()
       const accepted = await createOwnedThread(c.env.db, {
         ...input.data,
         ownerID: c.get('ownerID'),
       })
-      return Response.json(
-        { thread: accepted.thread },
-        { status: accepted.created ? 201 : 200 },
-      )
+      return Response.json({ thread: accepted.thread }, { status: accepted.created ? 201 : 200 })
     },
   )
   app.use(
@@ -250,9 +229,7 @@ export function createRouter() {
       const rejection = requireJSON(c.req.raw)
       if (rejection) return rejection
       const query = ownedThread(c)
-      const input = threadUpdateSchema.safeParse(
-        await readBody(c.req.raw, c.env.bodyCollection),
-      )
+      const input = threadUpdateSchema.safeParse(await readBody(c.req.raw, c.env.bodyCollection))
       if (!query || !input.success) return invalid()
       return Response.json({
         thread: await updateOwnedThread(c.env.db, { ...query, ...input.data }),
@@ -274,9 +251,8 @@ export function createRouter() {
       const query = ownedThread(c)
       if (
         !query ||
-        !publicSchemas.EmptyRequest.safeParse(
-          await readBody(c.req.raw, c.env.bodyCollection),
-        ).success
+        !publicSchemas.EmptyRequest.safeParse(await readBody(c.req.raw, c.env.bodyCollection))
+          .success
       )
         return invalid()
       return Response.json({ thread: await archiveThread(c.env.db, query) })
@@ -356,7 +332,7 @@ export function createRouter() {
       if (rejection) return rejection
       const query = ownedRun(c)
       return query
-        ? await cancelObservation(
+        ? await requestRunCancellation(
             c.env.db,
             query,
             await readBody(c.req.raw, c.env.bodyCollection),
@@ -416,8 +392,7 @@ export function createRouter() {
           pollIntervalMs: c.env.pollIntervalMs,
           ...(c.env.ownRead ? { ownRead: c.env.ownRead } : {}),
           authorize: async () =>
-            (await readIdentity(c.env.authentication, c.req.raw.headers))
-              ?.id === query.ownerID &&
+            (await readIdentity(c.env.authentication, c.req.raw.headers))?.id === query.ownerID &&
             (await readOwnedThread(c.env.db, query)) !== undefined,
         },
       )
@@ -468,8 +443,7 @@ export function createRouter() {
           name: 'Content-Type',
           required: true,
           schema: { type: 'string', enum: uploadMimeTypeSchema.options },
-          description:
-            'Exact supported MIME type; bytes are verified independently',
+          description: 'Exact supported MIME type; bytes are verified independently',
         },
       ],
       requestBody: {
@@ -488,9 +462,6 @@ export function createRouter() {
     async (c) => {
       const query = ownedThread(c)
       if (!query || !c.env.files) return unavailable()
-      await c.env.db
-        .transaction()
-        .execute((tx) => lockThread(tx, query, 'write'))
       return await uploadAsset(c.env.db, query, c.req.raw, c.env.files)
     },
   )
@@ -537,9 +508,7 @@ export function createRouter() {
 
 function ownedThread(c: Context<HTTPEnv>) {
   const threadID = uuid.safeParse(c.req.param('threadID'))
-  return threadID.success
-    ? { ownerID: c.get('ownerID'), threadID: threadID.data }
-    : null
+  return threadID.success ? { ownerID: c.get('ownerID'), threadID: threadID.data } : null
 }
 function ownedRun(c: Context<HTTPEnv>) {
   const thread = ownedThread(c)
@@ -547,8 +516,7 @@ function ownedRun(c: Context<HTTPEnv>) {
   return thread && runID.success ? { ...thread, runID: runID.data } : null
 }
 function requireJSON(request: Request) {
-  return request.headers.get('content-type')?.split(';')[0]?.trim() ===
-    'application/json'
+  return request.headers.get('content-type')?.split(';')[0]?.trim() === 'application/json'
     ? null
     : new Response('Expected JSON request', { status: 415 })
 }

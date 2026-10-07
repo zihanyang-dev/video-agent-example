@@ -41,11 +41,7 @@ function allocatedAsset(row: AssetRow): AssetReference {
 /** Reservation is immutable. An unknown PUT result remains pending, so a retry
  * can confirm the exact object without deleting another request's accepted bytes.
  * Thread locks serialize both reservation and final visibility with archive. */
-export async function reserveAsset(
-  db: Kysely<DB>,
-  query: OwnedThread,
-  asset: AssetReference,
-) {
+export async function reserveAsset(db: Kysely<DB>, query: OwnedThread, asset: AssetReference) {
   return await db.transaction().execute(async (tx) => {
     await lockThread(tx, query, 'write')
     await tx
@@ -84,8 +80,7 @@ export async function reserveAsset(
 export async function completeAsset(
   db: Kysely<DB>,
   query: OwnedThread,
-  assetID: string,
-  confirmedObjectKey: string,
+  { assetID, confirmedObjectKey }: Readonly<{ assetID: string; confirmedObjectKey: string }>,
 ) {
   return await db.transaction().execute(async (tx) => {
     await lockThread(tx, query, 'write')
@@ -99,8 +94,7 @@ export async function completeAsset(
     if (!reserved) throw threadUnavailable
     // First confirmed publication wins. A concurrent legacy confirmation or
     // rehome must never change the location of an already-visible asset.
-    if (reserved.ready_at !== null)
-      return { asset: publicAsset(reserved), created: false }
+    if (reserved.ready_at !== null) return { asset: publicAsset(reserved), created: false }
     const row = await tx
       .updateTable('product.assets')
       .set({

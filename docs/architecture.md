@@ -31,6 +31,8 @@ HTTP 身份与输入验证
 
 PostgreSQL 是权威，Redis 至少一次投递。稳定身份、精确重放、冲突拒绝、持久接收后 ACK 和 retained inbox/outbox 保护丢失回执，不宣称跨系统 exactly-once。公开事件按 ordinal、缺口与重连游标发布。
 
+SSE reconnect cursor 是已经持久发布的公共事实标识，不是 run 内的 execution ordinal，也不是客户端可自行加一的序号。它由全局 sequence 分配、按当前 thread 授权验证，可以存在缺口；观察仍按指定 run 重建。`Last-Event-ID` 优先于 `forwardedProps.after`，二者缺省为 `0`（从头开始的 sentinel，不是实际发布事实）。客户端应回传收到的完整 cursor，不推算下一值。当前生成 OpenAPI 中的旧 ordinal 描述尚未调整：本次保持 API 生成物不可变，不修改比较器以隐藏差异。
+
 同一 thread 的执行由 SQL 租约串行化。锁后数据库时间、owner/run/fence 决定写入权威。过期付费运行中断，不自动重新推理。取消是持久请求，不等于真实远端终止；客户端断线不取消已接受工作。终态事务依据最新锁内事实裁决，不在调用方多次续租猜测。
 
 ## 身份与资产

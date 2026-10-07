@@ -33,18 +33,18 @@ export function serverTestEnv() {
   })
 }
 
-export async function signedTestIdentity(db: Kysely<DB>) {
+export async function signedTestIdentity(db: Kysely<DB>, ownUser?: (userID: string) => void) {
   const fixtureAuth = betterAuth({
     ...authenticationOptions(db, authenticationSettings),
     plugins: [officialTestPlugin()],
   })
   const { test: fixture } = await fixtureAuth.$context
-  const user = await fixture.saveUser(
-    fixture.createUser({
-      email: `${crypto.randomUUID()}@thread.example.test`,
-      emailVerified: true,
-    }),
-  )
+  const planned = fixture.createUser({
+    email: `${crypto.randomUUID()}@thread.example.test`,
+    emailVerified: true,
+  })
+  ownUser?.(planned.id)
+  const user = await fixture.saveUser(planned)
   const login = await fixture.login({ userId: user.id })
   const headers = new Headers(login.headers)
   headers.set('origin', authenticationSettings.baseURL)
@@ -64,8 +64,7 @@ export function officialTestPlugin() {
     ...plugin,
     init: (context: Parameters<typeof plugin.init>[0]) => {
       const initialized = plugin.init(context)
-      if (!initialized)
-        throw new Error('Official test plugin did not initialize')
+      if (!initialized) throw new Error('Official test plugin did not initialize')
       return { ...initialized, options: initialized.options ?? {} }
     },
   }

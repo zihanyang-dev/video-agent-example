@@ -18,10 +18,7 @@ interface Policy {
   }[]
 }
 const policies = Object.fromEntries(
-  roles.map((role) => [
-    role,
-    readFileSync(`deploy/storage/${role}-policy.json`, 'utf8'),
-  ]),
+  roles.map((role) => [role, readFileSync(`deploy/storage/${role}-policy.json`, 'utf8')]),
 ) as Record<NativePolicyRole, string>
 
 // Contract for this literal template, NOT an arbitrary JSON renderer. Real JSON
@@ -64,9 +61,7 @@ void test('NativePolicyRole canonical JSON conformance and permissions', () => {
   const misplaced = JSON.parse(policies.server) as Policy
   misplaced.Id = slot
   assert.throws(() => conform(JSON.stringify(misplaced)))
-  assert.throws(() =>
-    conform(policies.server.replace('arn:aws:', 'arn:aws:\\u0073')),
-  )
+  assert.throws(() => conform(policies.server.replace('arn:aws:', 'arn:aws:\\u0073')))
 })
 
 // No inherited operator configuration. Compose reads /dev/null, not .env.
@@ -112,20 +107,11 @@ function nativeCompose(): NativeService {
   const config = JSON.parse(
     execFileSync(
       'docker',
-      [
-        'compose',
-        '--env-file',
-        '/dev/null',
-        '-f',
-        'compose.yaml',
-        'config',
-        '--format',
-        'json',
-      ],
+      ['compose', '--env-file', '/dev/null', '-f', 'compose.yaml', 'config', '--format', 'json'],
       {
         encoding: 'utf8',
         timeout: 30000,
-        env: { PATH: process.env.PATH, ...synthetic },
+        env: { PATH: process.env.PATH, DOCKER_HOST: process.env.DOCKER_HOST, ...synthetic },
       },
     ),
   ) as {
@@ -133,7 +119,8 @@ function nativeCompose(): NativeService {
   }
   const service = config.services['storage-init']
   assert.ok(service)
-  assert.deepEqual(service.entrypoint, ['bash', '-ec'])
+  assert.deepEqual(service.entrypoint, ['bash'])
+  assert.deepEqual(service.command, ['/policies/initialize.sh'])
   assert.match(
     service.image,
     /@sha256:635197cb9f36d01bee221d34d1c7d7960f6a95c48b0b6c01d99cd13bdae51a46$/,
@@ -157,15 +144,14 @@ function runInitialization(overrides: Record<string, string> = {}) {
       '/run/storage:mode=0700',
       '--mount',
       `type=bind,src=${join(process.cwd(), 'deploy/storage')},dst=/policies,readonly`,
-      ...Object.entries({ ...service.environment, ...overrides }).flatMap(
-        ([key, value]) => ['--env', `${key}=${value}`],
-      ),
+      ...Object.entries({ ...service.environment, ...overrides }).flatMap(([key, value]) => [
+        '--env',
+        `${key}=${value}`,
+      ]),
       '--entrypoint',
       'bash',
       service.image,
-      '-ec',
-      // Compose config preserves $$; Docker execution receives a single dollar.
-      ...service.command.map((command) => command.replaceAll('$$', '$')),
+      ...service.command,
     ).trim()
     docker('start', id)
     const status = Number(docker('wait', id).trim())
@@ -178,12 +164,7 @@ function runInitialization(overrides: Record<string, string> = {}) {
   } finally {
     if (id !== undefined) {
       assert.equal(
-        docker(
-          'inspect',
-          '--format',
-          '{{index .Config.Labels "vid.check.owner"}}',
-          id,
-        ).trim(),
+        docker('inspect', '--format', '{{index .Config.Labels "vid.check.owner"}}', id).trim(),
         owner,
       )
       docker('rm', '-f', '-v', id)
@@ -217,9 +198,6 @@ void test('external storage is not administered with local root credentials', ()
 void test('real storage connection failure reports only the stage, not credentials', () => {
   const result = runInitialization()
   assert.notEqual(result.status, 0)
-  assert.match(
-    result.output,
-    /Local object storage initialization failed: bucket/,
-  )
+  assert.match(result.output, /Local object storage initialization failed: bucket/)
   assert.doesNotMatch(result.output, /PrivateFakeCredential/)
 })

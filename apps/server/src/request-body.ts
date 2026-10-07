@@ -19,18 +19,11 @@ export async function collectRequestBody(
     return await readChunks(reader, max, signal)
   } catch (cause) {
     if (signal.aborted) {
-      throw signal.reason instanceof DOMException &&
-        signal.reason.name === 'TimeoutError'
+      throw signal.reason instanceof DOMException && signal.reason.name === 'TimeoutError'
         ? new DOMException('Request body timed out', 'TimeoutError')
         : new DOMException('Request body collection stopped', 'AbortError')
-    } else if (
-      cause instanceof DOMException &&
-      cause.name === 'QuotaExceededError'
-    ) {
-      throw new DOMException(
-        'Request body exceeds byte limit',
-        'QuotaExceededError',
-      )
+    } else if (cause instanceof DOMException && cause.name === 'QuotaExceededError') {
+      throw new DOMException('Request body exceeds byte limit', 'QuotaExceededError')
     }
     throw new DOMException('Request body transport failed', 'NetworkError')
   } finally {
@@ -55,19 +48,13 @@ async function readChunks(
     if (chunk.done) break
     length += chunk.value.length
     if (length > max)
-      throw new DOMException(
-        'Request body exceeds byte limit',
-        'QuotaExceededError',
-      )
+      throw new DOMException('Request body exceeds byte limit', 'QuotaExceededError')
     chunks.push(chunk.value)
   }
   return Buffer.concat(chunks, length)
 }
 
-export async function readBody(
-  request: Request,
-  policy: BodyCollectionPolicy,
-): Promise<unknown> {
+export async function readBody(request: Request, policy: BodyCollectionPolicy): Promise<unknown> {
   if (!request.body) return undefined
   const signal = AbortSignal.any([
     request.signal,

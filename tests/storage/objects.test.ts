@@ -21,12 +21,7 @@ test('S3 preserves binary bytes and rejects oversized, conflicting, unauthorized
   const key = `assets/uploads/${crypto.randomUUID()}/${crypto.randomUUID()}`
   const bytes = new Uint8Array([0, 255, 128, 10])
   expect(
-    await objects.put(
-      key,
-      bytes,
-      'application/octet-stream',
-      AbortSignal.timeout(5000),
-    ),
+    await objects.put(key, bytes, 'application/octet-stream', AbortSignal.timeout(5000)),
   ).toEqual({ byteLength: 4, sha256: sha256(bytes) })
   expect(await objects.read(key, 4, AbortSignal.timeout(5000))).toEqual(bytes)
 
@@ -34,9 +29,7 @@ test('S3 preserves binary bytes and rejects oversized, conflicting, unauthorized
     .read(key, 3, AbortSignal.timeout(5000))
     .catch((cause: unknown) => cause)
   expect(oversized).toBeInstanceOf(Error)
-  expect(oversized instanceof Error && oversized.message).toBe(
-    'Object byte limit exceeded',
-  )
+  expect(oversized instanceof Error && oversized.message).toBe('Object byte limit exceeded')
   const conflicting = await objects
     .put(key, bytes, 'application/octet-stream', AbortSignal.timeout(5000))
     .catch((cause: unknown) => cause)

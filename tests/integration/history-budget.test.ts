@@ -1,9 +1,9 @@
 import { afterAll, expect, test } from 'bun:test'
 import { restorePiHistory } from '../../apps/agent/src/harness/pi-history'
 import { sql } from 'kysely'
-import { acceptExecutionCommand } from '../../apps/agent/src/db/command-acceptance'
-import { claimExecutionRun } from '../../apps/agent/src/db/execution-leases'
-import { completeExecutionRun } from '../../apps/agent/src/db/run-writes'
+import { acceptExecutionCommand } from '../../apps/agent/src/execution/db/command-acceptance'
+import { claimExecutionRun } from '../../apps/agent/src/execution/db/execution-leases'
+import { completeExecutionRun } from '../../apps/agent/src/execution/db/run-writes'
 import { executionEventSchema } from '@vid/contract/execution'
 import { openTestDatabase } from './database-fixture'
 
@@ -18,22 +18,10 @@ afterAll(async () => {
           .set({ active_run_id: null, lease_owner: null, lease_until: null })
           .where('thread_id', '=', threadID)
           .execute()
-        await tx
-          .deleteFrom('execution.event_outbox')
-          .where('thread_id', '=', threadID)
-          .execute()
-        await tx
-          .deleteFrom('execution.runs')
-          .where('thread_id', '=', threadID)
-          .execute()
-        await tx
-          .deleteFrom('execution.command_inbox')
-          .where('thread_id', '=', threadID)
-          .execute()
-        await tx
-          .deleteFrom('execution.conversations')
-          .where('thread_id', '=', threadID)
-          .execute()
+        await tx.deleteFrom('execution.event_outbox').where('thread_id', '=', threadID).execute()
+        await tx.deleteFrom('execution.runs').where('thread_id', '=', threadID).execute()
+        await tx.deleteFrom('execution.command_inbox').where('thread_id', '=', threadID).execute()
+        await tx.deleteFrom('execution.conversations').where('thread_id', '=', threadID).execute()
       })
     }
   } finally {
@@ -126,9 +114,9 @@ test('oversize retained private history refuses a lease before allocation and pr
     .where('run_id', '=', fixture.command.runID)
     .orderBy('ordinal')
     .execute()
-  expect(
-    rows.map(({ event }) => executionEventSchema.parse(event)),
-  ).toMatchObject([{ kind: 'run-failed', reason: 'execution-error' }])
+  expect(rows.map(({ event }) => executionEventSchema.parse(event))).toMatchObject([
+    { kind: 'run-failed', reason: 'execution-error' },
+  ])
   expect(
     await claimExecutionRun(db, {
       ownerID: crypto.randomUUID(),
@@ -144,8 +132,7 @@ test('completion reports PostgreSQL-rendered history limit without VM quarantine
     leaseMs: 60000,
   })
   expect(lease?.runID).toBe(fixture.command.runID)
-  if (lease === null)
-    throw new Error('Expected an issued history fixture lease')
+  if (lease === null) throw new Error('Expected an issued history fixture lease')
   const manager = restorePiHistory(null)
   manager.appendCustomEntry(
     'opaque-provider-metadata',
@@ -204,9 +191,10 @@ test('completion reports PostgreSQL-rendered history limit without VM quarantine
     .where('run_id', '=', lease.runID)
     .orderBy('ordinal')
     .execute()
-  expect(
-    receipts.map(({ event }) => executionEventSchema.parse(event).kind),
-  ).toEqual(['run-started', 'run-failed'])
+  expect(receipts.map(({ event }) => executionEventSchema.parse(event).kind)).toEqual([
+    'run-started',
+    'run-failed',
+  ])
 })
 
 test('bounded retained canonical history is transferred unchanged under the issued lease', async () => {

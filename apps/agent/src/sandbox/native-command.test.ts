@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test'
 import { openE2BSandbox } from './e2b'
-import { executeRun } from '../execute-run'
+import { executeRun } from '../execution/execute-run'
 
 function frame(value: unknown, flags = 0) {
   const data = Buffer.from(JSON.stringify(value))
@@ -31,8 +31,7 @@ function fixture(scenario: string) {
           envdAccessToken: 'fixture',
         })
       if (path.endsWith('/Start')) {
-        if (scenario === 'lost-start')
-          return new Response('lost start', { status: 502 })
+        if (scenario === 'lost-start') return new Response('lost start', { status: 502 })
         return new Response(
           new ReadableStream<Uint8Array>({
             start(stream) {
@@ -110,24 +109,16 @@ for (const scenario of ['success', 'nonzero', 'quota', 'lost-start']) {
       } else {
         expect(outcome).toBeInstanceOf(Error)
         expect(
-          await session
-            .execute({ command: 'no replay', signal })
-            .catch((error: unknown) => error),
+          await session.execute({ command: 'no replay', signal }).catch((error: unknown) => error),
         ).toBeInstanceOf(Error)
-        expect(
-          await session.close().catch((error: unknown) => error),
-        ).toBeInstanceOf(Error)
+        expect(await session.close().catch((error: unknown) => error)).toBeInstanceOf(Error)
       }
       await session.close().catch(() => {})
-      expect(
-        native.paths.filter((path) => path.endsWith('/Start')),
-      ).toHaveLength(1)
-      expect(
-        native.paths.filter((path) => path.endsWith('/SendSignal')),
-      ).toHaveLength(scenario === 'quota' ? 1 : 0)
-      expect(
-        native.paths.filter((path) => path.endsWith('/pause')),
-      ).toHaveLength(1)
+      expect(native.paths.filter((path) => path.endsWith('/Start'))).toHaveLength(1)
+      expect(native.paths.filter((path) => path.endsWith('/SendSignal'))).toHaveLength(
+        scenario === 'quota' ? 1 : 0,
+      )
+      expect(native.paths.filter((path) => path.endsWith('/pause'))).toHaveLength(1)
     } finally {
       await native.stop()
     }
@@ -148,15 +139,9 @@ test('cancellation kills the assigned PID without replay and leaves an uncertain
     await native.killReceived.promise
     native.killReceipt.resolve()
     expect(await command).toBeInstanceOf(Error)
-    expect(
-      await session.close().catch((error: unknown) => error),
-    ).toBeInstanceOf(Error)
-    expect(native.paths.filter((path) => path.endsWith('/Start'))).toHaveLength(
-      1,
-    )
-    expect(
-      native.paths.filter((path) => path.endsWith('/SendSignal')),
-    ).toHaveLength(1)
+    expect(await session.close().catch((error: unknown) => error)).toBeInstanceOf(Error)
+    expect(native.paths.filter((path) => path.endsWith('/Start'))).toHaveLength(1)
+    expect(native.paths.filter((path) => path.endsWith('/SendSignal'))).toHaveLength(1)
   } finally {
     native.killReceipt.resolve()
     await native.stop()
@@ -165,15 +150,9 @@ test('cancellation kills the assigned PID without replay and leaves an uncertain
 
 function killResponse(scenario: string) {
   if (scenario.endsWith('-false'))
-    return Response.json(
-      { code: 'not_found', message: 'owned PID missing' },
-      { status: 404 },
-    )
+    return Response.json({ code: 'not_found', message: 'owned PID missing' }, { status: 404 })
   if (scenario.endsWith('-reject'))
-    return Response.json(
-      { code: 'unavailable', message: 'lost kill receipt' },
-      { status: 503 },
-    )
+    return Response.json({ code: 'unavailable', message: 'lost kill receipt' }, { status: 503 })
   return Response.json({})
 }
 
@@ -183,18 +162,14 @@ function initialFrames(scenario: string) {
     frame({
       event: {
         data: {
-          stdout: Buffer.from(quota ? 'x'.repeat(131072) : 'output').toString(
-            'base64',
-          ),
+          stdout: Buffer.from(quota ? 'x'.repeat(131072) : 'output').toString('base64'),
         },
       },
     }),
     frame({
       event: {
         data: {
-          stderr: Buffer.from(
-            quota ? 'y'.repeat(131073) : 'diagnostic',
-          ).toString('base64'),
+          stderr: Buffer.from(quota ? 'y'.repeat(131073) : 'diagnostic').toString('base64'),
         },
       },
     }),
@@ -226,9 +201,7 @@ function finishKilled(
       }),
     )
   if (scenario !== 'abort-no-end')
-    controller?.enqueue(
-      frame({ event: { end: { exitCode: 137, exited: true } } }),
-    )
+    controller?.enqueue(frame({ event: { end: { exitCode: 137, exited: true } } }))
   controller?.enqueue(frame({}, 2))
   controller?.close()
 }
@@ -255,25 +228,22 @@ test('native mutative quota stops spending and quarantines the same persisted al
           },
           complete: async () => {
             events.push('complete')
-            return true
+            return 'completed'
           },
           fail: async () => {
             events.push('fail')
-            return true
+            return 'failed'
           },
           cancel: async () => {
             events.push('cancel')
-            return true
+            return 'cancelled'
           },
         },
-        openSandbox: async (_lease, signal) =>
-          await openE2BSandbox(native.options, signal),
+        openSandbox: async (_lease, signal) => await openE2BSandbox(native.options, signal),
         harness: {
           turn: async ({ tools, signal }) => {
             expect(
-              await tools
-                .execute({ command: 'quota', signal })
-                .catch((error: unknown) => error),
+              await tools.execute({ command: 'quota', signal }).catch((error: unknown) => error),
             ).toBeInstanceOf(Error)
             expect(signal.aborted).toBe(true)
             expect(
@@ -289,15 +259,9 @@ test('native mutative quota stops spending and quarantines the same persisted al
     )
     expect(outcome).toBe('failed')
     expect(events).toEqual(['save:owned-command', 'quarantine:execution-error'])
-    expect(native.paths.filter((path) => path.endsWith('/Start'))).toHaveLength(
-      1,
-    )
-    expect(native.paths.filter((path) => path.endsWith('/pause'))).toHaveLength(
-      1,
-    )
-    expect(
-      native.paths.filter((path) => path === '/v2/sandboxes'),
-    ).toHaveLength(1)
+    expect(native.paths.filter((path) => path.endsWith('/Start'))).toHaveLength(1)
+    expect(native.paths.filter((path) => path.endsWith('/pause'))).toHaveLength(1)
+    expect(native.paths.filter((path) => path === '/v2/sandboxes')).toHaveLength(1)
   } finally {
     await native.stop()
   }

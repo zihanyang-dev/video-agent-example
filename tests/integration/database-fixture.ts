@@ -7,8 +7,7 @@ import { Pool, type ClientBase } from 'pg'
  * the actual connected database, not a caller's URL/name assertion. */
 export function testDatabaseOptions(connectionString: string) {
   const owner = process.env.VID_TEST_DATABASE_OWNER
-  if (!owner || !/^[a-f0-9]{64}$/.test(owner))
-    throw new Error('Owned test database required')
+  if (!owner || !/^[a-f0-9]{64}$/.test(owner)) throw new Error('Owned test database required')
   return {
     connectionString,
     connectionTimeoutMillis: 5000,
@@ -23,8 +22,7 @@ export async function verifyTestDatabase(
   client: ClientBase,
   owner = process.env.VID_TEST_DATABASE_OWNER,
 ) {
-  if (!owner || !/^[a-f0-9]{64}$/.test(owner))
-    throw new Error('Owned test database required')
+  if (!owner || !/^[a-f0-9]{64}$/.test(owner)) throw new Error('Owned test database required')
   const result = await client.query<{ marker: string | null }>(
     "select shobj_description(oid, 'pg_database') as marker from pg_database where datname = current_database()",
   )
@@ -32,10 +30,7 @@ export async function verifyTestDatabase(
     throw new Error('Owned test database required')
 }
 
-export function openTestDatabase(
-  max = 4,
-  connectionString = readMigrationEnv().DATABASE_URL,
-) {
+export function openTestDatabase(max = 4, connectionString = readMigrationEnv().DATABASE_URL) {
   const options = testDatabaseOptions(connectionString)
   const owner = process.env.VID_TEST_DATABASE_OWNER
   const db = new Kysely<DB>({
@@ -74,8 +69,7 @@ export async function settleTestCleanup(cleanups: (() => Promise<unknown>)[]) {
       failures.push(cause)
     }
   }
-  if (failures.length)
-    throw new AggregateError(failures, 'Test database cleanup failed')
+  if (failures.length) throw new AggregateError(failures, 'Test database cleanup failed')
 }
 
 /** Direct SQL tests may use symbolic IDs, but must still seed actual library

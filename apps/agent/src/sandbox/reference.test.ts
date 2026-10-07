@@ -23,9 +23,7 @@ test('persisted provider identities preserve opaque identifiers without acceptin
       id: 'Native/ID:CaseSensitive',
     }),
   ).toEqual({ provider: 'future-provider', id: 'Native/ID:CaseSensitive' })
-  expect(() =>
-    sandboxReferenceFromJSON({ provider: 'e2b', id: 'native', memory: true }),
-  ).toThrow()
+  expect(() => sandboxReferenceFromJSON({ provider: 'e2b', id: 'native', memory: true })).toThrow()
 })
 
 test('the validated persisted reference cannot change after lease authorization', () => {

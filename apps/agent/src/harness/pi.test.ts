@@ -1,9 +1,9 @@
 import { expect, test } from 'bun:test'
-import {
-  parseSessionEntries,
-  SessionManager,
-} from '@earendil-works/pi-coding-agent'
-import type { SandboxTools } from '../execute-run.ts'
+import { mkdtempSync, rmSync, symlinkSync } from 'node:fs'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
+import { parseSessionEntries, SessionManager } from '@earendil-works/pi-coding-agent'
+import type { SandboxTools } from '../execution/contract.ts'
 import { restorePiHistory } from './pi-history.ts'
 import type { WebSearchConfig } from './web-search'
 import { createPiHarness } from './pi.ts'
@@ -32,9 +32,7 @@ function fixture(responses: Record<string, unknown>[][]) {
     hostname: '127.0.0.1',
     port: 0,
     async fetch(request) {
-      expect(request.headers.get('authorization')).toBe(
-        'Bearer fixture-only-key',
-      )
+      expect(request.headers.get('authorization')).toBe('Bearer fixture-only-key')
       requests.push((await request.json()) as RequestBody)
       const chunks = responses.shift()
       if (!chunks) return new Response('unexpected request', { status: 500 })
@@ -177,9 +175,7 @@ test('canonical answer is the final native assistant message, not tool-turn narr
     })
     expect(result.text).toBe(final)
     expect(deltas.join('')).toBe('Checking the assigned notes. ' + final)
-    expect(JSON.stringify(result.history)).toContain(
-      'Checking the assigned notes.',
-    )
+    expect(JSON.stringify(result.history)).toContain('Checking the assigned notes.')
     expect(JSON.stringify(result.history)).toContain('PRIVATE READ')
     expect(result.text).not.toContain('PRIVATE THINKING')
     expect(provider.requests).toHaveLength(2)
@@ -220,30 +216,59 @@ test('streams only assistant text and restores canonical private history in a fr
     expect(second.text).toBe('Again')
     const snapshot = second.history as typeof restored
     expect(snapshot.header).toEqual(restored.header)
-    expect(snapshot.entries.slice(0, restored.entries.length)).toEqual(
-      restored.entries,
-    )
+    expect(snapshot.entries.slice(0, restored.entries.length)).toEqual(restored.entries)
     const request = provider.requests[1]!
     expect(JSON.stringify(request.messages)).toContain('first')
     expect(JSON.stringify(request.messages)).toContain('Hello')
     expect(request.model).toBe(options.modelID)
-    expect(
-      provider.requests[0]!.tools.map((tool) => tool.function.name).sort(),
-    ).toEqual(['execute', 'read', 'write'])
-    expect(JSON.stringify(provider.requests[0]!.messages)).toContain(
-      options.systemPrompt,
-    )
+    expect(provider.requests[0]!.tools.map((tool) => tool.function.name).sort()).toEqual([
+      'execute',
+      'read',
+      'write',
+    ])
+    expect(JSON.stringify(provider.requests[0]!.messages)).toContain(options.systemPrompt)
     expect(deltas.join('')).not.toContain('PRIVATE')
   } finally {
     await provider.close()
   }
 })
 
+test('host symlink errors cannot prevent a write to the assigned guest path', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'vid-guest-write-'))
+  const guestPath = join(directory, 'loop', 'file.txt')
+  let provider: ReturnType<typeof fixture> | undefined
+  try {
+    symlinkSync('loop', join(directory, 'loop'))
+    provider = fixture([
+      calls([{ name: 'write', args: { path: guestPath, content: 'guest bytes' } }]),
+      answer('Done'),
+    ])
+    const assigned = sandbox()
+    const result = await createPiHarness({
+      ...options,
+      baseURL: provider.baseURL,
+    }).turn({
+      text: 'Write in the assigned guest',
+      history: null,
+      tools: assigned.tools,
+      signal: AbortSignal.timeout(5000),
+      onText: () => {},
+    })
+    expect(result.text).toBe('Done')
+    expect(assigned.files.get(guestPath)).toBe('guest bytes')
+    expect(JSON.stringify(result.history)).not.toContain('ELOOP')
+  } finally {
+    try {
+      await provider?.close()
+    } finally {
+      rmSync(directory, { recursive: true, force: true })
+    }
+  }
+})
+
 test('executes only assigned sandbox tools with private results and meaningful side effects', async () => {
   const provider = fixture([
-    calls([
-      { name: 'write', args: { path: '/work/video.txt', content: 'video' } },
-    ]),
+    calls([{ name: 'write', args: { path: '/work/video.txt', content: 'video' } }]),
     calls([
       { name: 'read', args: { path: '/work/video.txt' } },
       { name: 'execute', args: { command: 'render video' } },
@@ -266,14 +291,10 @@ test('executes only assigned sandbox tools with private results and meaningful s
     expect(assigned.files.get('/work/video.txt')).toBe('video')
     expect(assigned.commands).toEqual(['render video'])
     expect(assigned.signals).toHaveLength(3)
-    expect(
-      assigned.signals.every((signal) => signal instanceof AbortSignal),
-    ).toBe(true)
+    expect(assigned.signals.every((signal) => signal instanceof AbortSignal)).toBe(true)
     expect(result.text).toBe('Rendered')
     expect(deltas.join('')).toBe('Rendered')
-    expect(JSON.stringify(provider.requests[2]!.messages)).toContain(
-      'PRIVATE STDOUT',
-    )
+    expect(JSON.stringify(provider.requests[2]!.messages)).toContain('PRIVATE STDOUT')
     expect(JSON.stringify(result.history)).toContain('PRIVATE STDOUT')
   } finally {
     await provider.close()
@@ -301,9 +322,7 @@ test('pre-aborted turns do not contact the provider', async () => {
 })
 
 test('cancellation waits for the sandbox tool to settle before returning', async () => {
-  const provider = fixture([
-    calls([{ name: 'execute', args: { command: 'long render' } }]),
-  ])
+  const provider = fixture([calls([{ name: 'execute', args: { command: 'long render' } }])])
   const controller = new AbortController()
   const pending = pendingSandbox()
   const deltas: string[] = []
@@ -376,8 +395,7 @@ for (const stopReason of ['aborted', 'error']) {
     const history = await seededHistory()
     const assistant = history.entries.find(
       (entry) =>
-        entry.type === 'message' &&
-        (entry.message as { role: string }).role === 'assistant',
+        entry.type === 'message' && (entry.message as { role: string }).role === 'assistant',
     )!
     Object.assign(assistant.message as object, {
       stopReason,
@@ -412,9 +430,7 @@ test('restores an empty SQL history array as a fresh session', () => {
 
 for (const history of [[null], [{ type: 'session' }]]) {
   test(`rejects nonempty history array ${JSON.stringify(history)} before SDK traversal`, () => {
-    expect(() => restorePiHistory(history)).toThrow(
-      'Invalid private Pi history',
-    )
+    expect(() => restorePiHistory(history)).toThrow('Invalid private Pi history')
   })
 }
 
@@ -436,9 +452,7 @@ test('restores SDK context without imposing provider metadata requirements', () 
     leafID: 'assistant',
   }
   const restored = restorePiHistory(history)
-  expect(JSON.stringify(restored.getEntries())).toBe(
-    JSON.stringify(history.entries),
-  )
+  expect(JSON.stringify(restored.getEntries())).toBe(JSON.stringify(history.entries))
   expect(JSON.stringify(restored.buildSessionContext().messages.at(-1))).toBe(
     JSON.stringify({ role: 'assistant', content: [] }),
   )
@@ -483,9 +497,7 @@ const invalidHistories: Record<
   },
   'bad system sections': (history) => {
     const entry = history.entries.find(
-      (entry) =>
-        entry.type === 'message' &&
-        (entry.message as { role: string }).role === 'system',
+      (entry) => entry.type === 'message' && (entry.message as { role: string }).role === 'system',
     )!
     Object.assign(entry.message as object, { sections: { broken: 42 } })
   },
@@ -501,8 +513,7 @@ for (const [name, corrupt] of Object.entries(invalidHistories)) {
     const provider = fixture([answer('must not run')])
     try {
       const script = `
-        import type { WebSearchConfig } from './web-search'
-import { createPiHarness } from ${JSON.stringify(new URL('./pi.ts', import.meta.url).pathname)};
+        import { createPiHarness } from ${JSON.stringify(new URL('./pi.ts', import.meta.url).pathname)};
         try {
           await createPiHarness(${JSON.stringify({ ...options, baseURL: provider.baseURL })}).turn({
             history: ${JSON.stringify(history)}, text: 'invalid',
@@ -538,9 +549,7 @@ async function branchedHistory() {
     '/fixture',
     undefined,
     parseSessionEntries(
-      [seed.header, ...seed.entries]
-        .map((entry) => JSON.stringify(entry))
-        .join('\n'),
+      [seed.header, ...seed.entries].map((entry) => JSON.stringify(entry)).join('\n'),
     ),
   )
   const fork = manager.getLeafId()!
@@ -588,9 +597,7 @@ test('preserves the full canonical branched tree while projecting only the selec
     expect(result.text).toBe('Branch answer')
     const restored = result.history as typeof history
     expect(restored.header).toEqual(history.header)
-    expect(restored.entries.slice(0, history.entries.length)).toEqual(
-      history.entries,
-    )
+    expect(restored.entries.slice(0, history.entries.length)).toEqual(history.entries)
     const messages = JSON.stringify(provider.requests[0]!.messages)
     expect(messages).toContain('COMPACTED SUMMARY')
     expect(messages).toContain('EDITED REQUEST')
@@ -621,13 +628,9 @@ test('a null active leaf preserves existing entries but starts a new root', asyn
     })
     expect(result.text).toBe('New root')
     const restored = result.history as typeof history
-    expect(restored.entries.slice(0, history.entries.length)).toEqual(
-      history.entries,
-    )
+    expect(restored.entries.slice(0, history.entries.length)).toEqual(history.entries)
     expect(restored.entries[history.entries.length]!.parentId).toBeNull()
-    expect(JSON.stringify(provider.requests[0]!.messages)).not.toContain(
-      'previous request',
-    )
+    expect(JSON.stringify(provider.requests[0]!.messages)).not.toContain('previous request')
   } finally {
     await provider.close()
   }
@@ -647,6 +650,75 @@ test('a current provider failure is rejected even when history has a successful 
       }),
     ).rejects.toThrow('Pi model execution failed')
     expect(provider.requests).toHaveLength(1)
+  } finally {
+    await provider.close()
+  }
+})
+
+test('combined assigned tools send only ordered public asset metadata and preserve canonical answer whitespace', async () => {
+  const provider = fixture([answer(' \nExact 🎬 answer  \n')])
+  try {
+    const result = await createPiHarness({
+      ...options,
+      baseURL: provider.baseURL,
+      webSearch: {
+        authMode: 'keyless',
+        transport: async () => {
+          throw new Error('Unexpected search dispatch')
+        },
+      },
+    }).turn({
+      text: 'Inspect these assets in order.',
+      history: null,
+      tools: sandbox().tools,
+      signal: AbortSignal.timeout(5000),
+      onText: () => {},
+      fileTools: {
+        assigned: [
+          {
+            assetID: '11111111-1111-4111-8111-111111111111',
+            objectKey: 'private-object-key-first',
+            name: '电影 🎬.png',
+            mimeType: 'image/png',
+            byteLength: 3,
+            sha256: 'a'.repeat(64),
+          },
+          {
+            assetID: '22222222-2222-4222-8222-222222222222',
+            objectKey: 'private-object-key-second',
+            name: 'second.zip',
+            mimeType: 'application/zip',
+            byteLength: 5,
+            sha256: 'b'.repeat(64),
+          },
+        ],
+        prepared: [],
+        hasUnknownOutcome: () => false,
+        importFile: async () => {
+          throw new Error('Unexpected import')
+        },
+        exportFile: async () => {
+          throw new Error('Unexpected export')
+        },
+      },
+    })
+    expect(result.text).toBe(' \nExact 🎬 answer  \n')
+    expect(provider.requests).toHaveLength(1)
+    expect(provider.requests[0]!.tools.map((tool) => tool.function.name).sort()).toEqual([
+      'execute',
+      'export_file',
+      'import_file',
+      'read',
+      'web_search',
+      'write',
+    ])
+    const expected =
+      'Inspect these assets in order.\nAssigned assets (import_file by assetID to a path you choose):\n[{"assetID":"11111111-1111-4111-8111-111111111111","name":"电影 🎬.png","mimeType":"image/png"},{"assetID":"22222222-2222-4222-8222-222222222222","name":"second.zip","mimeType":"application/zip"}]'
+    const messages = JSON.stringify(provider.requests[0]!.messages)
+    expect(messages).toContain(JSON.stringify(expected))
+    expect(messages).not.toContain('private-object-key')
+    expect(messages).not.toContain('sha256')
+    expect(messages).not.toContain('byteLength')
   } finally {
     await provider.close()
   }
@@ -719,9 +791,7 @@ test('text-only assigned models receive staged-file instructions without an imag
       signal: AbortSignal.timeout(5000),
       onText: () => {},
     })
-    expect(JSON.stringify(provider.requests[0]?.messages)).not.toContain(
-      'image_url',
-    )
+    expect(JSON.stringify(provider.requests[0]?.messages)).not.toContain('image_url')
     expect(JSON.stringify(provider.requests[0]?.messages)).toContain(
       '/home/user/materials/photo.png',
     )
@@ -830,12 +900,8 @@ for (const [mimeType, input] of [
       })
       expect(result.text).toBe('Use tools')
       expect(provider.requests).toHaveLength(2)
-      expect(JSON.stringify(provider.requests[1]?.messages)).not.toContain(
-        'image_url',
-      )
-      expect(JSON.stringify(provider.requests[1]?.messages)).toContain(
-        'Use tools to inspect',
-      )
+      expect(JSON.stringify(provider.requests[1]?.messages)).not.toContain('image_url')
+      expect(JSON.stringify(provider.requests[1]?.messages)).toContain('Use tools to inspect')
       expect(byteReads).toBe(0)
     } finally {
       await provider.close()
@@ -892,16 +958,15 @@ test('native web_search loopback HTTP evidence is canonical and restored without
       webSearch,
     }).turn(input)
     expect(first.text).toBe('Source: https://example.org/source')
-    expect(first.sources).toEqual([
-      { title: 'Public source', url: 'https://example.org/source' },
-    ])
+    expect(first.sources).toEqual([{ title: 'Public source', url: 'https://example.org/source' }])
     expect(JSON.stringify(first.sources)).not.toContain('Quoted evidence')
-    expect(
-      provider.requests[0]!.tools.map((tool) => tool.function.name).sort(),
-    ).toEqual(['execute', 'read', 'web_search', 'write'])
-    expect(JSON.stringify(provider.requests[1]!.messages)).toContain(
-      'Quoted evidence',
-    )
+    expect(provider.requests[0]!.tools.map((tool) => tool.function.name).sort()).toEqual([
+      'execute',
+      'read',
+      'web_search',
+      'write',
+    ])
+    expect(JSON.stringify(provider.requests[1]!.messages)).toContain('Quoted evidence')
     expect(JSON.stringify(first.history)).toContain('web_search')
     const second = await createPiHarness({
       ...options,
@@ -912,9 +977,7 @@ test('native web_search loopback HTTP evidence is canonical and restored without
       text: 'continue',
       history: JSON.parse(JSON.stringify(first.history)),
     })
-    expect(JSON.stringify(provider.requests[2]!.messages)).toContain(
-      'Quoted evidence',
-    )
+    expect(JSON.stringify(provider.requests[2]!.messages)).toContain('Quoted evidence')
     expect(searches).toBe(1)
     expect(second.sources).toEqual([])
   } finally {
@@ -1072,9 +1135,7 @@ test('ordinary remote search failure is sanitized tool evidence, not a failed sa
     expect(replay).toContain('Web search unavailable.')
     expect(replay).not.toContain('fixture-search-key')
     expect(replay).not.toContain('PRIVATE provider body')
-    expect(JSON.stringify(provider.requests[1]!.messages)).not.toContain(
-      'PRIVATE provider body',
-    )
+    expect(JSON.stringify(provider.requests[1]!.messages)).not.toContain('PRIVATE provider body')
   } finally {
     await provider.close()
   }
@@ -1213,15 +1274,15 @@ test('native turn deduplicates normalized found URLs without retaining snippets'
       signal: AbortSignal.timeout(5000),
       onText: () => {},
     })
-    expect(result.sources).toEqual([
-      { title: 'Found', url: 'https://example.org/' },
-    ])
+    expect(result.sources).toEqual([{ title: 'Found', url: 'https://example.org/' }])
   } finally {
     await provider.close()
   }
 })
 
-function budgetResponses(scenario: string) {
+type BudgetScenario = 'iterations' | 'thinking' | 'arguments' | 'write'
+
+function budgetResponses(scenario: BudgetScenario) {
   const call = (name: string, args: unknown) => calls([{ name, args }])
   switch (scenario) {
     case 'iterations':
@@ -1244,38 +1305,8 @@ function budgetResponses(scenario: string) {
         answer('unexpected'),
       ]
     case 'arguments':
-      return [
-        call('read', { path: 'x'.repeat(2 * 1024 * 1024 + 1) }),
-        answer('unexpected'),
-      ]
-    case 'batch':
-      return [
-        calls(
-          Array.from({ length: 33 }, () => ({
-            name: 'read',
-            args: { path: '/fixture' },
-          })),
-        ),
-        answer('unexpected'),
-      ]
-    case 'writes':
-      return [
-        ...Array.from({ length: 5 }, () =>
-          call('write', { path: '/fixture', content: 'x'.repeat(256 * 1024) }),
-        ),
-        answer('unexpected'),
-      ]
-    case 'command':
-      return [
-        call('execute', { command: 'x'.repeat(16 * 1024 + 1) }),
-        answer('unexpected'),
-      ]
-    case 'path':
-      return [
-        call('read', { path: 'x'.repeat(4 * 1024 + 1) }),
-        answer('unexpected'),
-      ]
-    default:
+      return [call('read', { path: 'x'.repeat(2 * 1024 * 1024 + 1) }), answer('unexpected')]
+    case 'write':
       return [
         call('write', {
           path: '/fixture',
@@ -1286,10 +1317,7 @@ function budgetResponses(scenario: string) {
   }
 }
 
-async function expectBudgetFailure(
-  turn: Promise<unknown>,
-  message = 'Pi turn budget exceeded',
-) {
+async function expectBudgetFailure(turn: Promise<unknown>, message = 'Pi turn budget exceeded') {
   const error = await turn.then(
     () => undefined,
     (caught: unknown) => caught,
@@ -1297,12 +1325,7 @@ async function expectBudgetFailure(
   expect(error).toMatchObject({ message })
 }
 
-for (const scenario of [
-  'iterations',
-  'thinking',
-  'arguments',
-  'write',
-] as const) {
+for (const scenario of ['iterations', 'thinking', 'arguments', 'write'] as const) {
   test(`native logical admission refuses ${scenario} without subsequent HTTP dispatch`, async () => {
     const responses = budgetResponses(scenario)
     const provider = fixture(responses)

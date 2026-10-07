@@ -6,8 +6,9 @@ import type {
   ExecutionWrites,
   ExecutionCompletion,
   ExecutionFailure,
-} from '../execute-run'
-import type { NativeSandboxReference } from '../sandbox/reference'
+  ExecutionOutcome,
+} from '../contract'
+import type { NativeSandboxReference } from '../../sandbox/reference'
 import {
   lockLease,
   releaseConversation,
@@ -25,18 +26,23 @@ export function bindExecutionWrites(db: Kysely<DB>): ExecutionWrites {
     quarantine: (lease, reason) => quarantineSandbox(db, lease, reason),
     renew: (lease, leaseMs) => renewExecutionLease(db, lease, leaseMs),
     appendText: (lease, delta) => appendExecutionText(db, lease, delta),
-    complete: (lease, completion) =>
-      completeExecutionRun(db, lease, completion),
-    fail: (lease, reason) => failExecutionRun(db, lease, reason),
-    cancel: (lease) => cancelExecutionRun(db, lease),
+    complete: async (lease, completion) =>
+      terminalOutcome(await completeExecutionRun(db, lease, completion), 'completed'),
+    fail: async (lease, reason) =>
+      terminalOutcome(await failExecutionRun(db, lease, reason), 'failed'),
+    cancel: async (lease) => terminalOutcome(await cancelExecutionRun(db, lease), 'cancelled'),
   }
 }
 
-export async function appendExecutionText(
-  db: Kysely<DB>,
-  lease: ExecutionLease,
-  text: string,
-) {
+function terminalOutcome(
+  accepted: boolean | ExecutionOutcome,
+  requested: ExecutionOutcome,
+): ExecutionOutcome {
+  if (typeof accepted === 'string') return accepted
+  return accepted ? requested : 'lost'
+}
+
+export async function appendExecutionText(db: Kysely<DB>, lease: ExecutionLease, text: string) {
   return await db.transaction().execute((tx) => appendText(tx, lease, text))
 }
 
@@ -45,9 +51,7 @@ export async function completeExecutionRun(
   lease: ExecutionLease,
   completion: ExecutionCompletion,
 ) {
-  return await db
-    .transaction()
-    .execute((tx) => finishRun(tx, lease, { completion }))
+  return await db.transaction().execute((tx) => finishRun(tx, lease, { completion }))
 }
 
 export async function failExecutionRun(
@@ -66,10 +70,7 @@ export async function failExecutionRun(
   )
 }
 
-export async function cancelExecutionRun(
-  db: Kysely<DB>,
-  lease: ExecutionLease,
-) {
+export async function cancelExecutionRun(db: Kysely<DB>, lease: ExecutionLease) {
   const result = await db.transaction().execute((tx) =>
     finishRun(tx, lease, {
       event: { ...eventIdentities(lease), kind: 'run-cancelled' },
@@ -78,17 +79,9 @@ export async function cancelExecutionRun(
   return result === 'cancelled' ? true : result
 }
 
-async function appendText(
-  tx: Transaction<DB>,
-  lease: ExecutionLease,
-  delta: string,
-) {
+async function appendText(tx: Transaction<DB>, lease: ExecutionLease, delta: string) {
   const run = await lockLease(tx, lease)
-  if (
-    run === undefined ||
-    run.cancel_requested ||
-    run.sandbox_recovery_required
-  ) {
+  if (run === undefined || run.cancel_requested || run.sandbox_recovery_required) {
     return false
   }
   await enqueueEvent(tx, {
@@ -131,12 +124,7 @@ async function finishRun(
     await recordTerminal(tx, decision.event)
     return true
   }
-  return await persistCompletion(
-    tx,
-    lease,
-    decision.completion,
-    run.assistant_message_id!,
-  )
+  return await persistCompletion(tx, lease, decision.completion, run.assistant_message_id!)
 }
 
 async function persistCompletion(
@@ -148,17 +136,13 @@ async function persistCompletion(
   // Keep history private and unchanged if it exceeds the reasonable input limit.
   const stored = await tx
     .with('completed_history', (query) =>
-      query.selectNoFrom(
-        sql`${JSON.stringify(input.history)}::jsonb`.as('value'),
-      ),
+      query.selectNoFrom(sql`${JSON.stringify(input.history)}::jsonb`.as('value')),
     )
     .updateTable('execution.conversations')
     .from('completed_history')
     .set({ history: sql`completed_history.value` })
     .where('thread_id', '=', lease.threadID)
-    .where(
-      sql<boolean>`octet_length(completed_history.value::text) <= ${historyByteLimit}`,
-    )
+    .where(sql<boolean>`octet_length(completed_history.value::text) <= ${historyByteLimit}`)
     .returning('thread_id')
     .executeTakeFirst()
   if (stored === undefined) {
@@ -182,10 +166,7 @@ async function persistCompletion(
 
 async function recordTerminal(
   tx: Transaction<DB>,
-  event: Extract<
-    ExecutionEvent,
-    { kind: 'run-completed' | 'run-failed' | 'run-cancelled' }
-  >,
+  event: Extract<ExecutionEvent, { kind: 'run-completed' | 'run-failed' | 'run-cancelled' }>,
 ) {
   const status = {
     'run-completed': 'completed',
@@ -239,11 +220,7 @@ export async function quarantineSandbox(
       .set({ sandbox_recovery_required: true })
       .where('thread_id', '=', lease.threadID)
       .execute()
-    if (
-      conversation.active_run_id !== lease.runID ||
-      conversation.fence !== lease.fence
-    )
-      return
+    if (conversation.active_run_id !== lease.runID || conversation.fence !== lease.fence) return
     await recordTerminal(tx, {
       ...eventIdentities(lease),
       kind: 'run-failed',

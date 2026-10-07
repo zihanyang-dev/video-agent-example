@@ -2,9 +2,7 @@ import type { DB } from '@vid/database/types'
 import { sql, type Transaction } from 'kysely'
 import type { ExecutionEvent } from '@vid/contract/execution'
 
-export function eventIdentities(
-  run: Readonly<{ threadID: string; runID: string }>,
-) {
+export function eventIdentities(run: Readonly<{ threadID: string; runID: string }>) {
   return {
     version: 1,
     eventID: crypto.randomUUID(),

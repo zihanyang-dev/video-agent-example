@@ -1,21 +1,15 @@
-import type { ExecutionLease } from '../../apps/agent/src/execute-run'
-import { acceptExecutionCommand } from '../../apps/agent/src/db/command-acceptance'
-import { claimExecutionRun } from '../../apps/agent/src/db/execution-leases'
-import { bindExecutionWrites } from '../../apps/agent/src/db/run-writes'
-import { executeRun } from '../../apps/agent/src/execute-run'
+import type { ExecutionLease } from '../../apps/agent/src/execution/contract'
+import { acceptExecutionCommand } from '../../apps/agent/src/execution/db/command-acceptance'
+import { claimExecutionRun } from '../../apps/agent/src/execution/db/execution-leases'
+import { bindExecutionWrites } from '../../apps/agent/src/execution/db/run-writes'
+import { executeRun } from '../../apps/agent/src/execution/execute-run'
 import { createPiHarness } from '../../apps/agent/src/harness/pi'
 import { assignFileTools } from '../../apps/agent/src/harness/files'
-import {
-  executionCommandSchema,
-  executionEventSchema,
-} from '@vid/contract/execution'
+import { executionCommandSchema, executionEventSchema } from '@vid/contract/execution'
 import { afterAll, expect, test } from 'bun:test'
 import { connectObjects, sha256 } from '@vid/object-storage'
 import { createHTTP } from '../../apps/server/src/http'
-import {
-  signedTestIdentity,
-  storageSettings,
-} from '../integration/authentication-fixture'
+import { signedTestIdentity, storageSettings } from '../integration/authentication-fixture'
 import { openTestDatabase } from '../integration/database-fixture'
 import { acceptExecutionEvent } from '../../apps/server/src/db/execution-events'
 import { completeAsset } from '../../apps/server/src/db/assets'
@@ -78,13 +72,7 @@ async function fixture() {
     )
   }
   expect(
-    (
-      await request(
-        '/api/threads',
-        'POST',
-        JSON.stringify({ threadID, title: 'Files' }),
-      )
-    ).status,
+    (await request('/api/threads', 'POST', JSON.stringify({ threadID, title: 'Files' }))).status,
   ).toBe(201)
   return { login, threadID, request, route }
 }
@@ -103,17 +91,6 @@ async function uploadedAsset() {
   const dto = assetResponseSchema.parse(await uploaded.json())
   expect(dto.asset.byteLength).toBe(bytes.length)
   expect(JSON.stringify(dto)).not.toContain('objectKey')
-  expect((await f.request(path, 'POST', bytes, headers)).status).toBe(200)
-  expect(
-    (
-      await f.request(
-        path,
-        'POST',
-        new TextEncoder().encode('different'),
-        headers,
-      )
-    ).status,
-  ).toBe(409)
   return { f, assetID, bytes }
 }
 async function uploadedMessage() {
@@ -124,17 +101,11 @@ async function uploadedMessage() {
     text: '',
     assetIDs: [assetID],
   })
-  const sent = await f.request(
-    `/api/threads/${f.threadID}/messages`,
-    'POST',
-    body,
-  )
+  const sent = await f.request(`/api/threads/${f.threadID}/messages`, 'POST', body)
   expect(sent.status).toBe(202)
   const result = await sent.json()
   expect(
-    await (
-      await f.request(`/api/threads/${f.threadID}/messages`, 'POST', body)
-    ).json(),
+    await (await f.request(`/api/threads/${f.threadID}/messages`, 'POST', body)).json(),
   ).toEqual(result)
   expect(
     (
@@ -154,9 +125,7 @@ async function uploadedMessage() {
     .select('command')
     .where('command_id', '=', result.commandID)
     .executeTakeFirstOrThrow()
-  expect(JSON.stringify(command.command)).toContain(
-    `assets/uploads/${f.threadID}/${assetID}`,
-  )
+  expect(JSON.stringify(command.command)).toContain(`assets/uploads/${f.threadID}/${assetID}`)
 
   return { f, assetID, bytes, messageID, result }
 }
@@ -168,12 +137,7 @@ async function completedAsset(
   const assetID = crypto.randomUUID(),
     assistantID = crypto.randomUUID()
   const key = `assets/generated/${f.threadID}/${result.runID}/1/${assetID}`
-  const digest = await workerObjects.put(
-    key,
-    bytes,
-    mimeType,
-    AbortSignal.timeout(5000),
-  )
+  const digest = await workerObjects.put(key, bytes, mimeType, AbortSignal.timeout(5000))
   const event = {
     version: 1 as const,
     kind: 'run-completed' as const,
@@ -206,48 +170,43 @@ async function completedAsset(
   const snapshot = messagesResponseSchema.parse(
     await (await f.request(`/api/threads/${f.threadID}/messages`)).json(),
   )
-  expect(
-    snapshot.messages.find((m) => m.messageID === messageID)?.assets?.[0]
-      ?.assetID,
-  ).toBe(uploadID)
-  expect(
-    snapshot.messages.find((m) => m.messageID === assistantID)?.assets?.[0]
-      ?.assetID,
-  ).toBe(assetID)
+  expect(snapshot.messages.find((m) => m.messageID === messageID)?.assets?.[0]?.assetID).toBe(
+    uploadID,
+  )
+  expect(snapshot.messages.find((m) => m.messageID === assistantID)?.assets?.[0]?.assetID).toBe(
+    assetID,
+  )
   expect(JSON.stringify(snapshot)).not.toContain(key)
 
   return { assetID, digest }
 }
 test('real bytes: owned upload, exact retry, conflict, private allocations, atomic assets and authenticated download', async () => {
   const input = await uploadedMessage()
-  const { f, assetID } = input
+  const { f, assetID, bytes } = input
+  const headers = new Headers(f.login.headers)
+  headers.set('content-type', 'text/plain')
+  headers.set('x-asset-id', assetID)
+  headers.set('x-file-name', 'note.txt')
+  const path = `/api/threads/${f.threadID}/assets`
+  const replayed = await f.request(path, 'POST', bytes, headers)
+  expect(replayed.status).toBe(200)
+  const replay = await replayed.json()
+  expect(JSON.stringify(replay)).not.toContain('objectKey')
+  expect(assetResponseSchema.parse(replay).asset.assetID).toBe(assetID)
+  const conflict = await f.request(path, 'POST', new TextEncoder().encode('different'), headers)
+  expect(conflict.status).toBe(409)
+  await conflict.text()
   const { assetID: generatedID, digest } = await completedAsset(input)
   const downloaded = await f.request(`/api/assets/${generatedID}/file`)
   expect(downloaded.status).toBe(200)
-  expect(sha256(new Uint8Array(await downloaded.arrayBuffer()))).toBe(
-    digest.sha256,
-  )
+  expect(sha256(new Uint8Array(await downloaded.arrayBuffer()))).toBe(digest.sha256)
   expect(downloaded.headers.get('content-disposition')).toContain('attachment')
   const foreign = await signedTestIdentity(db)
   expect(
-    (
-      await f.request(
-        `/api/assets/${assetID}/file`,
-        'GET',
-        undefined,
-        foreign.headers,
-      )
-    ).status,
+    (await f.request(`/api/assets/${assetID}/file`, 'GET', undefined, foreign.headers)).status,
   ).toBe(404)
   expect(
-    (
-      await f.request(
-        `/api/assets/${generatedID}/file`,
-        'GET',
-        undefined,
-        foreign.headers,
-      )
-    ).status,
+    (await f.request(`/api/assets/${generatedID}/file`, 'GET', undefined, foreign.headers)).status,
   ).toBe(404)
   expect((await f.request('/api/logout', 'POST', '{}')).status).toBe(200)
   expect((await f.request(`/api/assets/${assetID}/file`)).status).toBe(401)
@@ -261,21 +220,12 @@ test('limits, foreign writes, archive, and unknown PUT receipt retain immutable 
   headers.set('x-asset-id', assetID)
   headers.set('x-file-name', 'note.txt')
   const path = `/api/threads/${f.threadID}/assets`
-  expect(
-    (await f.request(path, 'POST', new Uint8Array(1025), headers)).status,
-  ).toBe(413)
+  expect((await f.request(path, 'POST', new Uint8Array(1025), headers)).status).toBe(413)
   const foreign = await signedTestIdentity(db),
     foreignHeaders = new Headers(headers)
   foreignHeaders.set('cookie', foreign.headers.get('cookie')!)
   expect(
-    (
-      await f.request(
-        path,
-        'POST',
-        new TextEncoder().encode('test'),
-        foreignHeaders,
-      )
-    ).status,
+    (await f.request(path, 'POST', new TextEncoder().encode('test'), foreignHeaders)).status,
   ).toBe(404)
   // Simulate a real S3 commit whose acknowledgement was lost: reserve immutable
   // SQL facts, store bytes, then let the actual HTTP retry observe conditional PUT.
@@ -296,10 +246,7 @@ test('limits, foreign writes, archive, and unknown PUT receipt retain immutable 
     .execute()
   await objects.put(key, bytes, 'text/plain', AbortSignal.timeout(5000))
   expect((await f.request(path, 'POST', bytes, headers)).status).toBe(201)
-  expect(
-    (await f.request(`/api/threads/${f.threadID}/archive`, 'POST', '{}'))
-      .status,
-  ).toBe(200)
+  expect((await f.request(`/api/threads/${f.threadID}/archive`, 'POST', '{}')).status).toBe(200)
   expect((await f.request(path, 'POST', bytes, headers)).status).toBe(409)
 })
 
@@ -312,12 +259,9 @@ test('uploaded asset traverses actual worker execution and official Pi tools to 
     .select('command')
     .where('command_id', '=', input.result.commandID)
     .executeTakeFirstOrThrow()
-  expect(
-    await acceptExecutionCommand(
-      db,
-      executionCommandSchema.parse(stored.command),
-    ),
-  ).toBe('accepted')
+  expect(await acceptExecutionCommand(db, executionCommandSchema.parse(stored.command))).toBe(
+    'accepted',
+  )
   const lease = await claimExecutionRun(db, {
     ownerID: 'asset-e2e',
     leaseMs: 30000,
@@ -410,8 +354,8 @@ const chosenTools = (assetID: string, readResult: string) => [
     }),
   },
 ]
-function toolModel(assetPath: string, expected: string) {
-  const requests: unknown[] = []
+function toolModel(assetID: string, expected: string) {
+  let requestCount = 0
   let readResult: string | undefined
   const server = Bun.serve({
     hostname: '127.0.0.1',
@@ -420,12 +364,10 @@ function toolModel(assetPath: string, expected: string) {
       const body = (await request.json()) as {
         messages: { role: string; tool_call_id?: string; content?: string }[]
       }
-      requests.push(body)
-      const turn = requests.length
+      const turn = ++requestCount
       if (turn === 2) {
         const imported = body.messages.filter(
-          (message) =>
-            message.role === 'tool' && message.tool_call_id === 'local-tool-1',
+          (message) => message.role === 'tool' && message.tool_call_id === 'local-tool-1',
         )
         expect(imported).toHaveLength(1)
         expect(imported[0]?.content).toBe(
@@ -434,17 +376,16 @@ function toolModel(assetPath: string, expected: string) {
       }
       if (turn === 3) {
         const read = body.messages.filter(
-          (message) =>
-            message.role === 'tool' && message.tool_call_id === 'local-tool-2',
+          (message) => message.role === 'tool' && message.tool_call_id === 'local-tool-2',
         )
         expect(read).toHaveLength(1)
         expect(read[0]?.content).toBe(expected)
         readResult = read[0]!.content!
       }
-      const tools = chosenTools(assetPath, readResult ?? '')
+      const tools = chosenTools(assetID, readResult ?? '')
       const tool = tools[turn - 1]
       const delta =
-        turn <= 4
+        tool !== undefined
           ? {
               role: 'assistant',
               tool_calls: [
@@ -462,13 +403,16 @@ function toolModel(assetPath: string, expected: string) {
         object: 'chat.completion.chunk',
         model: 'local',
         choices: [
-          { index: 0, delta, finish_reason: turn <= 4 ? 'tool_calls' : 'stop' },
+          {
+            index: 0,
+            delta,
+            finish_reason: tool === undefined ? 'stop' : 'tool_calls',
+          },
         ],
       }
-      return new Response(
-        `data: ${JSON.stringify(chunk)}\n\ndata: [DONE]\n\n`,
-        { headers: { 'content-type': 'text/event-stream' } },
-      )
+      return new Response(`data: ${JSON.stringify(chunk)}\n\ndata: [DONE]\n\n`, {
+        headers: { 'content-type': 'text/event-stream' },
+      })
     },
   })
   return {
@@ -515,14 +459,7 @@ test('message asset links are ordered immutable authority and foreign-thread IDs
   headers.set('x-file-name', 'second.txt')
   headers.set('content-type', 'text/plain')
   expect(
-    (
-      await f.request(
-        `/api/threads/${f.threadID}/assets`,
-        'POST',
-        bytes,
-        headers,
-      )
-    ).status,
+    (await f.request(`/api/threads/${f.threadID}/assets`, 'POST', bytes, headers)).status,
   ).toBe(201)
   const messageID = crypto.randomUUID(),
     path = `/api/threads/${f.threadID}/messages`
@@ -533,9 +470,7 @@ test('message asset links are ordered immutable authority and foreign-thread IDs
   })
   const first = await f.request(path, 'POST', body)
   expect(first.status).toBe(202)
-  expect(await (await f.request(path, 'POST', body)).json()).toEqual(
-    await first.json(),
-  )
+  expect(await (await f.request(path, 'POST', body)).json()).toEqual(await first.json())
   expect(
     (
       await f.request(
@@ -550,9 +485,7 @@ test('message asset links are ordered immutable authority and foreign-thread IDs
     ).status,
   ).toBe(409)
   await rejectForeignAsset(assetID)
-  const snapshot = messagesResponseSchema.parse(
-    await (await f.request(path)).json(),
-  )
+  const snapshot = messagesResponseSchema.parse(await (await f.request(path)).json())
   expect(
     snapshot.messages
       .find((message) => message.messageID === messageID)
@@ -664,11 +597,7 @@ test('chunked binary collection stops at the byte budget without trusting a shor
   expect(pulled).toBe(2)
   expect(cancelled).toBe(true)
   expect(
-    await db
-      .selectFrom('product.assets')
-      .select('asset_id')
-      .where('asset_id', '=', id)
-      .execute(),
+    await db.selectFrom('product.assets').select('asset_id').where('asset_id', '=', id).execute(),
   ).toEqual([])
 })
 
@@ -685,22 +614,13 @@ test('binary image uploads preserve actual non-text bytes and reject spoofed MIM
   headers.set('x-file-name', 'pixel.png')
   const path = `/api/threads/${f.threadID}/assets`
   expect(
-    (
-      await f.request(
-        path,
-        'POST',
-        new TextEncoder().encode('fake image'),
-        headers,
-      )
-    ).status,
+    (await f.request(path, 'POST', new TextEncoder().encode('fake image'), headers)).status,
   ).toBe(415)
   expect((await f.request(path, 'POST', bytes, headers)).status).toBe(201)
   const response = await f.request(`/api/assets/${assetID}/file`)
   expect(response.status).toBe(200)
   expect(response.headers.get('content-type')).toBe('image/png')
-  expect(new Uint8Array(await response.arrayBuffer())).toEqual(
-    new Uint8Array(bytes),
-  )
+  expect(new Uint8Array(await response.arrayBuffer())).toEqual(new Uint8Array(bytes))
 })
 
 test('simultaneous same-content upload retries have one creation response and one replay', async () => {
@@ -718,15 +638,11 @@ test('simultaneous same-content upload retries have one creation response and on
       headers,
     )
   const responses = await Promise.all([upload(), upload()])
-  expect(
-    responses
-      .map((response) => response.status)
-      .sort((left, right) => left - right),
-  ).toEqual([200, 201])
+  expect(responses.map((response) => response.status).sort((left, right) => left - right)).toEqual([
+    200, 201,
+  ])
   const downloaded = await f.request(`/api/assets/${assetID}/file`)
-  expect(downloaded.headers.get('content-disposition')).toContain(
-    "filename*=UTF-8''%E5",
-  )
+  expect(downloaded.headers.get('content-disposition')).toContain("filename*=UTF-8''%E5")
   expect(downloaded.headers.get('x-content-type-options')).toBe('nosniff')
   expect(downloaded.headers.get('cache-control')).toBe('private, no-store')
 })
@@ -743,9 +659,7 @@ test('a prior generated asset is selectable in an asset-only message with exact 
   })
   const accepted = await input.f.request(path, 'POST', body)
   expect(accepted.status).toBe(202)
-  expect(await (await input.f.request(path, 'POST', body)).json()).toEqual(
-    await accepted.json(),
-  )
+  expect(await (await input.f.request(path, 'POST', body)).json()).toEqual(await accepted.json())
   expect(
     (
       await input.f.request(
@@ -755,12 +669,9 @@ test('a prior generated asset is selectable in an asset-only message with exact 
       )
     ).status,
   ).toBe(409)
-  const snapshot = messagesResponseSchema.parse(
-    await (await input.f.request(path)).json(),
-  )
+  const snapshot = messagesResponseSchema.parse(await (await input.f.request(path)).json())
   expect(
-    snapshot.messages.find((message) => message.messageID === messageID)
-      ?.assets?.[0]?.source,
+    snapshot.messages.find((message) => message.messageID === messageID)?.assets?.[0]?.source,
   ).toBe('generated')
   await rejectForeignAsset(generated.assetID)
 })
@@ -774,14 +685,7 @@ test('expired sessions cannot read asset bytes, and untrusted upload origins hav
   headers.set('x-asset-id', newID)
   headers.set('x-file-name', 'note.txt')
   expect(
-    (
-      await f.request(
-        `/api/threads/${f.threadID}/assets`,
-        'POST',
-        bytes,
-        headers,
-      )
-    ).status,
+    (await f.request(`/api/threads/${f.threadID}/assets`, 'POST', bytes, headers)).status,
   ).toBe(403)
   expect(
     await db
@@ -812,20 +716,13 @@ test('generated empty text files retain their zero-byte digest and remain downlo
 test('accepted arbitrary binary exports remain authenticated downloadable attachments', async () => {
   const input = await uploadedMessage()
   const bytes = new Uint8Array([0, 255])
-  const { assetID } = await completedAsset(
-    { ...input, bytes },
-    'application/octet-stream',
-  )
+  const { assetID } = await completedAsset({ ...input, bytes }, 'application/octet-stream')
   const downloaded = await input.f.request(`/api/assets/${assetID}/file`)
   expect(downloaded.status).toBe(200)
   expect(new Uint8Array(await downloaded.arrayBuffer())).toEqual(bytes)
-  expect(downloaded.headers.get('content-type')).toBe(
-    'application/octet-stream',
-  )
+  expect(downloaded.headers.get('content-type')).toBe('application/octet-stream')
   expect(downloaded.headers.get('content-disposition')).toContain('attachment;')
-  expect(downloaded.headers.get('content-security-policy')).toBe(
-    "default-src 'none'; sandbox",
-  )
+  expect(downloaded.headers.get('content-security-policy')).toBe("default-src 'none'; sandbox")
 })
 
 test('native Fetch sends raw file headers and receives a verified attachment', async () => {
@@ -840,48 +737,32 @@ test('native Fetch sends raw file headers and receives a verified attachment', a
   }
   try {
     const uploadHeaders = new Headers(f.login.headers)
-    for (const [name, value] of Object.entries(headers))
-      uploadHeaders.set(name, value)
-    const uploaded = await fetch(
-      new URL(`/api/threads/${f.threadID}/assets`, server.url),
-      {
-        method: 'POST',
-        headers: uploadHeaders,
-        body,
-      },
-    )
+    for (const [name, value] of Object.entries(headers)) uploadHeaders.set(name, value)
+    const uploaded = await fetch(new URL(`/api/threads/${f.threadID}/assets`, server.url), {
+      method: 'POST',
+      headers: uploadHeaders,
+      body,
+    })
     expect(uploaded.status).toBe(201)
-    expect(assetResponseSchema.parse(await uploaded.json()).asset.assetID).toBe(
-      assetID,
-    )
-    const replay = await fetch(
-      new URL(`/api/threads/${f.threadID}/assets`, server.url),
-      {
-        method: 'POST',
-        headers: uploadHeaders,
-        body,
-      },
-    )
+    expect(assetResponseSchema.parse(await uploaded.json()).asset.assetID).toBe(assetID)
+    const replay = await fetch(new URL(`/api/threads/${f.threadID}/assets`, server.url), {
+      method: 'POST',
+      headers: uploadHeaders,
+      body,
+    })
     expect(replay.status).toBe(200)
-    const downloaded = await fetch(
-      new URL(`/api/assets/${assetID}/file`, server.url),
-      {
-        headers: f.login.headers,
-      },
-    )
+    const downloaded = await fetch(new URL(`/api/assets/${assetID}/file`, server.url), {
+      headers: f.login.headers,
+    })
     expect(downloaded.status).toBe(200)
     const bytes = new Uint8Array(await downloaded.arrayBuffer())
     expect(sha256(bytes)).toBe(sha256(new Uint8Array(await body.arrayBuffer())))
     expect(new TextDecoder().decode(bytes)).toBe('native Fetch bytes')
     expect(downloaded.headers.get('content-type')).toBe('text/plain')
-    expect(downloaded.headers.get('content-disposition')).toContain(
-      'attachment;',
-    )
+    expect(downloaded.headers.get('content-disposition')).toContain('attachment;')
     expect(downloaded.headers.get('x-content-type-options')).toBe('nosniff')
     expect(downloaded.headers.get('cache-control')).toBe('private, no-store')
-    expect(downloaded.headers.get('content-security-policy')).toBe(
-      "default-src 'none'; sandbox",
-    )
+    expect(downloaded.headers.get('content-security-policy')).toBe("default-src 'none'; sandbox")
   } finally {
     await server.stop(true)
   }
@@ -907,23 +788,18 @@ test('pending historical upload recovers on the writable prefix with stable iden
     })
     .execute()
   expect(
-    await objects
-      .put(legacyKey, bytes, 'text/plain', AbortSignal.timeout(5000))
-      .then(
-        () => false,
-        () => true,
-      ),
+    await objects.put(legacyKey, bytes, 'text/plain', AbortSignal.timeout(5000)).then(
+      () => false,
+      () => true,
+    ),
   ).toBe(true)
   const headers = new Headers(f.login.headers)
   headers.set('content-type', 'text/plain')
   headers.set('x-asset-id', assetID)
   headers.set('x-file-name', 'pending.txt')
-  const upload = () =>
-    f.request(`/api/threads/${f.threadID}/assets`, 'POST', bytes, headers)
+  const upload = () => f.request(`/api/threads/${f.threadID}/assets`, 'POST', bytes, headers)
   const responses = await Promise.all([upload(), upload()])
-  expect(
-    responses.map((response) => response.status).sort((a, b) => a - b),
-  ).toEqual([200, 201])
+  expect(responses.map((response) => response.status).sort((a, b) => a - b)).toEqual([200, 201])
   const row = await db
     .selectFrom('product.assets')
     .selectAll()
@@ -987,8 +863,7 @@ test.skipIf(!legacyAdmin)(
     headers.set('content-type', 'text/plain')
     headers.set('x-asset-id', assetID)
     headers.set('x-file-name', 'legacy.txt')
-    const upload = () =>
-      f.request(`/api/threads/${f.threadID}/assets`, 'POST', bytes, headers)
+    const upload = () => f.request(`/api/threads/${f.threadID}/assets`, 'POST', bytes, headers)
     expect((await upload()).status).toBe(201)
     expect((await upload()).status).toBe(200)
     const row = await db
@@ -998,16 +873,10 @@ test.skipIf(!legacyAdmin)(
       .executeTakeFirstOrThrow()
     expect(row.object_key).toBe(key)
     expect(row.ready_at).not.toBeNull()
-    expect(await objects.read(key, 1024, AbortSignal.timeout(5000))).toEqual(
-      bytes,
-    )
+    expect(await objects.read(key, 1024, AbortSignal.timeout(5000))).toEqual(bytes)
     expect(
       await objects
-        .read(
-          `assets/uploads/${f.threadID}/${assetID}`,
-          1024,
-          AbortSignal.timeout(5000),
-        )
+        .read(`assets/uploads/${f.threadID}/${assetID}`, 1024, AbortSignal.timeout(5000))
         .then(
           () => false,
           () => true,
@@ -1028,12 +897,7 @@ test.skipIf(!legacyAdmin)(
     const bytes = new TextEncoder().encode('same historical bytes')
     const oldKey = `materials/${f.threadID}/${assetID}`
     const newKey = `assets/uploads/${f.threadID}/${assetID}`
-    await legacyAdmin.put(
-      oldKey,
-      bytes,
-      'text/plain',
-      AbortSignal.timeout(5000),
-    )
+    await legacyAdmin.put(oldKey, bytes, 'text/plain', AbortSignal.timeout(5000))
     await objects.put(newKey, bytes, 'text/plain', AbortSignal.timeout(5000))
     await db
       .insertInto('product.assets')
@@ -1050,14 +914,13 @@ test.skipIf(!legacyAdmin)(
       .execute()
     const query = { ownerID: f.login.session.userId, threadID: f.threadID }
     const results = await Promise.all([
-      completeAsset(db, query, assetID, oldKey),
-      completeAsset(db, query, assetID, newKey),
+      completeAsset(db, query, { assetID, confirmedObjectKey: oldKey }),
+      completeAsset(db, query, { assetID, confirmedObjectKey: newKey }),
     ])
-    expect(
-      results
-        .map((result) => result.created)
-        .sort((a, b) => Number(a) - Number(b)),
-    ).toEqual([false, true])
+    expect(results.map((result) => result.created).sort((a, b) => Number(a) - Number(b))).toEqual([
+      false,
+      true,
+    ])
     const winner = results[0]!.created ? oldKey : newKey
     const row = await db
       .selectFrom('product.assets')
@@ -1065,7 +928,10 @@ test.skipIf(!legacyAdmin)(
       .where('asset_id', '=', assetID)
       .executeTakeFirstOrThrow()
     expect(row.object_key).toBe(winner)
-    await completeAsset(db, query, assetID, winner === oldKey ? newKey : oldKey)
+    await completeAsset(db, query, {
+      assetID,
+      confirmedObjectKey: winner === oldKey ? newKey : oldKey,
+    })
     const replay = await db
       .selectFrom('product.assets')
       .selectAll()
@@ -1073,11 +939,7 @@ test.skipIf(!legacyAdmin)(
       .executeTakeFirstOrThrow()
     expect(replay.object_key).toBe(winner)
     expect(replay.ready_at).toEqual(row.ready_at)
-    expect(await objects.read(oldKey, 1024, AbortSignal.timeout(5000))).toEqual(
-      bytes,
-    )
-    expect(await objects.read(newKey, 1024, AbortSignal.timeout(5000))).toEqual(
-      bytes,
-    )
+    expect(await objects.read(oldKey, 1024, AbortSignal.timeout(5000))).toEqual(bytes)
+    expect(await objects.read(newKey, 1024, AbortSignal.timeout(5000))).toEqual(bytes)
   },
 )

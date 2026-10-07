@@ -12,8 +12,8 @@ export const legacyAssignmentsSchema = z
   .min(1)
   .refine(
     (assignments) =>
-      new Set(assignments.map((assignment) => assignment.legacyOwnerID))
-        .size === assignments.length,
+      new Set(assignments.map((assignment) => assignment.legacyOwnerID)).size ===
+      assignments.length,
     'Each legacy owner must occur once',
   )
 
@@ -26,23 +26,16 @@ export async function assignLegacyThreads(
   assignments: z.infer<typeof legacyAssignmentsSchema>,
 ) {
   return await db.transaction().execute(async (tx) => {
-    await sql`lock table product.threads in share row exclusive mode`.execute(
-      tx,
-    )
+    await sql`lock table product.threads in share row exclusive mode`.execute(tx)
     const threads = await tx
       .selectFrom('product.threads')
       .select(['thread_id', 'legacy_owner_id', 'owner_id'])
       .where('legacy_owner_id', 'is not', null)
       .execute()
     const reviewed = new Map(
-      assignments.map((assignment) => [
-        assignment.legacyOwnerID,
-        assignment.userID,
-      ]),
+      assignments.map((assignment) => [assignment.legacyOwnerID, assignment.userID]),
     )
-    const legacyOwners = new Set(
-      threads.map((thread) => thread.legacy_owner_id),
-    )
+    const legacyOwners = new Set(threads.map((thread) => thread.legacy_owner_id))
     for (const legacyOwnerID of reviewed.keys())
       if (!legacyOwners.has(legacyOwnerID))
         throw new Error('Assignment references an unknown legacy owner')
@@ -52,10 +45,7 @@ export async function assignLegacyThreads(
       .where('id', 'in', [...reviewed.values()])
       .forShare()
       .execute()
-    if (
-      new Set(users.map((user) => user.id)).size !==
-      new Set(reviewed.values()).size
-    )
+    if (new Set(users.map((user) => user.id)).size !== new Set(reviewed.values()).size)
       throw new Error('Assignment references an unknown authentication user')
     for (const thread of threads) {
       const ownerID = reviewed.get(thread.legacy_owner_id!)

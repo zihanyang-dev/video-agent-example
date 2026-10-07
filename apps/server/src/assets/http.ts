@@ -5,6 +5,7 @@ import type { Kysely } from 'kysely'
 import type { DB } from '@vid/database/types'
 import type { OwnedThread } from '../conversation/submission'
 import { ownedAsset } from '../db/assets'
+import { lockThread } from '../db/thread-access'
 import { validateFile } from './files'
 import { publishUpload, type FileHTTP } from './uploads'
 
@@ -19,14 +20,11 @@ export async function uploadAsset(
   request: Request,
   io: FileHTTP,
 ) {
+  await db.transaction().execute((tx) => lockThread(tx, query, 'write'))
   const metadata = uploadMetadata(request)
   if (metadata === null || !request.body)
     return Response.json({ error: 'Invalid upload metadata' }, { status: 400 })
-  const signal = AbortSignal.any([
-    io.signal,
-    request.signal,
-    AbortSignal.timeout(io.timeoutMs),
-  ])
+  const signal = AbortSignal.any([io.signal, request.signal, AbortSignal.timeout(io.timeoutMs)])
   let bytes: Uint8Array
   try {
     bytes = await collectRequestBody(request.body, io.maxAssetBytes, signal)
@@ -37,12 +35,7 @@ export async function uploadAsset(
   }
   if (!validateFile(metadata.name, metadata.mimeType, bytes))
     return Response.json({ error: 'Invalid file' }, { status: 415 })
-  const completion = await publishUpload(
-    db,
-    query,
-    { ...metadata, bytes },
-    { ...io, signal },
-  )
+  const completion = await publishUpload(db, query, { ...metadata, bytes }, { ...io, signal })
   if (completion === null)
     return Response.json(
       { error: 'Upload not confirmed. Retry the same asset ID and file.' },
@@ -68,15 +61,8 @@ export async function downloadAsset(
   if (!row) return notFound()
   const max = io.maxAssetBytes
   if (row.byte_length > max)
-    return Response.json(
-      { error: 'File exceeds download limit' },
-      { status: 413 },
-    )
-  const signal = AbortSignal.any([
-    io.signal,
-    request.signal,
-    AbortSignal.timeout(io.timeoutMs),
-  ])
+    return Response.json({ error: 'File exceeds download limit' }, { status: 413 })
+  const signal = AbortSignal.any([io.signal, request.signal, AbortSignal.timeout(io.timeoutMs)])
   try {
     const bytes = await io.objects.read(row.object_key, max, signal)
     if (
@@ -86,25 +72,21 @@ export async function downloadAsset(
       // or other media). All downloads remain verified private attachments.
       (row.source === 'upload' && !validateFile(row.name, row.mime_type, bytes))
     )
-      return Response.json(
-        { error: 'File verification failed' },
-        { status: 503 },
-      )
+      return Response.json({ error: 'File verification failed' }, { status: 503 })
+    const encodedName = encodeURIComponent(row.name).replace(/'/g, '%27')
+    const disposition = `attachment; filename="download"; filename*=UTF-8''${encodedName}`
     return new Response(Buffer.from(bytes), {
       headers: {
         'content-type': row.mime_type,
         'content-length': String(bytes.length),
-        'content-disposition': `attachment; filename="download"; filename*=UTF-8''${encodeURIComponent(row.name).replace(/'/g, '%27')}`,
+        'content-disposition': disposition,
         'x-content-type-options': 'nosniff',
         'cache-control': 'private, no-store',
         'content-security-policy': "default-src 'none'; sandbox",
       },
     })
   } catch {
-    return Response.json(
-      { error: 'File unavailable. Try again.' },
-      { status: 503 },
-    )
+    return Response.json({ error: 'File unavailable. Try again.' }, { status: 503 })
   }
 }
 

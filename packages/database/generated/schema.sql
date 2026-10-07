@@ -575,6 +575,20 @@ CREATE INDEX command_inbox_run_kind_idx ON execution.command_inbox USING btree (
 
 
 --
+-- Name: event_outbox_pending_idx; Type: INDEX; Schema: execution; Owner: -
+--
+
+CREATE INDEX event_outbox_pending_idx ON execution.event_outbox USING btree (run_id, ordinal) WHERE (published_at IS NULL);
+
+
+--
+-- Name: event_outbox_retention_idx; Type: INDEX; Schema: execution; Owner: -
+--
+
+CREATE INDEX event_outbox_retention_idx ON execution.event_outbox USING btree (published_at, event_id) WHERE (published_at IS NOT NULL);
+
+
+--
 -- Name: runs_thread_status_idx; Type: INDEX; Schema: execution; Owner: -
 --
 

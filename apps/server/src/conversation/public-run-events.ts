@@ -8,21 +8,14 @@ export type PublicRunState = Readonly<{
 
 // Each reader folds canonical facts independently. Reconstruction needs only
 // this state, never discarded protocol frames or a second set of transition rules.
-export function foldPublicRunEvent(
-  state: PublicRunState,
-  fact: ExecutionEvent,
-): PublicRunState {
-  if (state.phase === 'terminal')
-    throw new Error('Cannot fold a fact after a terminal run')
+export function foldPublicRunEvent(state: PublicRunState, fact: ExecutionEvent): PublicRunState {
+  if (state.phase === 'terminal') throw new Error('Cannot fold a fact after a terminal run')
   switch (fact.kind) {
     case 'run-started':
       return { ...state, phase: 'open' }
     case 'assistant-text': {
       const messages = new Map(state.messages)
-      messages.set(
-        fact.messageID,
-        (messages.get(fact.messageID) ?? '') + fact.delta,
-      )
+      messages.set(fact.messageID, (messages.get(fact.messageID) ?? '') + fact.delta)
       return { phase: 'open', messages }
     }
     case 'run-completed': {
@@ -45,10 +38,7 @@ export function mapPublicRunEvent(state: PublicRunState, fact: ExecutionEvent) {
   return { state: next, frames: projectPublicRunEvent(state, fact) }
 }
 
-export function projectPublicRunEvent(
-  state: PublicRunState,
-  fact: ExecutionEvent,
-): Event[] {
+export function projectPublicRunEvent(state: PublicRunState, fact: ExecutionEvent): Event[] {
   const frames: Event[] = []
   if (state.phase === 'unopened')
     frames.push({
@@ -59,25 +49,24 @@ export function projectPublicRunEvent(
   if ('messageID' in fact) frames.push(...textFrames(state.messages, fact))
   if (fact.kind !== 'run-started' && fact.kind !== 'assistant-text')
     frames.push(...terminalFrames(state.messages, fact))
-  return frames.map((frame) => ({
-    ...frame,
-    metadata: {
-      mappingVersion: 'ag-ui-1.0.1-v1',
-      eventID: `${fact.eventID}:${frame.type}:${'messageId' in frame ? frame.messageId : ''}`,
-      factID: fact.eventID,
-    },
-  }))
+  return frames.map((frame) => {
+    const messageID = 'messageId' in frame ? frame.messageId : ''
+    return {
+      ...frame,
+      metadata: {
+        mappingVersion: 'ag-ui-1.0.1-v1',
+        eventID: `${fact.eventID}:${frame.type}:${messageID}`,
+        factID: fact.eventID,
+      },
+    }
+  })
 }
 
 function terminalFrames(
   messages: ReadonlyMap<string, string>,
-  fact: Extract<
-    ExecutionEvent,
-    { kind: 'run-completed' | 'run-cancelled' | 'run-failed' }
-  >,
+  fact: Extract<ExecutionEvent, { kind: 'run-completed' | 'run-cancelled' | 'run-failed' }>,
 ): Event[] {
-  const messageIDs =
-    fact.kind === 'run-completed' ? [fact.messageID] : [...messages.keys()]
+  const messageIDs = fact.kind === 'run-completed' ? [fact.messageID] : [...messages.keys()]
   const ends: Event[] = messageIDs.map((messageId) => ({
     type: EventType.TEXT_MESSAGE_END,
     messageId,
@@ -131,9 +120,7 @@ function textFrames(
     })
 
   const delta =
-    fact.kind === 'assistant-text'
-      ? fact.delta
-      : completionSuffix(previous ?? '', fact.text)
+    fact.kind === 'assistant-text' ? fact.delta : completionSuffix(previous ?? '', fact.text)
   if (delta)
     frames.push({
       type: EventType.TEXT_MESSAGE_CONTENT,
@@ -149,16 +136,16 @@ function completionSuffix(previous: string, text: string) {
   return text.startsWith(previous) ? text.slice(previous.length) : ''
 }
 
-function failureMessage(
-  reason: Extract<ExecutionEvent, { kind: 'run-failed' }>['reason'],
-) {
+function failureMessage(reason: Extract<ExecutionEvent, { kind: 'run-failed' }>['reason']) {
+  const recovery =
+    'Check Chat history and ask the operator to verify the execution environment before retrying.'
   switch (reason) {
     case 'execution-error':
-      return 'The run could not finish. Check Chat history and ask the operator to verify the execution environment before retrying.'
+      return `The run could not finish. ${recovery}`
     case 'sandbox-recovery-required':
       return 'The execution environment needs recovery before another run.'
     case 'interrupted':
-      return 'The run was interrupted. Check Chat history and ask the operator to verify the execution environment before retrying.'
+      return `The run was interrupted. ${recovery}`
     default:
       return assertNever(reason)
   }

@@ -1,8 +1,8 @@
-import { acceptExecutionCommand } from '../../apps/agent/src/db/command-acceptance'
+import { acceptExecutionCommand } from '../../apps/agent/src/execution/db/command-acceptance'
 import {
   claimExecutionRun,
   renewExecutionLease,
-} from '../../apps/agent/src/db/execution-leases'
+} from '../../apps/agent/src/execution/db/execution-leases'
 import {
   appendExecutionText,
   completeExecutionRun,
@@ -10,7 +10,8 @@ import {
   cancelExecutionRun,
   saveNativeSandbox,
   quarantineSandbox,
-} from '../../apps/agent/src/db/run-writes'
+  bindExecutionWrites,
+} from '../../apps/agent/src/execution/db/run-writes'
 import { afterAll, expect, test } from 'bun:test'
 import {
   executionEventSchema,
@@ -18,16 +19,16 @@ import {
   type StartCommand,
 } from '@vid/contract/execution'
 import { sql } from 'kysely'
-import type { ExecutionLease } from '../../apps/agent/src/execute-run'
+import type { ExecutionLease } from '../../apps/agent/src/execution/contract'
 import { createPiHarness } from '../../apps/agent/src/harness/pi'
 import { openTestDatabase } from './database-fixture'
+import { modelStream } from './model-stream-fixture'
 
 const { db, close } = openTestDatabase()
 const ownedThreads = new Set<string>()
 afterAll(async () => {
   try {
-    for (const threadID of ownedThreads)
-      await removeExecutionConversation(threadID)
+    for (const threadID of ownedThreads) await removeExecutionConversation(threadID)
   } finally {
     await close()
   }
@@ -61,6 +62,86 @@ async function claim(): Promise<ExecutionLease> {
   if (lease === null) throw new Error('Expected a queued lease')
   return lease
 }
+for (const terminal of ['completed', 'failed', 'cancelled'] as const) {
+  for (const stale of [false, true]) {
+    test(`bound ${terminal} receipt reports ${stale ? 'lost ownership' : 'the committed outcome'}`, async () => {
+      const command = start()
+      expect(await acceptExecutionCommand(db, command)).toBe('accepted')
+      const claimed = await claim()
+      const lease = stale ? { ...claimed, fence: claimed.fence + 1 } : claimed
+      const writes = bindExecutionWrites(db)
+      const outcome =
+        terminal === 'completed'
+          ? await writes.complete(lease, {
+              text: 'answer',
+              history: ['answer'],
+            })
+          : terminal === 'failed'
+            ? await writes.fail(lease, 'execution-error')
+            : await writes.cancel(lease)
+      expect(outcome).toBe(stale ? 'lost' : terminal)
+      const run = await db
+        .selectFrom('execution.runs')
+        .select('status')
+        .where('run_id', '=', claimed.runID)
+        .executeTakeFirstOrThrow()
+      expect(run.status).toBe(stale ? 'running' : terminal)
+      const receipts = await events(claimed.runID)
+      expect(receipts.map((event) => event.kind)).toEqual(
+        stale ? ['run-started'] : ['run-started', `run-${terminal}`],
+      )
+    })
+  }
+}
+
+for (const request of ['complete', 'interrupt'] as const) {
+  test(`bound ${request} preserves cancellation chosen under the SQL lock`, async () => {
+    const command = start()
+    await acceptExecutionCommand(db, command)
+    const lease = await claim()
+    await acceptExecutionCommand(db, cancellation(command))
+    const writes = bindExecutionWrites(db)
+    const outcome =
+      request === 'complete'
+        ? await writes.complete(lease, {
+            text: 'discard',
+            history: ['discard'],
+          })
+        : await writes.fail(lease, 'interrupted')
+    expect(outcome).toBe('cancelled')
+    expect((await events(lease.runID)).map((event) => event.kind)).toEqual([
+      'run-started',
+      'run-cancelled',
+    ])
+    const conversation = await db
+      .selectFrom('execution.conversations')
+      .select('history')
+      .where('thread_id', '=', lease.threadID)
+      .executeTakeFirstOrThrow()
+    expect(conversation.history).toEqual([])
+  })
+}
+
+test('bound completion preserves history rejection chosen by SQL instead of claiming completion', async () => {
+  await acceptExecutionCommand(db, start())
+  const lease = await claim()
+  const outcome = await bindExecutionWrites(db).complete(lease, {
+    text: 'discard',
+    history: 'x'.repeat(4 * 1024 * 1024),
+  })
+  expect(outcome).toBe('failed')
+  expect((await events(lease.runID)).map((event) => event.kind)).toEqual([
+    'run-started',
+    'run-failed',
+  ])
+  const conversation = await db
+    .selectFrom('execution.conversations')
+    .select('history')
+    .where('thread_id', '=', lease.threadID)
+    .executeTakeFirstOrThrow()
+  expect(conversation.history).toEqual([])
+})
+
 async function events(runID: string) {
   const rows = await db
     .selectFrom('execution.event_outbox')
@@ -104,19 +185,18 @@ function piProviderFixture() {
     async fetch(request) {
       requests.push(await request.json())
       const text = answers.shift()
-      if (text === undefined)
-        return new Response('Unexpected request', { status: 500 })
-      return new Response(
-        [
-          { delta: { role: 'assistant', content: text }, finish_reason: null },
-          { delta: {}, finish_reason: 'stop' },
-        ]
-          .map(
-            (chunk) =>
-              `data: ${JSON.stringify({ id: 'fixture', object: 'chat.completion.chunk', model: 'fixture-model', choices: [{ index: 0, ...chunk }] })}\n\n`,
-          )
-          .join('') + 'data: [DONE]\n\n',
-        { headers: { 'content-type': 'text/event-stream' } },
+      if (text === undefined) return new Response('Unexpected request', { status: 500 })
+      const chunks = [
+        { delta: { role: 'assistant', content: text }, finish_reason: null },
+        { delta: {}, finish_reason: 'stop' },
+      ]
+      return modelStream(
+        chunks.map((chunk) => ({
+          id: 'fixture',
+          object: 'chat.completion.chunk',
+          model: 'fixture-model',
+          choices: [{ index: 0, ...chunk }],
+        })),
       )
     },
   })
@@ -155,22 +235,10 @@ async function removeExecutionConversation(threadID: string) {
       .set({ active_run_id: null, lease_owner: null, lease_until: null })
       .where('thread_id', '=', threadID)
       .execute()
-    await tx
-      .deleteFrom('execution.event_outbox')
-      .where('thread_id', '=', threadID)
-      .execute()
-    await tx
-      .deleteFrom('execution.runs')
-      .where('thread_id', '=', threadID)
-      .execute()
-    await tx
-      .deleteFrom('execution.command_inbox')
-      .where('thread_id', '=', threadID)
-      .execute()
-    await tx
-      .deleteFrom('execution.conversations')
-      .where('thread_id', '=', threadID)
-      .execute()
+    await tx.deleteFrom('execution.event_outbox').where('thread_id', '=', threadID).execute()
+    await tx.deleteFrom('execution.runs').where('thread_id', '=', threadID).execute()
+    await tx.deleteFrom('execution.command_inbox').where('thread_id', '=', threadID).execute()
+    await tx.deleteFrom('execution.conversations').where('thread_id', '=', threadID).execute()
   })
 }
 
@@ -322,9 +390,7 @@ test('concurrent claim serializes a thread and passes only committed private his
   expect(next.fence).toBeGreaterThan(lease.fence)
   expect(next.history).toEqual({ opaque: 'private tool state' })
   expect(await failExecutionRun(db, next, 'execution-error')).toBe(true)
-  expect(JSON.stringify(await events(lease.runID))).not.toContain(
-    'private tool state',
-  )
+  expect(JSON.stringify(await events(lease.runID))).not.toContain('private tool state')
 })
 
 test('cancel before start is retained and queued cancellation is immediately terminal', async () => {
@@ -333,20 +399,12 @@ test('cancel before start is retained and queued cancellation is immediately ter
   expect(await acceptExecutionCommand(db, cancel)).toBe('accepted')
   expect(await acceptExecutionCommand(db, cancel)).toBe('replay')
   expect(await acceptExecutionCommand(db, command)).toBe('accepted')
-  expect(
-    await claimExecutionRun(db, { ownerID: 'worker', leaseMs: 60000 }),
-  ).toBeNull()
-  expect((await events(command.runID)).map((event) => event.kind)).toEqual([
-    'run-cancelled',
-  ])
+  expect(await claimExecutionRun(db, { ownerID: 'worker', leaseMs: 60000 })).toBeNull()
+  expect((await events(command.runID)).map((event) => event.kind)).toEqual(['run-cancelled'])
   const queued = start()
   await acceptExecutionCommand(db, queued)
-  expect(await acceptExecutionCommand(db, cancellation(queued))).toBe(
-    'accepted',
-  )
-  expect((await events(queued.runID)).map((event) => event.kind)).toEqual([
-    'run-cancelled',
-  ])
+  expect(await acceptExecutionCommand(db, cancellation(queued))).toBe('accepted')
+  expect((await events(queued.runID)).map((event) => event.kind)).toEqual(['run-cancelled'])
 })
 
 test('locked completion chooses racing cancellation without committing history', async () => {
@@ -386,21 +444,15 @@ test('expired external operation is interrupted rather than automatically execut
   expect(await failExecutionRun(db, lease, 'execution-error')).toBe(false)
   expect(await cancelExecutionRun(db, lease)).toBe(false)
   expect(await renewExecutionLease(db, lease, 60000)).toBe('lost')
-  expect(
-    await claimExecutionRun(db, { ownerID: 'recovery', leaseMs: 60000 }),
-  ).toBeNull()
-  expect(
-    await claimExecutionRun(db, { ownerID: 'recovery', leaseMs: 60000 }),
-  ).toBeNull()
+  expect(await claimExecutionRun(db, { ownerID: 'recovery', leaseMs: 60000 })).toBeNull()
+  expect(await claimExecutionRun(db, { ownerID: 'recovery', leaseMs: 60000 })).toBeNull()
   expect(await events(command.runID)).toMatchObject([
     { kind: 'run-started' },
     { kind: 'run-failed', reason: 'interrupted' },
   ])
   const queued = start(command.threadID)
   await acceptExecutionCommand(db, queued)
-  expect(
-    await claimExecutionRun(db, { ownerID: 'replacement', leaseMs: 60000 }),
-  ).toBeNull()
+  expect(await claimExecutionRun(db, { ownerID: 'replacement', leaseMs: 60000 })).toBeNull()
   expect((await events(queued.runID)).at(-1)).toMatchObject({
     kind: 'run-failed',
     reason: 'sandbox-recovery-required',
@@ -411,9 +463,7 @@ test('expired external operation is interrupted rather than automatically execut
     .where('thread_id', '=', lease.threadID)
     .executeTakeFirstOrThrow()
   expect(state.sandbox_recovery_required).toBe(true)
-  expect(
-    await completeExecutionRun(db, lease, { text: 'stale', history: [] }),
-  ).toBe(false)
+  expect(await completeExecutionRun(db, lease, { text: 'stale', history: [] })).toBe(false)
 })
 
 test('lease expiration while waiting for authority lock cannot commit history or events', async () => {
@@ -440,19 +490,13 @@ test('lease expiration while waiting for authority lock cannot commit history or
     return { completion }
   })
   expect(await blocked.completion).toBe(false)
-  expect((await events(command.runID)).map((event) => event.kind)).toEqual([
-    'run-started',
-  ])
-  expect(
-    await claimExecutionRun(db, { ownerID: 'recovery', leaseMs: 60000 }),
-  ).toBeNull()
+  expect((await events(command.runID)).map((event) => event.kind)).toEqual(['run-started'])
+  expect(await claimExecutionRun(db, { ownerID: 'recovery', leaseMs: 60000 })).toBeNull()
 })
 
 test('independent threads can claim concurrently while fabricated ownership cannot mutate a run', async () => {
   const commands = [start(), start()]
-  await Promise.all(
-    commands.map((command) => acceptExecutionCommand(db, command)),
-  )
+  await Promise.all(commands.map((command) => acceptExecutionCommand(db, command)))
   const leases = await Promise.all([claim(), claim()])
   expect(new Set(leases.map((lease) => lease.threadID)).size).toBe(2)
   for (const lease of leases) {
@@ -568,9 +612,7 @@ test('UUID case replays canonical and legacy commands without altering owner aut
     command_id: lower.commandID,
     message_id: lower.input.messageID,
   })
-  expect(
-    await renewExecutionLease(db, { ...lease, ownerID: 'worker-abc' }, 60000),
-  ).toBe('lost')
+  expect(await renewExecutionLease(db, { ...lease, ownerID: 'worker-abc' }, 60000)).toBe('lost')
   expect(
     await completeExecutionRun(db, lease, {
       text: 'Answer',
@@ -705,15 +747,11 @@ test('native identity is durable before completion and stale fences cannot repla
     .where('thread_id', '=', lease.threadID)
     .executeTakeFirstOrThrow()
   expect(row.native_sandbox).toEqual(nativeRef)
-  expect(
-    await completeExecutionRun(db, lease, { text: 'done', history: [] }),
-  ).toBe(true)
+  expect(await completeExecutionRun(db, lease, { text: 'done', history: [] })).toBe(true)
   await acceptExecutionCommand(db, start(first.threadID))
   const next = await claim()
   expect(next.nativeRef).toEqual(nativeRef)
-  expect(
-    await saveNativeSandbox(db, lease, { provider: 'e2b', id: 'stale' }),
-  ).toBe(false)
+  expect(await saveNativeSandbox(db, lease, { provider: 'e2b', id: 'stale' })).toBe(false)
   expect(await cancelExecutionRun(db, next)).toBe(true)
 })
 
@@ -743,9 +781,7 @@ test('accepted asset-only commands replay allocations and issue them only on the
     }),
   ).toBe('conflict')
   const lease = await claim()
-  expect(lease.assets).toEqual([
-    { ...material, assetID: material.assetID.toLowerCase() },
-  ])
+  expect(lease.assets).toEqual([{ ...material, assetID: material.assetID.toLowerCase() }])
   expect(await cancelExecutionRun(db, lease)).toBe(true)
 })
 
@@ -767,9 +803,7 @@ test('late quarantine from a committed old fence blocks active spending but reta
   expect(active.fence).toBeGreaterThan(old.fence)
   await quarantineSandbox(db, old)
   expect(await renewExecutionLease(db, active, 60000)).toBe('recovery-required')
-  expect(
-    await saveNativeSandbox(db, active, { provider: 'e2b', id: 'replacement' }),
-  ).toBe(false)
+  expect(await saveNativeSandbox(db, active, { provider: 'e2b', id: 'replacement' })).toBe(false)
   expect(await appendExecutionText(db, active, 'unsafe')).toBe(false)
   expect(
     await completeExecutionRun(db, active, {
@@ -838,14 +872,12 @@ test('typed asset replay normalizes property order and UUID case but preserves e
         assets: [{ ...first, objectKey: 'different' }, second],
       },
     ]) {
-      expect(await acceptExecutionCommand(db, { ...parsed, input })).toBe(
-        'conflict',
-      )
+      expect(await acceptExecutionCommand(db, { ...parsed, input })).toBe('conflict')
     }
     const conflictingID = crypto.randomUUID()
-    expect(
-      await acceptExecutionCommand(db, { ...parsed, commandID: conflictingID }),
-    ).toBe('conflict')
+    expect(await acceptExecutionCommand(db, { ...parsed, commandID: conflictingID })).toBe(
+      'conflict',
+    )
     expect(
       await db
         .selectFrom('execution.command_inbox')
@@ -858,7 +890,20 @@ test('typed asset replay normalizes property order and UUID case but preserves e
       .select('command')
       .where('command_id', '=', base.commandID)
       .executeTakeFirstOrThrow()
-    expect(startCommandSchema.parse(row.command)).toEqual(parsed)
+    const expected = {
+      version: 1,
+      kind: 'start',
+      commandID: base.commandID,
+      threadID: base.threadID,
+      runID: base.runID,
+      input: {
+        messageID: base.input.messageID,
+        text: ' exact text ',
+        assets: [{ ...first, assetID: first.assetID.toLowerCase() }, second],
+      },
+    } satisfies StartCommand
+    expect(row.command).toEqual(expected)
+    expect(startCommandSchema.parse(row.command)).toEqual(expected)
   } finally {
     await removeExecutionConversation(base.threadID)
   }

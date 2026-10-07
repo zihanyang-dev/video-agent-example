@@ -14,10 +14,7 @@ test('runtime SQL roles can mutate their own schema but cannot read or mutate th
   }
 })
 
-async function denied(
-  promise: Promise<unknown>,
-  expected: Record<string, unknown>,
-) {
+async function denied(promise: Promise<unknown>, expected: Record<string, unknown>) {
   expect(await promise.catch((error: unknown) => error)).toMatchObject(expected)
 }
 
@@ -41,14 +38,10 @@ async function checkSQLRole(url: string, own: string, other: string) {
       await denied(client.query(statement), { code: '42501' })
     }
     if (own === 'execution') {
-      await denied(
-        client.query("SELECT nextval('product.execution_event_replay_cursor')"),
-        { code: '42501' },
-      )
-      await denied(
-        client.query('SELECT payload FROM product.execution_events'),
-        { code: '42501' },
-      )
+      await denied(client.query("SELECT nextval('product.execution_event_replay_cursor')"), {
+        code: '42501',
+      })
+      await denied(client.query('SELECT payload FROM product.execution_events'), { code: '42501' })
     }
     const result = await client.query(
       'SELECT rolsuper, rolcreaterole, rolcreatedb FROM pg_roles WHERE rolname = current_user',
@@ -72,18 +65,13 @@ async function checkOwnedMutation(client: pg.Client, own: string) {
         'INSERT INTO auth."user" (id, name, email, "emailVerified") VALUES ($1, $2, $3, true)',
         [id, 'Boundary fixture', `${id}@boundary.example.test`],
       )
-      await client.query(
-        'INSERT INTO product.threads (thread_id, owner_id) VALUES ($1, $2)',
-        [id, id],
-      )
-      await client.query(
-        "SELECT nextval('product.execution_event_replay_cursor')",
-      )
+      await client.query('INSERT INTO product.threads (thread_id, owner_id) VALUES ($1, $2)', [
+        id,
+        id,
+      ])
+      await client.query("SELECT nextval('product.execution_event_replay_cursor')")
     } else {
-      await client.query(
-        'INSERT INTO execution.conversations (thread_id) VALUES ($1)',
-        [id],
-      )
+      await client.query('INSERT INTO execution.conversations (thread_id) VALUES ($1)', [id])
     }
   } finally {
     await client.query('ROLLBACK')
@@ -131,9 +119,7 @@ test('native reapplication repairs current and future grants for the migration o
   await Promise.all([server.connect(), worker.connect()])
   try {
     await server.query('INSERT INTO auth.boundary_future_table (id) VALUES (1)')
-    await worker.query(
-      'INSERT INTO execution.boundary_future_table (id) VALUES (1)',
-    )
+    await worker.query('INSERT INTO execution.boundary_future_table (id) VALUES (1)')
     await denied(server.query('TRUNCATE auth.boundary_existing_table'), {
       code: '42501',
     })
@@ -163,32 +149,19 @@ test('Redis runtime ACL permits owned publishing and peer consumption but denies
     await client.connect()
     try {
       await client.xAdd(`vid:execution:${own}`, '*', { value: 'test' })
-      await client.xGroupCreate(
-        `vid:execution:${other}`,
-        'boundary-test',
-        '0',
-        { MKSTREAM: true },
-      )
+      await client.xGroupCreate(`vid:execution:${other}`, 'boundary-test', '0', { MKSTREAM: true })
       await client.xReadGroup('boundary-test', 'test', {
         key: `vid:execution:${other}`,
         id: '>',
       })
-      await client.xAutoClaim(
-        `vid:execution:${other}`,
-        'boundary-test',
-        'test',
-        0,
-        '0-0',
-      )
+      await client.xAutoClaim(`vid:execution:${other}`, 'boundary-test', 'test', 0, '0-0')
       await client.xAck(`vid:execution:${other}`, 'boundary-test', '0-0')
-      await denied(
-        client.xGroupCreate(`vid:execution:${own}`, 'forbidden', '0'),
-        { message: expect.stringContaining('NOPERM') },
-      )
-      await denied(
-        client.xAdd(`vid:execution:${other}`, '*', { value: 'forbidden' }),
-        { message: expect.stringContaining('NOPERM') },
-      )
+      await denied(client.xGroupCreate(`vid:execution:${own}`, 'forbidden', '0'), {
+        message: expect.stringContaining('NOPERM'),
+      })
+      await denied(client.xAdd(`vid:execution:${other}`, '*', { value: 'forbidden' }), {
+        message: expect.stringContaining('NOPERM'),
+      })
       await denied(client.set('unrelated', 'forbidden'), {
         message: expect.stringContaining('NOPERM'),
       })
@@ -208,10 +181,7 @@ test('Redis runtime ACL permits owned publishing and peer consumption but denies
 })
 
 test('native password rotation rejects the previous credentials', async () => {
-  for (const url of [
-    process.env.OLD_SERVER_DATABASE_URL!,
-    process.env.OLD_WORKER_DATABASE_URL!,
-  ]) {
+  for (const url of [process.env.OLD_SERVER_DATABASE_URL!, process.env.OLD_WORKER_DATABASE_URL!]) {
     const client = new pg.Client({ connectionString: url })
     try {
       await denied(client.connect(), { code: '28P01' })
@@ -255,10 +225,9 @@ for (const role of ['SERVER', 'WORKER'] as const) {
         'artifacts/boundary',
         'workspaces/forbidden',
       ]) {
-        await denied(
-          client.send(new PutObjectCommand({ Bucket, Key, Body: 'forbidden' })),
-          { name: 'AccessDenied' },
-        )
+        await denied(client.send(new PutObjectCommand({ Bucket, Key, Body: 'forbidden' })), {
+          name: 'AccessDenied',
+        })
       }
     } finally {
       client.destroy()
@@ -268,12 +237,8 @@ for (const role of ['SERVER', 'WORKER'] as const) {
 
 for (const role of ['SERVER', 'WORKER'] as const) {
   test(`S3 retained ${role} reads historical and new keys without listing, deletion or administration`, async () => {
-    const {
-      GetObjectCommand,
-      DeleteObjectCommand,
-      ListObjectsV2Command,
-      CreateBucketCommand,
-    } = await import('@aws-sdk/client-s3')
+    const { GetObjectCommand, DeleteObjectCommand, ListObjectsV2Command, CreateBucketCommand } =
+      await import('@aws-sdk/client-s3')
     const Bucket = process.env.OBJECT_STORAGE_BUCKET!
     const client = await storageRole(role)
     try {
@@ -283,9 +248,7 @@ for (const role of ['SERVER', 'WORKER'] as const) {
         ['materials/boundary', 'legacy-upload'],
         ['artifacts/boundary', 'legacy-output'],
       ] as const) {
-        const response = await client.send(
-          new GetObjectCommand({ Bucket, Key }),
-        )
+        const response = await client.send(new GetObjectCommand({ Bucket, Key }))
         expect(await response.Body!.transformToString()).toBe(body)
         await denied(client.send(new DeleteObjectCommand({ Bucket, Key })), {
           name: 'AccessDenied',
@@ -294,10 +257,9 @@ for (const role of ['SERVER', 'WORKER'] as const) {
       await denied(client.send(new ListObjectsV2Command({ Bucket })), {
         name: 'AccessDenied',
       })
-      await denied(
-        client.send(new CreateBucketCommand({ Bucket: 'forbidden-bucket' })),
-        { name: 'AccessDenied' },
-      )
+      await denied(client.send(new CreateBucketCommand({ Bucket: 'forbidden-bucket' })), {
+        name: 'AccessDenied',
+      })
     } finally {
       client.destroy()
     }
@@ -307,10 +269,7 @@ for (const role of ['SERVER', 'WORKER'] as const) {
 test('S3 password rotation rejects previous secrets', async () => {
   const { GetObjectCommand } = await import('@aws-sdk/client-s3')
   for (const role of ['SERVER', 'WORKER'] as const) {
-    const client = await storageRole(
-      role,
-      process.env[`OLD_STORAGE_${role}_SECRET_KEY`]!,
-    )
+    const client = await storageRole(role, process.env[`OLD_STORAGE_${role}_SECRET_KEY`]!)
     try {
       await denied(
         client.send(

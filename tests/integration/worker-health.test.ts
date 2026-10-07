@@ -1,18 +1,15 @@
 import { expect, spyOn, test } from 'bun:test'
 import { S3Client } from '@aws-sdk/client-s3'
 import { createClient } from 'redis'
-import {
-  executionStreams,
-  type ExecutionCommand,
-} from '@vid/contract/execution'
+import { executionStreams, type ExecutionCommand } from '@vid/contract/execution'
 import {
   acceptCommandMessages,
   acceptCommands,
   initializeCommands,
-} from '../../apps/agent/src/commands'
-import { acceptExecutionCommand } from '../../apps/agent/src/db/command-acceptance'
-import { bindExecutionWrites } from '../../apps/agent/src/db/run-writes'
-import { runWorker } from '../../apps/agent/src/run-loop'
+} from '../../apps/agent/src/execution/commands'
+import { acceptExecutionCommand } from '../../apps/agent/src/execution/db/command-acceptance'
+import { bindExecutionWrites } from '../../apps/agent/src/execution/db/run-writes'
+import { runWorker } from '../../apps/agent/src/execution/run-loop'
 import { readWorkerEnv } from '@vid/config'
 import { startWorker, WorkerProcess } from '../../apps/agent/src/worker'
 import { serveWorkerHealth } from '../../apps/agent/src/worker-health'
@@ -53,11 +50,7 @@ const noSpend = {
 
 test('native empty intake and idle claims establish private readiness', async () => {
   const fixture = openTestDatabase()
-  await fixture.db
-    .selectFrom('execution.runs')
-    .select('run_id')
-    .limit(1)
-    .execute()
+  await fixture.db.selectFrom('execution.runs').select('run_id').limit(1).execute()
   await fixture.close()
   const worker = await startWorker(env(), noSpend)
   const other = await startWorker(env(), noSpend)
@@ -71,9 +64,7 @@ test('native empty intake and idle claims establish private readiness', async ()
     expect(body).not.toContain('private-model-key')
     expect(body).not.toContain('private-vm-key')
     await worker.stop()
-    expect((await fetch(`http://127.0.0.1:${http.port}/livez`)).status).toBe(
-      503,
-    )
+    expect((await fetch(`http://127.0.0.1:${http.port}/livez`)).status).toBe(503)
     expect(other.health().live).toBe(true)
   } finally {
     await Promise.allSettled([worker.stop(), other.stop()])
@@ -89,9 +80,7 @@ test('health remains available and unready while actual owned work joins stop', 
   expect(worker.health().ready).toBe(false)
   const stopping = worker.stop()
   try {
-    expect((await fetch(`http://127.0.0.1:${http.port}/readyz`)).status).toBe(
-      503,
-    )
+    expect((await fetch(`http://127.0.0.1:${http.port}/readyz`)).status).toBe(503)
     expect(worker.health().live).toBe(false)
     held.resolve()
     await stopping
@@ -114,15 +103,11 @@ test('event receipt failure logs its explicit stage without inspecting rejected 
       throw new Error('message inspected')
     },
   })
-  const consume = spyOn(receipts, 'consumeEventBatch').mockRejectedValue(
-    privateCause,
-  )
+  const consume = spyOn(receipts, 'consumeEventBatch').mockRejectedValue(privateCause)
   const rows: unknown[][] = []
-  const log = spyOn(console, 'error').mockImplementation(
-    (...args: unknown[]) => {
-      rows.push(args)
-    },
-  )
+  const log = spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
+    rows.push(args)
+  })
   let server: Awaited<ReturnType<typeof startServer>> | undefined
   try {
     server = await startServer(serverTestEnv(), { port: 0 })
@@ -133,8 +118,7 @@ test('event receipt failure logs its explicit stage without inspecting rejected 
       { stage: 'eventreceipt', rejectedType: 'object', isError: true },
     ])
     expect(JSON.stringify(rows)).not.toContain('private payload')
-    if (!(failure instanceof AggregateError))
-      throw new Error('Expected aggregate')
+    if (!(failure instanceof AggregateError)) throw new Error('Expected aggregate')
     expect(failure.errors).toContain(privateCause)
   } finally {
     await server?.stop().catch(() => {})
@@ -146,11 +130,9 @@ test('event receipt failure logs its explicit stage without inspecting rejected 
 test('public reconstruction reports authority stage without reading rejection fields', async () => {
   const fixture = openTestDatabase()
   const rows: unknown[][] = []
-  const log = spyOn(console, 'error').mockImplementation(
-    (...args: unknown[]) => {
-      rows.push(args)
-    },
-  )
+  const log = spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
+    rows.push(args)
+  })
   const cause = new Error('private authority')
   Object.defineProperty(cause, 'name', {
     get() {
@@ -172,10 +154,7 @@ test('public reconstruction reports authority stage without reading rejection fi
     }).catch((error: unknown) => error)
     expect(failure).toBe(cause)
     expect(rows).toEqual([
-      [
-        'Public event read failed',
-        { stage: 'authority', rejectedType: 'object', isError: true },
-      ],
+      ['Public event read failed', { stage: 'authority', rejectedType: 'object', isError: true }],
     ])
   } finally {
     log.mockRestore()
@@ -187,11 +166,9 @@ test('public reconstruction distinguishes an actual unavailable database from au
   const fixture = openTestDatabase()
   await fixture.close()
   const rows: unknown[][] = []
-  const log = spyOn(console, 'error').mockImplementation(
-    (...args: unknown[]) => {
-      rows.push(args)
-    },
-  )
+  const log = spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
+    rows.push(args)
+  })
   try {
     const failure = await observeEvents(fixture.db, {
       ownerID: 'private-owner',
@@ -205,10 +182,7 @@ test('public reconstruction distinguishes an actual unavailable database from au
     }).catch((error: unknown) => error)
     expect(failure).toBeInstanceOf(Error)
     expect(rows).toEqual([
-      [
-        'Public event read failed',
-        { stage: 'read', rejectedType: 'object', isError: true },
-      ],
+      ['Public event read failed', { stage: 'read', rejectedType: 'object', isError: true }],
     ])
   } finally {
     log.mockRestore()
@@ -218,21 +192,20 @@ test('public reconstruction distinguishes an actual unavailable database from au
 
 test('synchronous worker construction failure retains primary and storage cleanup rejection', async () => {
   const cleanup = new Error('controlled storage cleanup')
-  const storage = spyOn(S3Client.prototype, 'destroy').mockImplementation(
-    function (this: S3Client) {
-      storage.mockRestore()
-      this.destroy()
-      throw cleanup
-    },
-  )
+  const storage = spyOn(S3Client.prototype, 'destroy').mockImplementation(function (
+    this: S3Client,
+  ) {
+    storage.mockRestore()
+    this.destroy()
+    throw cleanup
+  })
   try {
     const failure = await startWorker(
       { ...env(), REDIS_URL: 'ftp://127.0.0.1:6379' },
       { harness: noSpend.harness },
     ).catch((cause: unknown) => cause)
     expect(failure).toBeInstanceOf(AggregateError)
-    if (!(failure instanceof AggregateError))
-      throw new Error('Expected both failures')
+    if (!(failure instanceof AggregateError)) throw new Error('Expected both failures')
     expect(failure.errors[0]).toBeInstanceOf(Error)
     expect(failure.errors[1]).toBe(cleanup)
   } finally {
@@ -242,11 +215,7 @@ test('synchronous worker construction failure retains primary and storage cleanu
 
 test('a blackholed native claim does not fabricate local completion progress and fail-stops its owner', async () => {
   const fixture = openTestDatabase()
-  await fixture.db
-    .selectFrom('execution.runs')
-    .select('run_id')
-    .limit(1)
-    .execute()
+  await fixture.db.selectFrom('execution.runs').select('run_id').limit(1).execute()
   await fixture.close()
   const proxy = await postgresProxy(env().DATABASE_URL)
   const worker = new WorkerProcess({
@@ -258,9 +227,7 @@ test('a blackholed native claim does not fabricate local completion progress and
   let pending: Promise<unknown> | undefined
   try {
     await worker.connect()
-    expect(
-      await worker.claim({ ownerID: crypto.randomUUID(), leaseMs: 1000 }),
-    ).toBeNull()
+    expect(await worker.claim({ ownerID: crypto.randomUUID(), leaseMs: 1000 })).toBeNull()
     proxy.blackhole()
     const before = proxy.requests
     pending = worker.claim({ ownerID: crypto.randomUUID(), leaseMs: 1000 })
@@ -271,9 +238,7 @@ test('a blackholed native claim does not fabricate local completion progress and
     const failure = await worker.done.catch((cause: unknown) => cause)
     expect(failure).toBeInstanceOf(AggregateError)
     expect(worker.health().live).toBe(false)
-    expect((await fetch(`http://127.0.0.1:${http.port}/readyz`)).status).toBe(
-      503,
-    )
+    expect((await fetch(`http://127.0.0.1:${http.port}/readyz`)).status).toBe(503)
     await eventually(() => proxy.closedClients === proxy.connections)
     expect(proxy.closedClients).toBe(proxy.connections)
   } finally {
@@ -301,8 +266,7 @@ test('worker keeps owned failure and cleanup cause while closing both native Red
     worker.own(Promise.reject(primary))
     const failure = await worker.done.catch((cause: unknown) => cause)
     expect(failure).toBeInstanceOf(AggregateError)
-    if (!(failure instanceof AggregateError))
-      throw new Error('Expected aggregate')
+    if (!(failure instanceof AggregateError)) throw new Error('Expected aggregate')
     expect(failure.errors).toContain(primary)
     expect(failure.errors).toContain(cleanup)
     expect(worker.commands.isOpen).toBe(false)
@@ -325,11 +289,7 @@ async function intakeFixture() {
   let admitted = false
   try {
     // Verify actual SQL ownership before any worker native call.
-    await fixture.db
-      .selectFrom('execution.runs')
-      .select('run_id')
-      .limit(1)
-      .execute()
+    await fixture.db.selectFrom('execution.runs').select('run_id').limit(1).execute()
     await redis.connect()
     if ((await redis.get('vid:test:owner')) !== owner)
       throw new Error('Owned reserved transport database required')
@@ -377,11 +337,7 @@ async function intakeFixture() {
     settleTestCleanup([
       async () => {
         if (admitted && entries.length) {
-          await redis.xAck(
-            executionStreams.commands,
-            executionStreams.commandGroup,
-            entries,
-          )
+          await redis.xAck(executionStreams.commands, executionStreams.commandGroup, entries)
           await redis.xDel(executionStreams.commands, entries)
         }
       },
@@ -396,10 +352,7 @@ async function intakeFixture() {
           .deleteFrom('execution.event_outbox')
           .where('thread_id', 'in', threads)
           .execute()
-        await fixture.db
-          .deleteFrom('execution.runs')
-          .where('thread_id', 'in', threads)
-          .execute()
+        await fixture.db.deleteFrom('execution.runs').where('thread_id', 'in', threads).execute()
         await fixture.db
           .deleteFrom('execution.command_inbox')
           .where('thread_id', 'in', threads)
@@ -427,26 +380,15 @@ test('durable acceptance precedes ACK failure and stop preserves the exact remai
     const secondID = await f.publish(second)
     const messages = await f.read()
     const unopened = createClient()
-    const ackFailure = await acceptCommandMessages(
-      f.db,
-      unopened,
-      messages,
-    ).catch((cause: unknown) => cause)
+    const ackFailure = await acceptCommandMessages(f.db, unopened, messages).catch(
+      (cause: unknown) => cause,
+    )
     expect(ackFailure).toBeInstanceOf(Error)
     expect(await acceptExecutionCommand(f.db, first)).toBe('replay')
     expect(
-      (
-        await f.redis.xPending(
-          executionStreams.commands,
-          executionStreams.commandGroup,
-        )
-      ).pending,
+      (await f.redis.xPending(executionStreams.commands, executionStreams.commandGroup)).pending,
     ).toBe(2)
-    const count = await acceptCommandMessages(
-      f.db,
-      f.redis,
-      messages.slice(0, 1),
-    )
+    const count = await acceptCommandMessages(f.db, f.redis, messages.slice(0, 1))
     expect(count).toBe(1)
     const stopped = AbortSignal.abort()
     expect(
@@ -553,9 +495,7 @@ test('real saturated long harness remains ready while native SQL renews and stop
       .select('lease_until')
       .where('thread_id', '=', command.threadID)
       .executeTakeFirstOrThrow()
-    expect(current.lease_until!.getTime()).toBeGreaterThan(
-      initial.lease_until!.getTime(),
-    )
+    expect(current.lease_until!.getTime()).toBeGreaterThan(initial.lease_until!.getTime())
     await eventually(() => worker.health().ready)
     const response = await fetch(`http://127.0.0.1:${http.port}/readyz`)
     expect(response.status).toBe(200)

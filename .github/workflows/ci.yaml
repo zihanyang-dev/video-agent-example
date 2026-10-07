@@ -69,12 +69,6 @@ jobs:
           {
             sh .github/python/check.sh
             sh scripts/check.sh
-            sh scripts/check.sh test tests/scripts/ci-policy.test.ts \
-              tests/scripts/database-project.test.ts \
-              tests/scripts/proxy-deadline.test.ts \
-              tests/scripts/reconciliation-cli.test.ts \
-              tests/scripts/process-diagnostics.test.ts \
-              scripts/generate-api.test.ts
             sh scripts/check.sh run .github/verify-api.ts
           } 2>&1 | tee ci-logs/check.log
       - name: Failure evidence (explicit logs only)

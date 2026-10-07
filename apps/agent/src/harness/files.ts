@@ -1,17 +1,8 @@
 import { sha256, type ObjectStore } from '@vid/object-storage'
-import {
-  assetReferenceSchema,
-  type AssetReference,
-} from '@vid/contract/execution'
-import {
-  type ExecutionLease,
-  type FileTools,
-  type SandboxFiles,
-} from '../execute-run'
+import { assetReferenceSchema, type AssetReference } from '@vid/contract/execution'
+import type { ExecutionLease, FileTools, SandboxFiles } from '../execution/contract'
 
-const exportMetadataSchema = assetReferenceSchema
-  .unwrap()
-  .pick({ name: true, mimeType: true })
+const exportMetadataSchema = assetReferenceSchema.unwrap().pick({ name: true, mimeType: true })
 
 type FileLimits = Readonly<{
   maxBytes: number
@@ -23,11 +14,7 @@ type FileLimits = Readonly<{
  * trusted capability alone allocates immutable output keys. Never deletes after
  * an unknown PUT/COMMIT acknowledgement; orphan reconciliation is operator work. */
 export function assignFileTools(objects: ObjectStore, limits: FileLimits) {
-  return (
-    lease: ExecutionLease,
-    sandbox: SandboxFiles,
-    stopSpending: () => void,
-  ): FileTools => {
+  return (lease: ExecutionLease, sandbox: SandboxFiles, stopSpending: () => void): FileTools => {
     const assigned = lease.assets ?? []
     const prepared: AssetReference[] = []
     let count = 0
@@ -40,8 +27,7 @@ export function assignFileTools(objects: ObjectStore, limits: FileLimits) {
       count++
     }
     function reserveBytes(bytes: number) {
-      if (bytes > limits.maxBytes - byteLength)
-        throw new Error('Asset IO budget exceeded')
+      if (bytes > limits.maxBytes - byteLength) throw new Error('Asset IO budget exceeded')
       byteLength += bytes
     }
     function bounded(signal: AbortSignal) {
@@ -52,24 +38,14 @@ export function assignFileTools(objects: ObjectStore, limits: FileLimits) {
       prepared,
       hasUnknownOutcome: () => unknownOutcome,
       async importFile({ assetID, path, signal }) {
-        const asset = assigned.find(
-          (candidate) => candidate.assetID === assetID,
-        )
-        if (asset === undefined)
-          throw new Error('Asset was not assigned to this run')
+        const asset = assigned.find((candidate) => candidate.assetID === assetID)
+        if (asset === undefined) throw new Error('Asset was not assigned to this run')
         reserveFile()
         reserveBytes(asset.byteLength)
         const deadline = bounded(signal)
         deadline.throwIfAborted()
-        const bytes = await objects.read(
-          asset.objectKey,
-          asset.byteLength,
-          deadline,
-        )
-        if (
-          bytes.byteLength !== asset.byteLength ||
-          sha256(bytes) !== asset.sha256
-        )
+        const bytes = await objects.read(asset.objectKey, asset.byteLength, deadline)
+        if (bytes.byteLength !== asset.byteLength || sha256(bytes) !== asset.sha256)
           throw new Error('Assigned asset digest mismatch')
         deadline.throwIfAborted()
         try {
@@ -89,11 +65,7 @@ export function assignFileTools(objects: ObjectStore, limits: FileLimits) {
         reserveFile()
         const deadline = bounded(signal)
         deadline.throwIfAborted()
-        const bytes = await sandbox.readBytes(
-          path,
-          deadline,
-          limits.maxBytes - byteLength,
-        )
+        const bytes = await sandbox.readBytes(path, deadline, limits.maxBytes - byteLength)
         reserveBytes(bytes.byteLength)
         deadline.throwIfAborted()
         let digest

@@ -32,22 +32,15 @@ test('malformed command failures do not expose private wire content', async () =
     },
   ]).catch((cause: unknown) => cause)
   expect(failure).toBeInstanceOf(Error)
-  expect(failure instanceof Error && failure.message).toBe(
-    'Invalid pending command payload',
-  )
+  expect(failure instanceof Error && failure.message).toBe('Invalid pending command payload')
 })
 
 test('deleted and missing command bodies fail before either durable acceptance or ACK', async () => {
-  for (const message of [
-    null,
-    { id: '1-0', message: { wrongField: 'body' } },
-  ]) {
+  for (const message of [null, { id: '1-0', message: { wrongField: 'body' } }]) {
     const failure = await acceptCommandMessages(db, redis, [message]).catch(
       (cause: unknown) => cause,
     )
     expect(failure).toBeInstanceOf(Error)
-    expect(failure instanceof Error && failure.message).toMatch(
-      /pending command payload/,
-    )
+    expect(failure instanceof Error && failure.message).toMatch(/pending command payload/)
   }
 })

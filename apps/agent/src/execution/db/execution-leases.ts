@@ -1,8 +1,8 @@
 import { startCommandSchema } from '@vid/contract/execution'
-import { sandboxReferenceFromJSON } from '../sandbox/reference'
+import { sandboxReferenceFromJSON } from '../../sandbox/reference'
 import type { DB } from '@vid/database/types'
 import { sql, type Kysely, type Transaction } from 'kysely'
-import type { ExecutionLease } from '../execute-run'
+import type { ExecutionLease } from '../contract'
 import { enqueueEvent, eventIdentities } from './event-outbox'
 
 type ClaimOptions = Readonly<{ ownerID: string; leaseMs: number }>
@@ -21,11 +21,7 @@ export async function claimExecutionRun(db: Kysely<DB>, options: ClaimOptions) {
 /** Renewal uses post-lock database time, and continues to grant ownership during
  * cancellation cleanup. Returning cancel is not permission to release the lease.
  */
-export async function renewExecutionLease(
-  db: Kysely<DB>,
-  lease: ExecutionLease,
-  leaseMs: number,
-) {
+export async function renewExecutionLease(db: Kysely<DB>, lease: ExecutionLease, leaseMs: number) {
   return await db.transaction().execute((tx) => renewLease(tx, lease, leaseMs))
 }
 
@@ -46,15 +42,8 @@ async function claimRun(
       .where('thread_id', '=', conversation.thread_id)
       .execute()
   }
-  if (
-    conversation.sandbox_recovery_required ||
-    conversation.active_run_id !== null
-  ) {
-    await rejectQueuedRuns(
-      tx,
-      conversation.thread_id,
-      'sandbox-recovery-required',
-    )
+  if (conversation.sandbox_recovery_required || conversation.active_run_id !== null) {
+    await rejectQueuedRuns(tx, conversation.thread_id, 'sandbox-recovery-required')
     return null
   }
   // Read after the conversation lock, and do not transfer oversized JSON into
@@ -64,9 +53,7 @@ async function claimRun(
     .select([
       sql<unknown>`case when octet_length(history::text) <= ${historyByteLimit}
         then history else 'null'::jsonb end`.as('history'),
-      sql<boolean>`octet_length(history::text) > ${historyByteLimit}`.as(
-        'history_rejected',
-      ),
+      sql<boolean>`octet_length(history::text) > ${historyByteLimit}`.as('history_rejected'),
     ])
     .where('thread_id', '=', conversation.thread_id)
     .executeTakeFirstOrThrow()
@@ -214,11 +201,7 @@ export async function lockLease(tx: Transaction<DB>, lease: ExecutionLease) {
     .executeTakeFirst()
 }
 
-async function renewLease(
-  tx: Transaction<DB>,
-  lease: ExecutionLease,
-  leaseMs: number,
-) {
+async function renewLease(tx: Transaction<DB>, lease: ExecutionLease, leaseMs: number) {
   const run = await lockLease(tx, lease)
   if (run === undefined) return 'lost' as const
   await tx
@@ -232,10 +215,7 @@ async function renewLease(
   return run.cancel_requested ? ('cancel' as const) : ('renewed' as const)
 }
 
-export async function releaseConversation(
-  tx: Transaction<DB>,
-  threadID: string,
-) {
+export async function releaseConversation(tx: Transaction<DB>, threadID: string) {
   await tx
     .updateTable('execution.conversations')
     .set({ active_run_id: null, lease_owner: null, lease_until: null })

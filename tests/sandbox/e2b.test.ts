@@ -2,11 +2,7 @@ import { afterAll, describe, expect, test } from 'bun:test'
 import { E2B, type Sandbox } from 'e2b'
 import { openE2BSandbox } from '../../apps/agent/src/sandbox/e2b'
 
-function validateEmbedEndpoint(
-  apiURL: string,
-  sandboxURL: string,
-  port: number,
-) {
+function validateEmbedEndpoint(apiURL: string, sandboxURL: string, port: number) {
   if (
     !Number.isInteger(port) ||
     port < 1 ||
@@ -14,9 +10,7 @@ function validateEmbedEndpoint(
     new URL(apiURL).hostname !== '127.0.0.1' ||
     new URL(sandboxURL).hostname !== '127.0.0.1'
   )
-    throw new Error(
-      'Sandbox tests require explicitly configured local E2B Embed',
-    )
+    throw new Error('Sandbox tests require explicitly configured local E2B Embed')
 }
 
 describe('owned Embed environment (opt-in)', () => {
@@ -35,9 +29,7 @@ describe('owned Embed environment (opt-in)', () => {
     return
   }
   if (!apiURL || !sandboxURL || !apiKey || !probeHost)
-    throw new Error(
-      'Sandbox tests require explicitly configured local E2B Embed',
-    )
+    throw new Error('Sandbox tests require explicitly configured local E2B Embed')
   validateEmbedEndpoint(apiURL, sandboxURL, probePort)
   const client = new E2B({
     apiUrl: apiURL,
@@ -103,8 +95,7 @@ describe('owned Embed environment (opt-in)', () => {
     console.log('Owned E2B test run IDs:', JSON.stringify(ownedRuns))
     const failures: unknown[] = []
     await Promise.all(ownedRuns.map((runID) => cleanupRun(runID, failures)))
-    if (failures.length)
-      throw new AggregateError(failures, 'Owned sandbox cleanup failed')
+    if (failures.length) throw new AggregateError(failures, 'Owned sandbox cleanup failed')
   })
 
   test('assigned tools use the SDK and retain nonzero exit diagnostics', async () => {
@@ -112,9 +103,7 @@ describe('owned Embed environment (opt-in)', () => {
     const signal = new AbortController().signal
     const sandbox = await openE2BSandbox(input, signal)
     try {
-      expect(
-        (await client.Sandbox.getInfo(sandbox.nativeRef.id)).lifecycle,
-      ).toEqual({
+      expect((await client.Sandbox.getInfo(sandbox.nativeRef.id)).lifecycle).toEqual({
         onTimeout: 'kill',
         autoResume: false,
       })
@@ -123,9 +112,7 @@ describe('owned Embed environment (opt-in)', () => {
         content: 'hello',
         signal,
       })
-      expect(
-        await sandbox.read({ path: '/home/user/result.txt', signal }),
-      ).toBe('hello')
+      expect(await sandbox.read({ path: '/home/user/result.txt', signal })).toBe('hello')
       expect(
         await sandbox.execute({
           command: 'printf output; printf diagnostic >&2; exit 7',
@@ -151,25 +138,24 @@ describe('owned Embed environment (opt-in)', () => {
     const signal = new AbortController().signal
     const sandbox = await openE2BSandbox(input, signal)
     let requests = 0
-    const probe = Bun.serve({
-      hostname: networkHost,
-      port: probePort,
-      fetch: () => {
-        requests++
-        return new Response('owned-network-probe')
-      },
-    })
-    const command = `curl --noproxy "*" --max-time 2 -fsS http://${networkHost}:${probe.port}`
+    let probe: ReturnType<typeof Bun.serve> | undefined
+    const failures: unknown[] = []
     try {
+      probe = Bun.serve({
+        hostname: networkHost,
+        port: probePort,
+        fetch: () => {
+          requests++
+          return new Response('owned-network-probe')
+        },
+      })
+      const command = `curl --noproxy "*" --max-time 2 -fsS http://${networkHost}:${probe.port}`
       const env = await sandbox.execute({ command: 'env', signal })
       expect(env.stdout).not.toContain(input.apiKey)
       expect(env.stdout).not.toContain('MODEL_API_KEY=')
       expect(env.stdout).not.toContain('DATABASE_URL=')
       expect(env.stdout).not.toContain('TURN_TOKEN_SECRET=')
-      expect(
-        (await sandbox.execute({ command: 'command -v curl', signal }))
-          .exitCode,
-      ).toBe(0)
+      expect((await sandbox.execute({ command: 'command -v curl', signal })).exitCode).toBe(0)
       const controlInput = options()
       const control = await client.Sandbox.create('base', {
         timeoutMs: 120000,
@@ -177,23 +163,34 @@ describe('owned Embed environment (opt-in)', () => {
         allowInternetAccess: true,
         network: { allowOut: [networkHost] },
       })
+      const controlFailures: unknown[] = []
       try {
-        expect((await control.commands.run(command)).stdout).toBe(
-          'owned-network-probe',
-        )
-      } finally {
-        await control.kill()
+        expect((await control.commands.run(command)).stdout).toBe('owned-network-probe')
+      } catch (cause) {
+        controlFailures.push(cause)
       }
+      await control.kill().catch((cause: unknown) => {
+        controlFailures.push(cause)
+      })
+      if (controlFailures.length > 1)
+        throw new AggregateError(controlFailures, 'Control sandbox failed')
+      if (controlFailures.length === 1) throw controlFailures[0]
       const network = await sandbox.execute({
         command,
         signal,
       })
       expect(network.exitCode).not.toBe(0)
       expect(requests).toBe(1)
-    } finally {
-      await probe.stop(true)
-      await sandbox.close()
+    } catch (cause) {
+      failures.push(cause)
     }
+    const cleanup = await Promise.allSettled([
+      Promise.resolve().then(() => probe?.stop(true)),
+      Promise.resolve().then(() => sandbox.close()),
+    ])
+    for (const result of cleanup) if (result.status === 'rejected') failures.push(result.reason)
+    if (failures.length > 1) throw new AggregateError(failures, 'Owned network probe failed')
+    if (failures.length === 1) throw failures[0]
   }, 30000)
 
   test('binary workspace IO preserves arbitrary bytes using official SDK byte reads and writes', async () => {
@@ -203,9 +200,7 @@ describe('owned Embed environment (opt-in)', () => {
     try {
       const bytes = new Uint8Array([0, 255, 128, 13, 10, 0])
       await sandbox.writeBytes('/home/user/binary.bin', bytes, signal)
-      expect(
-        await sandbox.readBytes('/home/user/binary.bin', signal, 6),
-      ).toEqual(bytes)
+      expect(await sandbox.readBytes('/home/user/binary.bin', signal, 6)).toEqual(bytes)
     } finally {
       await sandbox.close()
     }
@@ -220,8 +215,7 @@ describe('owned Embed environment (opt-in)', () => {
     expect(
       (
         await sandbox.execute({
-          command:
-            'mkdir -p /home/user/agent-chosen; printf saved > /home/user/agent-chosen/note',
+          command: 'mkdir -p /home/user/agent-chosen; printf saved > /home/user/agent-chosen/note',
           signal,
         })
       ).exitCode,
@@ -233,9 +227,7 @@ describe('owned Embed environment (opt-in)', () => {
       { background: true },
     )
     await waitForStart(active, '/home/user/agent-chosen/started')
-    expect(
-      (await active.commands.run(`kill -0 ${background.pid}`)).exitCode,
-    ).toBe(0)
+    expect((await active.commands.run(`kill -0 ${background.pid}`)).exitCode).toBe(0)
     await sandbox.close()
     // Default restore is a characterization probe: a real filesystem-only
     // snapshot must cold-boot even without the production reboot option.
@@ -252,9 +244,7 @@ describe('owned Embed environment (opt-in)', () => {
           signal,
         }),
       ).not.toBe(bootID)
-      expect(
-        await next.read({ path: '/home/user/agent-chosen/note', signal }),
-      ).toBe('saved')
+      expect(await next.read({ path: '/home/user/agent-chosen/note', signal })).toBe('saved')
       await Bun.sleep(17000)
       expect(
         (
@@ -283,9 +273,7 @@ describe('owned Embed environment (opt-in)', () => {
     await waitForStart(remote, '/home/user/cancel-retained')
     owner.abort()
     expect(await operation).toBeInstanceOf(Error)
-    expect(
-      await sandbox.close().catch((error: unknown) => error),
-    ).toBeInstanceOf(Error)
+    expect(await sandbox.close().catch((error: unknown) => error)).toBeInstanceOf(Error)
   }, 30000)
 
   test('lost command RPC acknowledgement rejects and isolates the native session without replay', async () => {
@@ -299,14 +287,11 @@ describe('owned Embed environment (opt-in)', () => {
       port: 0,
       async fetch(request) {
         const url = new URL(request.url)
-        const upstream = await fetch(
-          `${sandboxURL}${url.pathname}${url.search}`,
-          {
-            method: request.method,
-            headers: request.headers,
-            body: request.body,
-          },
-        )
+        const upstream = await fetch(`${sandboxURL}${url.pathname}${url.search}`, {
+          method: request.method,
+          headers: request.headers,
+          body: request.body,
+        })
         if (url.pathname.endsWith('/Start')) {
           starts++
           const reader = upstream.body?.getReader()
@@ -327,8 +312,7 @@ describe('owned Embed environment (opt-in)', () => {
       expect(
         await sandbox
           .execute({
-            command:
-              'printf accepted > /home/user/unknown-accepted; exec sleep 300',
+            command: 'printf accepted > /home/user/unknown-accepted; exec sleep 300',
             signal,
           })
           .catch((error: unknown) => error),
@@ -341,12 +325,8 @@ describe('owned Embed environment (opt-in)', () => {
           .catch((error: unknown) => error),
       ).toBeInstanceOf(Error)
       expect(starts).toBe(1)
-      expect(
-        await sandbox.close().catch((error: unknown) => error),
-      ).toBeInstanceOf(Error)
-      expect((await assigned(input.runID))[0]?.sandboxId).toBe(
-        sandbox.nativeRef.id,
-      )
+      expect(await sandbox.close().catch((error: unknown) => error)).toBeInstanceOf(Error)
+      expect((await assigned(input.runID))[0]?.sandboxId).toBe(sandbox.nativeRef.id)
       expect((await assigned(input.runID))[0]?.state).toBe('paused')
     } finally {
       await sandbox.close().catch(() => {}) // rejection asserted above; cleanup by ownership below
@@ -365,8 +345,7 @@ describe('owned Embed environment (opt-in)', () => {
     })
     const deadline = Date.now() + 10000
     while ((await assigned(input.runID)).length > 0) {
-      if (Date.now() > deadline)
-        throw new Error('Native timeout did not delete sandbox')
+      if (Date.now() > deadline) throw new Error('Native timeout did not delete sandbox')
       await Bun.sleep(100)
     }
     expect(await assigned(input.runID)).toHaveLength(0)
@@ -387,11 +366,7 @@ function nativeAPIReceipt(status: number, message: string) {
 }
 
 // Actual SDK transport only: these owned HTTP endpoints never allocate a VM.
-function nativeHTTPFixture(
-  timeoutStatus = 204,
-  pauseStatus = 204,
-  writeStatus = 200,
-) {
+function nativeHTTPFixture(timeoutStatus = 204, pauseStatus = 204, writeStatus = 200) {
   const writeReceived = Promise.withResolvers<void>()
   const writeReceipt = Promise.withResolvers<void>()
   const timeoutReceived = Promise.withResolvers<void>()
@@ -416,21 +391,12 @@ function nativeHTTPFixture(
         writeReceived.resolve()
         await writeReceipt.promise
         if (writeStatus !== 200)
-          return Response.json(
-            { message: 'lost file write receipt' },
-            { status: writeStatus },
-          )
-        return Response.json([
-          { name: 'owned', path: url.searchParams.get('path'), type: 'file' },
-        ])
+          return Response.json({ message: 'lost file write receipt' }, { status: writeStatus })
+        return Response.json([{ name: 'owned', path: url.searchParams.get('path'), type: 'file' }])
       }
-      const body: unknown =
-        request.method === 'POST' ? await request.json() : undefined
+      const body: unknown = request.method === 'POST' ? await request.json() : undefined
       requests.push({ path: url.pathname, method: request.method, body })
-      if (
-        url.pathname === '/v2/sandboxes' ||
-        url.pathname === '/v2/sandboxes/owned-http/connect'
-      )
+      if (url.pathname === '/v2/sandboxes' || url.pathname === '/v2/sandboxes/owned-http/connect')
         return Response.json({
           sandboxID: 'owned-http',
           envdVersion: '0.6.2',
@@ -493,9 +459,7 @@ for (const binary of [false, true]) {
         : sandbox.write({ path: '/owned', content: 'committed', signal })
       const outcome = write.catch((error: unknown) => error)
       await fixture.writeReceived.promise
-      expect(fixture.writes[0]).toEqual(
-        binary ? bytes : new TextEncoder().encode('committed'),
-      )
+      expect(fixture.writes[0]).toEqual(binary ? bytes : new TextEncoder().encode('committed'))
       cancellation.abort(new Error('owned cancellation'))
       expect(await outcome).toBe(cancellation.signal.reason)
       fixture.writeReceipt.resolve()
@@ -508,13 +472,9 @@ for (const binary of [false, true]) {
           })
           .catch((error: unknown) => error),
       ).toBeInstanceOf(Error)
-      expect(
-        await sandbox.close().catch((error: unknown) => error),
-      ).toBeInstanceOf(Error)
+      expect(await sandbox.close().catch((error: unknown) => error)).toBeInstanceOf(Error)
       expect(fixture.writes).toHaveLength(1)
-      expect(
-        fixture.requests.filter((request) => request.path.endsWith('/pause')),
-      ).toEqual([
+      expect(fixture.requests.filter((request) => request.path.endsWith('/pause'))).toEqual([
         {
           path: '/sandboxes/owned-http/pause',
           method: 'POST',
@@ -529,10 +489,7 @@ for (const binary of [false, true]) {
 
 test('native SDK pre-dispatch write cancellation sends no RPC and permits disk-only close', async () => {
   const fixture = nativeHTTPFixture()
-  const sandbox = await openE2BSandbox(
-    fixture.options,
-    new AbortController().signal,
-  )
+  const sandbox = await openE2BSandbox(fixture.options, new AbortController().signal)
   try {
     expect(
       await sandbox
@@ -561,17 +518,11 @@ for (const binary of [false, true]) {
       const outcome = binary
         ? sandbox.writeBytes('/owned', new Uint8Array([0, 255]), signal)
         : sandbox.write({ path: '/owned', content: 'committed', signal })
-      expect(await outcome.catch((error: unknown) => error)).toBeInstanceOf(
-        Error,
-      )
+      expect(await outcome.catch((error: unknown) => error)).toBeInstanceOf(Error)
       expect(
-        await sandbox
-          .read({ path: '/later', signal })
-          .catch((error: unknown) => error),
+        await sandbox.read({ path: '/later', signal }).catch((error: unknown) => error),
       ).toBeInstanceOf(Error)
-      expect(
-        await sandbox.close().catch((error: unknown) => error),
-      ).toBeInstanceOf(Error)
+      expect(await sandbox.close().catch((error: unknown) => error)).toBeInstanceOf(Error)
       expect(fixture.writes).toHaveLength(1)
       expect(fixture.requests.at(-1)?.body).toEqual({ memory: false })
     } finally {
@@ -601,15 +552,9 @@ test('native SDK reconnect uses reboot and already-paused ACK does not establish
         body: { timeout: 120, memory: false },
       },
     ])
-    expect(
-      await sandbox.close().catch((error: unknown) => error),
-    ).toBeInstanceOf(Error)
-    expect(
-      await sandbox.close().catch((error: unknown) => error),
-    ).toBeInstanceOf(Error)
-    expect(
-      fixture.requests.filter((request) => request.path.endsWith('/pause')),
-    ).toHaveLength(1)
+    expect(await sandbox.close().catch((error: unknown) => error)).toBeInstanceOf(Error)
+    expect(await sandbox.close().catch((error: unknown) => error)).toBeInstanceOf(Error)
+    expect(fixture.requests.filter((request) => request.path.endsWith('/pause'))).toHaveLength(1)
     expect(fixture.requests.at(-1)?.body).toEqual({ memory: false })
   } finally {
     await fixture.stop()

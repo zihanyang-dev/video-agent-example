@@ -1,8 +1,5 @@
 import type { DB } from '@vid/database/types'
-import {
-  executionCommandSchema,
-  type ExecutionCommand,
-} from '@vid/contract/execution'
+import { executionCommandSchema, type ExecutionCommand } from '@vid/contract/execution'
 import type { Kysely, Selectable } from 'kysely'
 
 type CommandPublication = Readonly<{
@@ -18,10 +15,7 @@ type CommandBatch = Readonly<{
 
 // Each row commits independently. After a partial failure, retry retains the
 // original identities and skips rows whose publication already committed.
-export async function publishCommands(
-  db: Kysely<DB>,
-  batch: CommandBatch,
-): Promise<number> {
+export async function publishCommands(db: Kysely<DB>, batch: CommandBatch): Promise<number> {
   if (!Number.isSafeInteger(batch.limit) || batch.limit < 1) {
     throw new RangeError('Command batch limit must be a positive safe integer')
   }

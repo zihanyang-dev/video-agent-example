@@ -1,10 +1,5 @@
 import { expect, test } from 'bun:test'
-import {
-  readAdministrationEnv,
-  readMigrationEnv,
-  readServerEnv,
-  readWorkerEnv,
-} from './env'
+import { readAdministrationEnv, readMigrationEnv, readServerEnv, readWorkerEnv } from './env'
 
 const authenticationInput = {
   AUTH_BASE_URL: 'https://app.example',
@@ -83,9 +78,18 @@ test('worker has complete execution configuration and no provider secrets', () =
     SANDBOX_TIMEOUT_MS: 300000,
     LEASE_MS: 30000,
     POLL_MS: 200,
+    EVENT_OUTBOX_RETENTION_MS: 2592000000,
     CONCURRENCY: 3,
     IO_TIMEOUT_MS: 5000,
   })
+})
+
+test('worker admits the explicit 30-day SQL retention default and blank values', () => {
+  for (const value of [undefined, '', '2592000000']) {
+    expect(
+      readWorkerEnv({ ...workerInput, EVENT_OUTBOX_RETENTION_MS: value }).EVENT_OUTBOX_RETENTION_MS,
+    ).toBe(2592000000)
+  }
 })
 
 test('worker starts without credentials for a gateway it does not use', () => {
@@ -132,9 +136,7 @@ test('model output budget must fit within the configured endpoint context', () =
 })
 
 test('model capabilities are explicit without treating false as a truthy string', () => {
-  expect(
-    readWorkerEnv({ ...workerInput, MODEL_REASONING: 'false' }).MODEL_REASONING,
-  ).toBe(false)
+  expect(readWorkerEnv({ ...workerInput, MODEL_REASONING: 'false' }).MODEL_REASONING).toBe(false)
   expect(
     readWorkerEnv({
       ...workerInput,
@@ -204,9 +206,7 @@ test('migration requires only its database connection', () => {
   expect(readMigrationEnv(workerInput)).toEqual({
     DATABASE_URL: connections.DATABASE_URL,
   })
-  expect(
-    errorMessage(() => readMigrationEnv({ DATABASE_URL: '\n\t' })),
-  ).toContain('DATABASE_URL')
+  expect(errorMessage(() => readMigrationEnv({ DATABASE_URL: '\n\t' }))).toContain('DATABASE_URL')
 })
 
 test('each process reports all its missing required fields', () => {
@@ -243,12 +243,7 @@ test('combined diagnostics never echo submitted credentials', () => {
       CONCURRENCY: 'INVALID-NUMBER-SECRET',
     }),
   )
-  for (const field of [
-    'DATABASE_URL',
-    'REDIS_URL',
-    'MODEL_BASE_URL',
-    'CONCURRENCY',
-  ]) {
+  for (const field of ['DATABASE_URL', 'REDIS_URL', 'MODEL_BASE_URL', 'CONCURRENCY']) {
     expect(message).toContain(field)
   }
   for (const secret of [
@@ -263,36 +258,21 @@ test('combined diagnostics never echo submitted credentials', () => {
 
 test('whitespace-only required worker values are missing', () => {
   for (const field of Object.keys(workerInput)) {
-    expect(
-      errorMessage(() => readWorkerEnv({ ...workerInput, [field]: ' \n\t ' })),
-    ).toContain(field)
+    expect(errorMessage(() => readWorkerEnv({ ...workerInput, [field]: ' \n\t ' }))).toContain(
+      field,
+    )
   }
 })
 
 test('endpoint URLs accept HTTP(S) and reject other schemes or malformed URLs', () => {
-  for (const field of [
-    'MODEL_BASE_URL',
-    'E2B_API_URL',
-    'E2B_SANDBOX_URL',
-  ] as const) {
-    for (const endpoint of [
-      'ftp://host/path',
-      'file:///tmp/model',
-      'not-a-url',
-    ]) {
-      expect(
-        errorMessage(() =>
-          readWorkerEnv({ ...workerInput, [field]: endpoint }),
-        ),
-      ).toContain(field)
-    }
-    for (const endpoint of [
-      'http://localhost:8080',
-      'https://model.example/v1',
-    ]) {
-      expect(readWorkerEnv({ ...workerInput, [field]: endpoint })[field]).toBe(
-        endpoint,
+  for (const field of ['MODEL_BASE_URL', 'E2B_API_URL', 'E2B_SANDBOX_URL'] as const) {
+    for (const endpoint of ['ftp://host/path', 'file:///tmp/model', 'not-a-url']) {
+      expect(errorMessage(() => readWorkerEnv({ ...workerInput, [field]: endpoint }))).toContain(
+        field,
       )
+    }
+    for (const endpoint of ['http://localhost:8080', 'https://model.example/v1']) {
+      expect(readWorkerEnv({ ...workerInput, [field]: endpoint })[field]).toBe(endpoint)
     }
   }
 })
@@ -310,9 +290,9 @@ test('database and Redis endpoints reject wrong protocols without leaking creden
     expect(diagnostic).toContain('REDIS_URL')
     expect(diagnostic).not.toContain('private-password')
   }
-  expect(
-    readMigrationEnv({ DATABASE_URL: 'postgres://db/app' }).DATABASE_URL,
-  ).toBe('postgres://db/app')
+  expect(readMigrationEnv({ DATABASE_URL: 'postgres://db/app' }).DATABASE_URL).toBe(
+    'postgres://db/app',
+  )
   expect(
     readServerEnv({
       ...connections,
@@ -323,40 +303,27 @@ test('database and Redis endpoints reject wrong protocols without leaking creden
 })
 
 test('numeric settings reject zero, negatives, fractions and nonnumbers', () => {
-  for (const field of [
-    'LEASE_MS',
-    'POLL_MS',
-    'CONCURRENCY',
-    'SANDBOX_TIMEOUT_MS',
-  ]) {
+  for (const field of ['LEASE_MS', 'POLL_MS', 'CONCURRENCY', 'SANDBOX_TIMEOUT_MS']) {
     for (const invalid of ['0', '-1', '1.5', 'NaN', 'Infinity', 'invalid']) {
-      expect(
-        errorMessage(() => readWorkerEnv({ ...workerInput, [field]: invalid })),
-      ).toContain(field)
+      expect(errorMessage(() => readWorkerEnv({ ...workerInput, [field]: invalid }))).toContain(
+        field,
+      )
     }
   }
   for (const PORT of ['0', '-1', '65536', '1.5', 'invalid'])
     expect(
-      errorMessage(() =>
-        readServerEnv({ ...workerInput, ...authenticationInput, PORT }),
-      ),
+      errorMessage(() => readServerEnv({ ...workerInput, ...authenticationInput, PORT })),
     ).toContain('PORT')
-  expect(
-    readServerEnv({ ...workerInput, ...authenticationInput, PORT: '65535' })
-      .PORT,
-  ).toBe(65535)
+  expect(readServerEnv({ ...workerInput, ...authenticationInput, PORT: '65535' }).PORT).toBe(65535)
 })
 
 test('sandbox lifetime is bounded independently of worker lease renewal', () => {
   expect(
-    errorMessage(() =>
-      readWorkerEnv({ ...workerInput, SANDBOX_TIMEOUT_MS: '3600001' }),
-    ),
+    errorMessage(() => readWorkerEnv({ ...workerInput, SANDBOX_TIMEOUT_MS: '3600001' })),
   ).toContain('SANDBOX_TIMEOUT_MS')
-  expect(
-    readWorkerEnv({ ...workerInput, SANDBOX_TIMEOUT_MS: '3600000' })
-      .SANDBOX_TIMEOUT_MS,
-  ).toBe(3600000)
+  expect(readWorkerEnv({ ...workerInput, SANDBOX_TIMEOUT_MS: '3600000' }).SANDBOX_TIMEOUT_MS).toBe(
+    3600000,
+  )
 })
 
 test('blank numeric values use worker defaults', () => {
@@ -378,9 +345,7 @@ test('blank numeric values use worker defaults', () => {
 test('lease must exceed three polling intervals, including equality', () => {
   for (const LEASE_MS of ['599', '600']) {
     expect(
-      errorMessage(() =>
-        readWorkerEnv({ ...workerInput, LEASE_MS, POLL_MS: '200' }),
-      ),
+      errorMessage(() => readWorkerEnv({ ...workerInput, LEASE_MS, POLL_MS: '200' })),
     ).toContain('LEASE_MS')
   }
   expect(
@@ -415,17 +380,14 @@ test('Redis database path is validated before client construction without exposi
     'redis://redis/0',
     'rediss://redis/12',
   ]) {
-    expect(
-      readServerEnv({ ...connections, ...authenticationInput, REDIS_URL })
-        .REDIS_URL,
-    ).toBe(REDIS_URL)
+    expect(readServerEnv({ ...connections, ...authenticationInput, REDIS_URL }).REDIS_URL).toBe(
+      REDIS_URL,
+    )
   }
 })
 
 test('runtime has bounded IO and a authentication configured only on the server', () => {
-  expect(
-    readServerEnv({ ...connections, ...authenticationInput }),
-  ).toMatchObject({
+  expect(readServerEnv({ ...connections, ...authenticationInput })).toMatchObject({
     ...authenticationInput,
     IO_TIMEOUT_MS: 5000,
     POLL_MS: 200,
@@ -440,29 +402,22 @@ test('runtime has bounded IO and a authentication configured only on the server'
   }
   for (const IO_TIMEOUT_MS of ['1000', '60000'])
     expect(
-      readServerEnv({ ...connections, ...authenticationInput, IO_TIMEOUT_MS })
-        .IO_TIMEOUT_MS,
+      readServerEnv({ ...connections, ...authenticationInput, IO_TIMEOUT_MS }).IO_TIMEOUT_MS,
     ).toBe(Number(IO_TIMEOUT_MS))
 })
 
 test('trusted model prompt path defaults for blanks and accepts explicit assignment', () => {
+  expect(readWorkerEnv({ ...workerInput, MODEL_PROMPT_PATH: ' ' }).MODEL_PROMPT_PATH).toBe(
+    '/app/apps/agent/prompt.md',
+  )
   expect(
-    readWorkerEnv({ ...workerInput, MODEL_PROMPT_PATH: ' ' }).MODEL_PROMPT_PATH,
-  ).toBe('/app/apps/agent/prompt.md')
-  expect(
-    readWorkerEnv({ ...workerInput, MODEL_PROMPT_PATH: '/trusted/custom.md' })
-      .MODEL_PROMPT_PATH,
+    readWorkerEnv({ ...workerInput, MODEL_PROMPT_PATH: '/trusted/custom.md' }).MODEL_PROMPT_PATH,
   ).toBe('/trusted/custom.md')
 })
 
 test('server requires canonical authentication origin and private provider credentials', () => {
   const diagnostic = errorMessage(() => readServerEnv(connections))
-  for (const field of [
-    'AUTH_BASE_URL',
-    'AUTH_SECRET',
-    'GITHUB_CLIENT_ID',
-    'GITHUB_CLIENT_SECRET',
-  ])
+  for (const field of ['AUTH_BASE_URL', 'AUTH_SECRET', 'GITHUB_CLIENT_ID', 'GITHUB_CLIENT_SECRET'])
     expect(diagnostic).toContain(field)
   expect(() =>
     readServerEnv({
@@ -510,9 +465,7 @@ test('authentication origins require HTTPS except explicit HTTP loopback develop
     'https://app.example?query',
     'https://app.example#fragment',
   ]) {
-    expect(() =>
-      readServerEnv({ ...connections, ...authenticationInput, AUTH_BASE_URL }),
-    ).toThrow()
+    expect(() => readServerEnv({ ...connections, ...authenticationInput, AUTH_BASE_URL })).toThrow()
   }
   for (const AUTH_BASE_URL of [
     'https://app.example',
@@ -521,8 +474,7 @@ test('authentication origins require HTTPS except explicit HTTP loopback develop
     'http://[::1]:8787',
   ]) {
     expect(
-      readServerEnv({ ...connections, ...authenticationInput, AUTH_BASE_URL })
-        .AUTH_BASE_URL,
+      readServerEnv({ ...connections, ...authenticationInput, AUTH_BASE_URL }).AUTH_BASE_URL,
     ).toBe(AUTH_BASE_URL)
   }
 })
@@ -540,9 +492,7 @@ test('asset budgets reject invalid bounds before either process opens storage', 
       ['ASSET_MAX_FILES', 'Infinity'],
     ] as const)
       expect(
-        errorMessage(() =>
-          read({ ...workerInput, ...authenticationInput, [field]: setting }),
-        ),
+        errorMessage(() => read({ ...workerInput, ...authenticationInput, [field]: setting })),
       ).toContain(field)
   }
 })
@@ -562,15 +512,25 @@ test('server and worker require explicit object credentials and bounded file bud
   }
 })
 
+test('both process polling policies preserve defaults and reject unsupported intervals', () => {
+  const input = { ...workerInput, ...authenticationInput, LEASE_MS: '60000' }
+  for (const read of [readServerEnv, readWorkerEnv]) {
+    expect(read({ ...input, POLL_MS: undefined }).POLL_MS).toBe(200)
+    expect(read({ ...input, POLL_MS: ' ' }).POLL_MS).toBe(200)
+    expect(read({ ...input, POLL_MS: '1' }).POLL_MS).toBe(1)
+    expect(read({ ...input, POLL_MS: '10000' }).POLL_MS).toBe(10000)
+    for (const setting of ['0', '-1', '1.5', 'Infinity', '10001'])
+      expect(errorMessage(() => read({ ...input, POLL_MS: setting }))).toContain('POLL_MS')
+  }
+})
+
 test('worker timer and concurrency bounds reject overflow but retain supported endpoints', () => {
   for (const [field, setting] of [
     ['LEASE_MS', '2147483648'],
     ['POLL_MS', '10001'],
     ['CONCURRENCY', '33'],
   ] as const)
-    expect(
-      errorMessage(() => readWorkerEnv({ ...workerInput, [field]: setting })),
-    ).toContain(field)
+    expect(errorMessage(() => readWorkerEnv({ ...workerInput, [field]: setting }))).toContain(field)
   expect(
     readWorkerEnv({
       ...workerInput,
@@ -579,9 +539,9 @@ test('worker timer and concurrency bounds reject overflow but retain supported e
       CONCURRENCY: '32',
     }),
   ).toMatchObject({ LEASE_MS: 2147483647, POLL_MS: 10000, CONCURRENCY: 32 })
-  expect(
-    readWorkerEnv({ ...workerInput, SANDBOX_PROVIDER: 'unused' }),
-  ).not.toHaveProperty('SANDBOX_PROVIDER')
+  expect(readWorkerEnv({ ...workerInput, SANDBOX_PROVIDER: 'unused' })).not.toHaveProperty(
+    'SANDBOX_PROVIDER',
+  )
 })
 
 test('worker selects keyless demo auth explicitly and keyed auth requires a worker-only key', () => {
@@ -603,9 +563,9 @@ test('worker selects keyless demo auth explicitly and keyed auth requires a work
     { WEB_SEARCH_AUTH_MODE: 'fallback' },
     { WEB_SEARCH_AUTH_MODE: 'keyless', TAVILY_API_KEY: 'PRIVATE' },
   ]) {
-    expect(
-      errorMessage(() => readWorkerEnv({ ...workerInput, ...fields })),
-    ).not.toContain('PRIVATE')
+    expect(errorMessage(() => readWorkerEnv({ ...workerInput, ...fields }))).not.toContain(
+      'PRIVATE',
+    )
   }
   expect(
     readServerEnv({

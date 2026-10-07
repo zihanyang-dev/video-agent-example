@@ -19,7 +19,10 @@ yaml_files=$(source_files '*.yaml' '*.yml')
 "$VID_CI_PYTHON_BIN/yamllint" --strict $yaml_files
 status=0
 for file in $shell_files; do
-  sh -n "$file" || status=1
+  case "$file" in
+    deploy/storage/initialize.sh) shell='bash'; bash -n "$file" || status=1 ;;
+    *) shell='sh'; sh -n "$file" || status=1 ;;
+  esac
   case "$file" in
     # Library variables are consumed/provided by the sourcing native runners.
     scripts/check-lifecycle.sh) exclude=SC2034,SC2154 ;;
@@ -27,7 +30,7 @@ for file in $shell_files; do
     tests/scripts/deployment-check.sh) exclude=SC2016 ;;
     *) exclude='' ;;
   esac
-  "$VID_CI_PYTHON_BIN/shellcheck" --shell=sh --external-sources \
+  "$VID_CI_PYTHON_BIN/shellcheck" --shell="$shell" --external-sources \
     --exclude="$exclude" "$file" || status=1
 done
 exit "$status"

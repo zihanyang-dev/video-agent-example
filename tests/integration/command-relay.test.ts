@@ -10,18 +10,9 @@ const ownerID = 'command-relay-owner'
 
 afterAll(async () => {
   try {
-    await db
-      .deleteFrom('product.command_outbox')
-      .where('thread_id', '=', threadID)
-      .execute()
-    await db
-      .deleteFrom('product.messages')
-      .where('thread_id', '=', threadID)
-      .execute()
-    await db
-      .deleteFrom('product.threads')
-      .where('thread_id', '=', threadID)
-      .execute()
+    await db.deleteFrom('product.command_outbox').where('thread_id', '=', threadID).execute()
+    await db.deleteFrom('product.messages').where('thread_id', '=', threadID).execute()
+    await db.deleteFrom('product.threads').where('thread_id', '=', threadID).execute()
   } finally {
     await close()
   }
@@ -36,8 +27,7 @@ async function accept(text: string) {
     runID: crypto.randomUUID(),
     text,
   })
-  if (result.kind !== 'accepted')
-    throw new Error('Expected an accepted command')
+  if (result.kind !== 'accepted') throw new Error('Expected an accepted command')
   return result.commandID
 }
 

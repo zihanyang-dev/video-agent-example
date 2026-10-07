@@ -2,16 +2,9 @@ import { assetBudgetDefaults } from '@vid/config'
 import { allocatedAssets, messageAssets } from './assets'
 import { lockThread } from './thread-access'
 import { threadUnavailable, threadConflict } from './thread-access'
-import {
-  normalizeMessageIntent,
-  decideMessageReplay,
-} from '../conversation/submission'
+import { normalizeMessageIntent, decideMessageReplay } from '../conversation/submission'
 import type { DB } from '@vid/database/types'
-import {
-  startCommandSchema,
-  type AssetReference,
-  type StartCommand,
-} from '@vid/contract/execution'
+import { startCommandSchema, type AssetReference, type StartCommand } from '@vid/contract/execution'
 import { sameFile } from '../assets/files'
 import type { Kysely, Transaction } from 'kysely'
 import type {
@@ -34,9 +27,7 @@ export async function acceptMessageIntent(
   const intent = normalizeMessageIntent(input)
   if (intent === null) return { kind: 'invalid-input' }
   try {
-    return await db
-      .transaction()
-      .execute((tx) => acceptMessage(tx, intent, maxAssetBytes))
+    return await db.transaction().execute((tx) => acceptMessage(tx, intent, maxAssetBytes))
   } catch (error) {
     if (error === threadConflict) return { kind: 'conflict' }
     if (error === commandCollision) return { kind: 'conflict' }
@@ -74,14 +65,8 @@ async function acceptMessage(
     return { kind: 'conflict' }
   }
 
-  const assets = await allocatedAssets(
-    tx,
-    intent.threadID,
-    intent.assetIDs ?? [],
-  )
-  if (
-    assets.reduce((total, asset) => total + asset.byteLength, 0) > maxAssetBytes
-  )
+  const assets = await allocatedAssets(tx, intent.threadID, intent.assetIDs ?? [])
+  if (assets.reduce((total, asset) => total + asset.byteLength, 0) > maxAssetBytes)
     throw threadConflict
   for (const [position, asset] of assets.entries())
     await tx
@@ -109,16 +94,8 @@ async function acceptedMessage(
   // Published outbox rows still supply replay IDs; purging them would break identical retries.
   const message = await tx
     .selectFrom('product.messages as message')
-    .innerJoin(
-      'product.threads as scope',
-      'scope.thread_id',
-      'message.thread_id',
-    )
-    .leftJoin(
-      'product.command_outbox as command',
-      'command.message_id',
-      'message.message_id',
-    )
+    .innerJoin('product.threads as scope', 'scope.thread_id', 'message.thread_id')
+    .leftJoin('product.command_outbox as command', 'command.message_id', 'message.message_id')
     .select([
       'scope.owner_id',
       'message.thread_id',
@@ -134,8 +111,7 @@ async function acceptedMessage(
     .executeTakeFirst()
   // A foreign global message ID must not disclose a stored message conflict.
   // Ownership is immutable; current-thread acceptance remains under its lock.
-  if (message !== undefined && message.owner_id !== intent.ownerID)
-    return { kind: 'unavailable' }
+  if (message !== undefined && message.owner_id !== intent.ownerID) return { kind: 'unavailable' }
   if (message === undefined) return null
   // The retained wire command is a separate untyped boundary. Schema parsing
   // canonicalizes historical UUID case; indexed headers and product input still
@@ -144,17 +120,15 @@ async function acceptedMessage(
   if (!retained.success) return { kind: 'conflict' }
   const command = retained.data
   const matchingHeaders = [
-    [command.commandID, message.command_id],
-    [command.runID, message.run_id],
-    [command.threadID, message.command_thread_id],
-    [command.threadID, message.thread_id],
-    [command.input.messageID, message.command_message_id],
-  ].every(([wire, indexed]) => wire === indexed)
-  if (!matchingHeaders || command.input.text !== message.text)
-    return { kind: 'conflict' }
+    command.commandID === message.command_id,
+    command.runID === message.run_id,
+    command.threadID === message.command_thread_id,
+    command.threadID === message.thread_id,
+    command.input.messageID === message.command_message_id,
+  ].every((matches) => matches)
+  if (!matchingHeaders || command.input.text !== message.text) return { kind: 'conflict' }
   const assets = await messageAssets(tx, intent.messageID)
-  if (!retainedReferencesMatch(command.input.assets ?? [], assets))
-    return { kind: 'conflict' }
+  if (!retainedReferencesMatch(command.input.assets ?? [], assets)) return { kind: 'conflict' }
   return decideMessageReplay(intent, {
     threadID: message.thread_id,
     role: message.role,
@@ -176,15 +150,17 @@ function retainedReferencesMatch(
   return references.every((reference, position) => {
     const asset = assets[position]
     if (!asset || reference.assetID !== asset.asset_id) return false
-    const locationMatches =
-      asset.source === 'upload'
-        ? reference.objectKey ===
-            `materials/${asset.thread_id}/${asset.asset_id}` ||
-          reference.objectKey ===
-            `assets/uploads/${asset.thread_id}/${asset.asset_id}`
-        : new RegExp(
-            `^(artifacts|assets/generated)/${asset.thread_id}/${asset.run_id}/[1-9][0-9]*/${asset.asset_id}$`,
-          ).test(reference.objectKey)
+    let locationMatches: boolean
+    if (asset.source === 'upload') {
+      locationMatches =
+        reference.objectKey === `materials/${asset.thread_id}/${asset.asset_id}` ||
+        reference.objectKey === `assets/uploads/${asset.thread_id}/${asset.asset_id}`
+    } else {
+      const generatedKey = new RegExp(
+        `^(artifacts|assets/generated)/${asset.thread_id}/${asset.run_id}/[1-9][0-9]*/${asset.asset_id}$`,
+      )
+      locationMatches = generatedKey.test(reference.objectKey)
+    }
     return (
       locationMatches &&
       sameFile(reference, {

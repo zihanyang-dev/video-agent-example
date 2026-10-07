@@ -59,7 +59,7 @@ export async function submitMessage(
   )
 }
 
-export async function cancelObservation(
+export async function requestRunCancellation(
   db: Kysely<DB>,
   query: OwnedThread & { runID: string },
   body: unknown,
@@ -95,14 +95,10 @@ export async function openObservation(
     runID.data !== query.runID
   )
     return invalid()
-  const after = observationCursor(
-    input.data.forwardedProps,
-    request.headers.get('last-event-id'),
-  )
+  const after = observationCursor(input.data.forwardedProps, request.headers.get('last-event-id'))
   if (after === null) return invalid()
   if (!(await hasAcceptedRun(db, query))) return unavailable()
-  if (!(await hasPublicCursor(db, { threadID: query.threadID, after })))
-    return invalid()
+  if (!(await hasPublicCursor(db, { threadID: query.threadID, after }))) return invalid()
   return await observeEvents(db, {
     ...query,
     after,
@@ -114,17 +110,12 @@ export async function openObservation(
   })
 }
 
-function observationCursor(
-  forwardedProps: unknown,
-  header: string | null,
-): string | null {
+function observationCursor(forwardedProps: unknown, header: string | null): string | null {
   if (header !== null) {
     const after = cursorSchema.safeParse(header)
     return after.success ? after.data : null
   }
-  const props = z
-    .object({ after: cursorSchema.optional() })
-    .safeParse(forwardedProps ?? {})
+  const props = z.object({ after: cursorSchema.optional() }).safeParse(forwardedProps ?? {})
   if (!props.success) return null
   return props.data.after ?? '0'
 }
