@@ -424,7 +424,6 @@ test('real saturated long harness remains ready while native SQL renews and stop
     ...env(),
     REDIS_URL: f.url,
     IO_TIMEOUT_MS: 100,
-    POLL_MS: 10,
   })
   const entered = Promise.withResolvers<void>()
   const release = Promise.withResolvers<void>()

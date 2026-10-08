@@ -28,7 +28,6 @@ type WorkerAssignment = {
 }
 
 type WorkerConnections = Pick<WorkerEnv, 'DATABASE_URL' | 'REDIS_URL' | 'IO_TIMEOUT_MS'> & {
-  POLL_MS?: WorkerEnv['POLL_MS']
   AGENT_ENGINE?: WorkerEnv['AGENT_ENGINE']
   RUN_TIMEOUT_MS?: WorkerEnv['RUN_TIMEOUT_MS']
 }
@@ -42,7 +41,6 @@ export async function startWorker(env: WorkerEnv, assignment: WorkerAssignment =
     DATABASE_URL: env.DATABASE_URL,
     REDIS_URL: env.REDIS_URL,
     IO_TIMEOUT_MS: env.IO_TIMEOUT_MS,
-    POLL_MS: env.POLL_MS,
     AGENT_ENGINE: env.AGENT_ENGINE,
     RUN_TIMEOUT_MS: env.RUN_TIMEOUT_MS,
   }
