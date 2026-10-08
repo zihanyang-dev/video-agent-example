@@ -103,7 +103,10 @@ services:
 
   # Only this native, short-lived job receives storage administration secrets.
   storage-init:
-    image: pgsty/silo:RELEASE.2026-09-16T00-00-00Z@sha256:635197cb9f36d01bee221d34d1c7d7960f6a95c48b0b6c01d99cd13bdae51a46
+    build:
+      context: .
+      dockerfile: deploy/docker/application.Dockerfile
+      target: storage-init
     environment:
       OBJECT_STORAGE_URL: ${OBJECT_STORAGE_URL:-http://objects:9000}
       OBJECT_STORAGE_BUCKET: ${OBJECT_STORAGE_BUCKET:-vid-assets}
@@ -113,8 +116,6 @@ services:
       SERVER_SECRET_KEY: ${SERVER_OBJECT_STORAGE_SECRET_ACCESS_KEY:?}
       WORKER_ACCESS_KEY: ${WORKER_OBJECT_STORAGE_ACCESS_KEY_ID:?}
       WORKER_SECRET_KEY: ${WORKER_OBJECT_STORAGE_SECRET_ACCESS_KEY:?}
-    volumes:
-      - ./deploy/storage:/policies:ro
     tmpfs:
       - /run/storage:mode=0700
     entrypoint: [bash]
@@ -214,6 +215,10 @@ services:
       MODEL_REASONING: ${MODEL_REASONING:-}
       MODEL_INPUT: ${MODEL_INPUT:-}
       MODEL_PROMPT_PATH: ${MODEL_PROMPT_PATH:-}
+      AGENT_ENGINE: ${AGENT_ENGINE:-pi}
+      NATIVE_STATE_PATH: /state/native
+      RUN_TIMEOUT_MS: ${RUN_TIMEOUT_MS:-1800000}
+      AGENT_SKILLS_PATH: ${AGENT_SKILLS_PATH:-}
       E2B_API_URL: ${E2B_API_URL:?Missing E2B_API_URL}
       E2B_API_KEY: ${E2B_API_KEY:?Missing E2B_API_KEY}
       E2B_SANDBOX_URL: ${E2B_SANDBOX_URL:?Missing E2B_SANDBOX_URL}
@@ -223,6 +228,8 @@ services:
       POLL_MS: ${POLL_MS:-}
       CONCURRENCY: ${CONCURRENCY:-}
       IO_TIMEOUT_MS: ${IO_TIMEOUT_MS:-}
+    volumes:
+      - native-state:/state
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -249,3 +256,4 @@ volumes:
   postgres-data:
   redis-data:
   objects-data:
+  native-state:

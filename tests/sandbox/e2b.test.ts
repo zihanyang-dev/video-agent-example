@@ -49,16 +49,7 @@ describe('owned Embed environment (opt-in)', () => {
       template: 'base',
       timeoutMs: 120000,
       runID,
-      lease: {
-        runID,
-        threadID: crypto.randomUUID(),
-        commandID: crypto.randomUUID(),
-        messageID: crypto.randomUUID(),
-        text: 'native test',
-        history: [],
-        fence: 1,
-        ownerID: 'owned-test',
-      },
+      assignment: { runID, threadID: crypto.randomUUID(), fence: 1 },
     }
   }
   async function assigned(runID: string) {
@@ -231,9 +222,13 @@ describe('owned Embed environment (opt-in)', () => {
     await sandbox.close()
     // Default restore is a characterization probe: a real filesystem-only
     // snapshot must cold-boot even without the production reboot option.
-    await client.Sandbox.connect(reference.id)
+    const restored = await client.Sandbox.connect(reference.id)
+    expect(await restored.files.read('/proc/sys/kernel/random/boot_id')).not.toBe(bootID)
+    // The production next-turn allocator requires a settled paused guest, not
+    // the running guest left by this separate default-resume characterization.
+    expect(await restored.pause({ keepMemory: false })).toBe(true)
     const next = await openE2BSandbox(
-      { ...input, lease: { ...input.lease, nativeRef: reference } },
+      { ...input, assignment: { ...input.assignment, nativeRef: reference } },
       signal,
     )
     try {
@@ -336,13 +331,17 @@ describe('owned Embed environment (opt-in)', () => {
 
   test('native timeout kills rather than retaining or auto-resuming the owned environment', async () => {
     const input = options()
-    const signal = AbortSignal.timeout(15000)
+    const owner = new AbortController()
+    const signal = AbortSignal.any([owner.signal, AbortSignal.timeout(15000)])
     const sandbox = await openE2BSandbox({ ...input, timeoutMs: 2000 }, signal)
     await sandbox.write({
       path: '/home/user/timeout-chosen',
       content: 'owned',
       signal,
     })
+    // Active sessions deliberately renew TTL. Model a stopped owner to test
+    // the provider's orphan backstop, not an actively owned session's lifetime.
+    owner.abort()
     const deadline = Date.now() + 10000
     while ((await assigned(input.runID)).length > 0) {
       if (Date.now() > deadline) throw new Error('Native timeout did not delete sandbox')
@@ -351,11 +350,12 @@ describe('owned Embed environment (opt-in)', () => {
     expect(await assigned(input.runID)).toHaveLength(0)
     expect(
       await openE2BSandbox(
-        { ...input, lease: { ...input.lease, nativeRef: sandbox.nativeRef } },
+        { ...input, assignment: { ...input.assignment, nativeRef: sandbox.nativeRef } },
         signal,
       ).catch((error: unknown) => error),
     ).toBeInstanceOf(Error)
     expect(await assigned(input.runID)).toHaveLength(0)
+    expect(await sandbox.close().catch((error: unknown) => error)).toBeInstanceOf(Error)
   }, 20000)
 })
 
@@ -396,7 +396,18 @@ function nativeHTTPFixture(timeoutStatus = 204, pauseStatus = 204, writeStatus =
       }
       const body: unknown = request.method === 'POST' ? await request.json() : undefined
       requests.push({ path: url.pathname, method: request.method, body })
-      if (url.pathname === '/v2/sandboxes' || url.pathname === '/v2/sandboxes/owned-http/connect')
+      if (url.pathname === '/sandboxes/owned-http')
+        return Response.json({
+          sandboxID: 'owned-http',
+          state: 'paused',
+          metadata: {
+            platform: 'vid',
+            threadID: assignment.threadID,
+            runID: assignment.runID,
+            fence: String(assignment.fence),
+          },
+        })
+      if (['/v2/sandboxes', '/v2/sandboxes/owned-http/connect'].includes(url.pathname))
         return Response.json({
           sandboxID: 'owned-http',
           envdVersion: '0.6.2',
@@ -413,6 +424,7 @@ function nativeHTTPFixture(timeoutStatus = 204, pauseStatus = 204, writeStatus =
     },
   })
   const runID = crypto.randomUUID()
+  const assignment = { runID, threadID: crypto.randomUUID(), fence: 1 }
   return {
     requests,
     writes,
@@ -426,16 +438,7 @@ function nativeHTTPFixture(timeoutStatus = 204, pauseStatus = 204, writeStatus =
       apiKey: 'owned-http-key',
       template: 'owned-fixture',
       timeoutMs: 120000,
-      lease: {
-        runID,
-        threadID: crypto.randomUUID(),
-        commandID: crypto.randomUUID(),
-        messageID: crypto.randomUUID(),
-        text: 'native HTTP test',
-        history: [],
-        fence: 1,
-        ownerID: 'owned-http',
-      },
+      assignment,
     },
     async stop() {
       writeReceipt.resolve()
@@ -537,8 +540,8 @@ test('native SDK reconnect uses reboot and already-paused ACK does not establish
     const sandbox = await openE2BSandbox(
       {
         ...fixture.options,
-        lease: {
-          ...fixture.options.lease,
+        assignment: {
+          ...fixture.options.assignment,
           nativeRef: { provider: 'e2b', id: 'owned-http' },
         },
       },
@@ -546,11 +549,13 @@ test('native SDK reconnect uses reboot and already-paused ACK does not establish
     )
     expect(sandbox.nativeRef).toEqual({ provider: 'e2b', id: 'owned-http' })
     expect(fixture.requests).toEqual([
+      { path: '/sandboxes/owned-http', method: 'GET', body: undefined },
       {
         path: '/v2/sandboxes/owned-http/connect',
         method: 'POST',
         body: { timeout: 120, memory: false },
       },
+      { path: '/sandboxes/owned-http', method: 'GET', body: undefined },
     ])
     expect(await sandbox.close().catch((error: unknown) => error)).toBeInstanceOf(Error)
     expect(await sandbox.close().catch((error: unknown) => error)).toBeInstanceOf(Error)

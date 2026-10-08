@@ -197,10 +197,10 @@ test('acknowledged event XADD loss redelivers original terminal and ordinal, pre
     expect(
       await db
         .selectFrom('execution.conversations')
-        .select('history')
+        .select('native_sandbox')
         .where('thread_id', '=', command.threadID)
         .execute(),
-    ).toEqual([{ history: [] }])
+    ).toEqual([{ native_sandbox: null }])
   } finally {
     await closeOwnedEntries(redis, stream, ids)
   }

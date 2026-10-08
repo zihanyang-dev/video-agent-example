@@ -2016,14 +2016,14 @@
               "type": "string",
               "pattern": "^(0|[1-9][0-9]*)$"
             },
-            "description": "Decimal ordinal at most 9223372036854775807"
+            "description": "Decimal public cursor at most 9223372036854775807"
           }
         ],
         "externalDocs": {
           "url": "https://www.npmjs.com/package/@ag-ui/core/v/1.0.1",
           "description": "Official protocol schema package"
         },
-        "description": "Official AG-UI RunAgentInput (https://docs.ag-ui.com/sdk/js/core). Runtime validation uses the official SDK. JSON metadata cannot faithfully describe its custom values; no replacement DTO is generated. Cursor precedence: Last-Event-ID, forwardedProps.after, then 0. Cursors are decimal signed-int64 ordinals authorized against persisted public events.",
+        "description": "Official AG-UI RunAgentInput (https://docs.ag-ui.com/sdk/js/core). Runtime validation uses the official SDK. JSON metadata cannot faithfully describe its custom values; no replacement DTO is generated. Cursor precedence: Last-Event-ID, forwardedProps.after, then 0. Cursors are decimal signed-int64 public cursors authorized against persisted public events; return received cursors unchanged, never increment them.",
         "requestBody": {
           "required": true,
           "description": "Official RunAgentInput: threadId and runId must be UUIDs matching the canonical path identifiers. Submitted history, state, context and tools never initiate new execution.",

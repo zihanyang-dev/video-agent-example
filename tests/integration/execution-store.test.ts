@@ -2,6 +2,7 @@ import { acceptExecutionCommand } from '../../apps/agent/src/execution/db/comman
 import {
   claimExecutionRun,
   renewExecutionLease,
+  recoverNativeRequests,
 } from '../../apps/agent/src/execution/db/execution-leases'
 import {
   appendExecutionText,
@@ -12,27 +13,30 @@ import {
   quarantineSandbox,
   bindExecutionWrites,
 } from '../../apps/agent/src/execution/db/run-writes'
-import { afterAll, expect, test } from 'bun:test'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterAll, afterEach, expect, test } from 'bun:test'
 import {
   executionEventSchema,
   startCommandSchema,
   type StartCommand,
 } from '@vid/contract/execution'
 import { sql } from 'kysely'
-import type { ExecutionLease } from '../../apps/agent/src/execution/contract'
-import { createPiHarness } from '../../apps/agent/src/harness/pi'
-import { openTestDatabase } from './database-fixture'
+import type { ExecutionLease } from '../../apps/agent/src/contract.ts'
+import { createPiHarness } from '../../apps/agent/src/harness/pi/adapter'
+import { clearOwnedExecutionThread, openTestDatabase } from './database-fixture'
 import { modelStream } from './model-stream-fixture'
 
 const { db, close } = openTestDatabase()
 const ownedThreads = new Set<string>()
-afterAll(async () => {
-  try {
-    for (const threadID of ownedThreads) await removeExecutionConversation(threadID)
-  } finally {
-    await close()
+afterEach(async () => {
+  for (const threadID of ownedThreads) {
+    await clearOwnedExecutionThread(db, threadID)
+    ownedThreads.delete(threadID)
   }
 })
+afterAll(close)
 
 function start(threadID: string = crypto.randomUUID()): StartCommand {
   ownedThreads.add(threadID.toLowerCase())
@@ -74,7 +78,6 @@ for (const terminal of ['completed', 'failed', 'cancelled'] as const) {
         terminal === 'completed'
           ? await writes.complete(lease, {
               text: 'answer',
-              history: ['answer'],
             })
           : terminal === 'failed'
             ? await writes.fail(lease, 'execution-error')
@@ -105,7 +108,6 @@ for (const request of ['complete', 'interrupt'] as const) {
       request === 'complete'
         ? await writes.complete(lease, {
             text: 'discard',
-            history: ['discard'],
           })
         : await writes.fail(lease, 'interrupted')
     expect(outcome).toBe('cancelled')
@@ -115,31 +117,30 @@ for (const request of ['complete', 'interrupt'] as const) {
     ])
     const conversation = await db
       .selectFrom('execution.conversations')
-      .select('history')
+      .select('legacy_history')
       .where('thread_id', '=', lease.threadID)
       .executeTakeFirstOrThrow()
-    expect(conversation.history).toEqual([])
+    expect(conversation.legacy_history).toEqual([])
   })
 }
 
-test('bound completion preserves history rejection chosen by SQL instead of claiming completion', async () => {
+test('bound completion refuses uncheckpointed effects instead of claiming completion', async () => {
   await acceptExecutionCommand(db, start())
   const lease = await claim()
-  const outcome = await bindExecutionWrites(db).complete(lease, {
-    text: 'discard',
-    history: 'x'.repeat(4 * 1024 * 1024),
+  const writes = bindExecutionWrites(db)
+  expect(await writes.beginEffect(lease)).toBe('allowed')
+  expect(await writes.complete(lease, { text: 'discard' })).toBe('failed')
+  expect((await events(lease.runID)).at(-1)).toMatchObject({
+    kind: 'run-failed',
+    reason: 'sandbox-recovery-required',
   })
-  expect(outcome).toBe('failed')
-  expect((await events(lease.runID)).map((event) => event.kind)).toEqual([
-    'run-started',
-    'run-failed',
-  ])
   const conversation = await db
     .selectFrom('execution.conversations')
-    .select('history')
+    .select(['legacy_history', 'sandbox_recovery_required'])
     .where('thread_id', '=', lease.threadID)
     .executeTakeFirstOrThrow()
-  expect(conversation.history).toEqual([])
+  expect(conversation.legacy_history).toEqual([])
+  expect(conversation.sandbox_recovery_required).toBe(true)
 })
 
 async function events(runID: string) {
@@ -228,76 +229,64 @@ function piProviderFixture() {
   return { provider, requests, options, input }
 }
 
-async function removeExecutionConversation(threadID: string) {
-  await db.transaction().execute(async (tx) => {
-    await tx
-      .updateTable('execution.conversations')
-      .set({ active_run_id: null, lease_owner: null, lease_until: null })
-      .where('thread_id', '=', threadID)
-      .execute()
-    await tx.deleteFrom('execution.event_outbox').where('thread_id', '=', threadID).execute()
-    await tx.deleteFrom('execution.runs').where('thread_id', '=', threadID).execute()
-    await tx.deleteFrom('execution.command_inbox').where('thread_id', '=', threadID).execute()
-    await tx.deleteFrom('execution.conversations').where('thread_id', '=', threadID).execute()
-  })
-}
-
-test('fresh SQL history starts a Pi turn and persists canonical history for the next lease', async () => {
+test('native Pi storage continues the same session without SQL private-history transfer', async () => {
   const first = start()
   const second = start(first.threadID)
   const { provider, requests, options, input } = piProviderFixture()
+  const statePath = await mkdtemp(join(tmpdir(), 'owned-native-pi-'))
   try {
-    expect(await acceptExecutionCommand(db, first)).toBe('accepted')
+    await acceptExecutionCommand(db, first)
     const lease = await claim()
     expect(lease.runID).toBe(first.runID)
-    expect(lease.history).toEqual([])
-    expect(lease).not.toHaveProperty('commandID')
-    expect(lease).not.toHaveProperty('messageID')
+    expect(lease).not.toHaveProperty('history')
     const retained = await db
       .selectFrom('execution.runs')
       .select(['command_id', 'message_id'])
       .where('run_id', '=', first.runID)
       .executeTakeFirstOrThrow()
-    expect(retained).toEqual({
-      command_id: first.commandID,
-      message_id: first.input.messageID,
-    })
-    const result = await createPiHarness(options).turn({
-      ...input,
-      text: lease.text,
-      history: lease.history,
-    })
+    expect(retained).toEqual({ command_id: first.commandID, message_id: first.input.messageID })
+    const run = async (assigned: ExecutionLease) => {
+      const writes = bindExecutionWrites(db)
+      return await createPiHarness({ ...options, statePath }).run({
+        ...input,
+        engine: assigned.engine,
+        threadID: assigned.threadID,
+        nativeSessionID: assigned.nativeSessionID,
+        runID: assigned.runID,
+        text: assigned.text,
+        async beforeModel() {
+          expect(await writes.reserveModel(assigned)).toBe('allowed')
+        },
+        async checkpoint() {
+          expect(await writes.checkpoint(assigned)).toBe(true)
+        },
+      })
+    }
+    const result = await run(lease)
     expect(result.text).toBe('First answer')
-    expect(
-      await completeExecutionRun(db, lease, {
-        text: result.text,
-        history: result.history,
-      }),
-    ).toBe(true)
-    expect(await acceptExecutionCommand(db, second)).toBe('accepted')
+    expect(result).not.toHaveProperty('history')
+    expect(await completeExecutionRun(db, lease, result)).toBe('completed')
+    await acceptExecutionCommand(db, second)
     const next = await claim()
     expect(next.runID).toBe(second.runID)
-    expect(next.history).toEqual(JSON.parse(JSON.stringify(result.history)))
-    const continued = await createPiHarness(options).turn({
-      ...input,
-      text: 'Continue',
-      history: next.history,
-    })
+    expect(next.nativeSessionID).toBe(lease.nativeSessionID)
+    expect(next).not.toHaveProperty('history')
+    const continued = await run(next)
     expect(continued.text).toBe('Second answer')
     expect(JSON.stringify(requests[1])).toContain('First answer')
     expect(JSON.stringify(requests[1])).toContain('Hello')
-    expect(
-      await completeExecutionRun(db, next, {
-        text: continued.text,
-        history: continued.history,
-      }),
-    ).toBe(true)
+    expect(await completeExecutionRun(db, next, continued)).toBe('completed')
+    const archive = await db
+      .selectFrom('execution.conversations')
+      .select('legacy_history')
+      .where('thread_id', '=', first.threadID)
+      .executeTakeFirstOrThrow()
+    expect(archive.legacy_history).toEqual([])
+    expect(JSON.stringify(await events(first.runID))).not.toContain('platform-input')
   } finally {
-    try {
-      await removeExecutionConversation(first.threadID)
-    } finally {
-      await provider.stop(true)
-    }
+    await provider.stop(true)
+    await rm(statePath, { recursive: true, force: true })
+    await clearOwnedExecutionThread(db, first.threadID)
   }
 }, 15000)
 
@@ -331,15 +320,13 @@ test('concurrent canonical acceptance has one winner and retains conflicting rep
     expect(lease).toMatchObject({
       runID: command.runID,
       text: 'Hello',
-      history: [],
     })
     expect(await appendExecutionText(db, lease, 'Answer')).toBe(true)
     expect(
       await completeExecutionRun(db, lease, {
         text: 'Answer',
-        history: { private: ['tool-secret'] },
       }),
-    ).toBe(true)
+    ).toBe('completed')
     const stored = await storedAssistantID(lease.runID)
     expect(stored).toBeString()
     expect(stored).not.toBe(command.input.messageID)
@@ -354,11 +341,11 @@ test('concurrent canonical acceptance has one winner and retains conflicting rep
       'run-completed',
     ])
   } finally {
-    await removeExecutionConversation(command.threadID)
+    await clearOwnedExecutionThread(db, command.threadID)
   }
 })
 
-test('concurrent claim serializes a thread and passes only committed private history to its next run', async () => {
+test('concurrent claim serializes a thread and preserves native session identity for its next run', async () => {
   const first = start()
   const second = start(first.threadID)
   await acceptExecutionCommand(db, first)
@@ -376,21 +363,20 @@ test('concurrent claim serializes a thread and passes only committed private his
   expect(
     await completeExecutionRun(db, lease, {
       text: 'Answer',
-      history: { opaque: 'private tool state' },
     }),
-  ).toBe(true)
+  ).toBe('completed')
   expect(
     await completeExecutionRun(db, lease, {
       text: 'duplicate',
-      history: [],
     }),
-  ).toBe(false)
+  ).toBe('lost')
   const next = await claim()
   expect(next.threadID).toBe(first.threadID)
   expect(next.fence).toBeGreaterThan(lease.fence)
-  expect(next.history).toEqual({ opaque: 'private tool state' })
-  expect(await failExecutionRun(db, next, 'execution-error')).toBe(true)
-  expect(JSON.stringify(await events(lease.runID))).not.toContain('private tool state')
+  expect(next.nativeSessionID).toBe(lease.nativeSessionID)
+  expect(next).not.toHaveProperty('history')
+  expect(await failExecutionRun(db, next, 'execution-error')).toBe('failed')
+  expect(JSON.stringify(await events(lease.runID))).not.toContain(lease.nativeSessionID)
 })
 
 test('cancel before start is retained and queued cancellation is immediately terminal', async () => {
@@ -407,21 +393,22 @@ test('cancel before start is retained and queued cancellation is immediately ter
   expect((await events(queued.runID)).map((event) => event.kind)).toEqual(['run-cancelled'])
 })
 
-test('locked completion chooses racing cancellation without committing history', async () => {
+test('locked completion chooses racing cancellation without a completed receipt', async () => {
   const command = start()
   await acceptExecutionCommand(db, command)
   const lease = await claim()
   expect(await renewExecutionLease(db, lease, 60000)).toBe('renewed')
   await acceptExecutionCommand(db, cancellation(command))
   expect(await renewExecutionLease(db, lease, 60000)).toBe('cancel')
+  expect(await bindExecutionWrites(db).reserveModel(lease)).toBe('cancel')
+  expect(await bindExecutionWrites(db).beginEffect(lease)).toBe('cancel')
   expect(await appendExecutionText(db, lease, 'late')).toBe(false)
   expect(
     await completeExecutionRun(db, lease, {
       text: 'late',
-      history: ['late secret'],
     }),
   ).toBe('cancelled')
-  expect(await cancelExecutionRun(db, lease)).toBe(false)
+  expect(await cancelExecutionRun(db, lease)).toBe('lost')
   expect(await renewExecutionLease(db, lease, 60000)).toBe('lost')
   expect((await events(command.runID)).map((event) => event.kind)).toEqual([
     'run-started',
@@ -429,27 +416,25 @@ test('locked completion chooses racing cancellation without committing history',
   ])
 })
 
-test('expired external operation is interrupted rather than automatically executed again', async () => {
+test('expiry cannot take over a physical writer; startup recovery fences uncertain effects', async () => {
   const command = start()
   await acceptExecutionCommand(db, command)
   const lease = await claim()
+  expect(await bindExecutionWrites(db).beginEffect(lease)).toBe('allowed')
   await expire(lease)
   expect(await appendExecutionText(db, lease, 'late')).toBe(false)
-  expect(
-    await completeExecutionRun(db, lease, {
-      text: 'late',
-      history: ['secret'],
-    }),
-  ).toBe(false)
-  expect(await failExecutionRun(db, lease, 'execution-error')).toBe(false)
-  expect(await cancelExecutionRun(db, lease)).toBe(false)
+  expect(await completeExecutionRun(db, lease, { text: 'late' })).toBe('lost')
+  expect(await failExecutionRun(db, lease, 'execution-error')).toBe('lost')
+  expect(await cancelExecutionRun(db, lease)).toBe('lost')
   expect(await renewExecutionLease(db, lease, 60000)).toBe('lost')
   expect(await claimExecutionRun(db, { ownerID: 'recovery', leaseMs: 60000 })).toBeNull()
-  expect(await claimExecutionRun(db, { ownerID: 'recovery', leaseMs: 60000 })).toBeNull()
-  expect(await events(command.runID)).toMatchObject([
-    { kind: 'run-started' },
-    { kind: 'run-failed', reason: 'interrupted' },
-  ])
+  expect((await events(command.runID)).map((event) => event.kind)).toEqual(['run-started'])
+  // This fixture has no live worker/native writer; recovery models startup after its physical stop.
+  await recoverNativeRequests(db)
+  expect((await events(command.runID)).at(-1)).toMatchObject({
+    kind: 'run-failed',
+    reason: 'sandbox-recovery-required',
+  })
   const queued = start(command.threadID)
   await acceptExecutionCommand(db, queued)
   expect(await claimExecutionRun(db, { ownerID: 'replacement', leaseMs: 60000 })).toBeNull()
@@ -459,14 +444,14 @@ test('expired external operation is interrupted rather than automatically execut
   })
   const state = await db
     .selectFrom('execution.conversations')
-    .select('sandbox_recovery_required')
+    .select(['sandbox_recovery_required', 'workspace_reset_required'])
     .where('thread_id', '=', lease.threadID)
     .executeTakeFirstOrThrow()
-  expect(state.sandbox_recovery_required).toBe(true)
-  expect(await completeExecutionRun(db, lease, { text: 'stale', history: [] })).toBe(false)
+  expect(state).toEqual({ sandbox_recovery_required: true, workspace_reset_required: true })
+  expect(await completeExecutionRun(db, lease, { text: 'stale' })).toBe('lost')
 })
 
-test('lease expiration while waiting for authority lock cannot commit history or events', async () => {
+test('lease expiration while waiting for authority lock cannot commit terminal events', async () => {
   const command = start()
   await acceptExecutionCommand(db, command)
   const lease = await claim()
@@ -484,12 +469,11 @@ test('lease expiration while waiting for authority lock cannot commit history or
       .execute()
     const completion = completeExecutionRun(db, lease, {
       text: 'expired',
-      history: ['expired secret'],
     })
     await sql`select pg_sleep(1)`.execute(tx)
     return { completion }
   })
-  expect(await blocked.completion).toBe(false)
+  expect(await blocked.completion).toBe('lost')
   expect((await events(command.runID)).map((event) => event.kind)).toEqual(['run-started'])
   expect(await claimExecutionRun(db, { ownerID: 'recovery', leaseMs: 60000 })).toBeNull()
 })
@@ -497,25 +481,33 @@ test('lease expiration while waiting for authority lock cannot commit history or
 test('independent threads can claim concurrently while fabricated ownership cannot mutate a run', async () => {
   const commands = [start(), start()]
   await Promise.all(commands.map((command) => acceptExecutionCommand(db, command)))
-  const leases = await Promise.all([claim(), claim()])
+  const settled = await Promise.allSettled([claim(), claim()])
+  const leases = settled.map((result) => {
+    if (result.status === 'rejected') throw result.reason
+    return result.value
+  })
   expect(new Set(leases.map((lease) => lease.threadID)).size).toBe(2)
   for (const lease of leases) {
     for (const stale of [
       { ...lease, fence: lease.fence + 1 },
       { ...lease, ownerID: 'not-owner' },
+      { ...lease, engine: lease.engine === 'pi' ? ('openai' as const) : ('pi' as const) },
+      { ...lease, nativeSessionID: crypto.randomUUID() },
     ]) {
+      expect(await bindExecutionWrites(db).reserveModel(stale)).toBe('lost')
+      expect(await bindExecutionWrites(db).beginEffect(stale)).toBe('lost')
+      expect(await bindExecutionWrites(db).checkpoint(stale)).toBe(false)
       expect(await renewExecutionLease(db, stale, 60000)).toBe('lost')
       expect(await appendExecutionText(db, stale, 'unauthorized')).toBe(false)
       expect(
         await completeExecutionRun(db, stale, {
           text: 'unauthorized',
-          history: ['secret'],
         }),
-      ).toBe(false)
-      expect(await cancelExecutionRun(db, stale)).toBe(false)
-      expect(await failExecutionRun(db, stale, 'interrupted')).toBe(false)
+      ).toBe('lost')
+      expect(await cancelExecutionRun(db, stale)).toBe('lost')
+      expect(await failExecutionRun(db, stale, 'interrupted')).toBe('lost')
     }
-    expect(await failExecutionRun(db, lease, 'execution-error')).toBe(true)
+    expect(await failExecutionRun(db, lease, 'execution-error')).toBe('failed')
     expect((await events(lease.runID)).map((event) => event.kind)).toEqual([
       'run-started',
       'run-failed',
@@ -543,20 +535,20 @@ test('concurrent different commands cannot reuse a run across threads and confli
       threadID: loser.threadID,
     }),
   ).toBe('conflict')
-  expect(await cancelExecutionRun(db, lease)).toBe(true)
+  expect(await cancelExecutionRun(db, lease)).toBe('cancelled')
 })
 
 function uppercaseStart(): StartCommand {
-  const threadID = 'BCDEFABC-DEFA-4BCD-8EFA-BCDEFABCDEFA'
+  const threadID = crypto.randomUUID().toUpperCase()
   ownedThreads.add(threadID.toLowerCase())
   return {
     version: 1,
     kind: 'start',
-    commandID: 'ABCDEFAB-CDEF-4ABC-8DEF-ABCDEFABCDEF',
+    commandID: crypto.randomUUID().toUpperCase(),
     threadID,
-    runID: 'CDEFABCD-EFAB-4CDE-8FAB-CDEFABCDEFAB',
+    runID: crypto.randomUUID().toUpperCase(),
     input: {
-      messageID: 'DEFABCDE-FABC-4DEF-8ABC-DEFABCDEFABC',
+      messageID: crypto.randomUUID().toUpperCase(),
       text: ' Hello ',
     },
   }
@@ -616,22 +608,21 @@ test('UUID case replays canonical and legacy commands without altering owner aut
   expect(
     await completeExecutionRun(db, lease, {
       text: 'Answer',
-      history: [],
     }),
-  ).toBe(true)
+  ).toBe('completed')
 })
 
 test('uppercase cancellation of a queued canonical run emits canonical JSON and replays lowercase', async () => {
   const command: StartCommand = {
     ...start(),
-    threadID: 'abcdefab-cdef-4abc-8def-abcdefabcdea',
-    runID: 'bcdefabc-defa-4bcd-8efa-bcdefabcdeff',
+    threadID: crypto.randomUUID(),
+    runID: crypto.randomUUID(),
   }
   ownedThreads.add(command.threadID)
   await acceptExecutionCommand(db, command)
   const cancel = {
     ...cancellation(command),
-    commandID: 'CDEFABCD-EFAB-4CDE-8FAB-CDEFABCDEFAA',
+    commandID: crypto.randomUUID().toUpperCase(),
     threadID: command.threadID.toUpperCase(),
     runID: command.runID.toUpperCase(),
   }
@@ -659,12 +650,12 @@ test('uppercase cancellation of a queued canonical run emits canonical JSON and 
 
 test('uppercase leases use the locked stored assistant identity for text and completion JSON', async () => {
   const command = {
-    ...start('abcdefab-cdef-4abc-8def-abcdefabcdeb'),
-    runID: 'bcdefabc-defa-4bcd-8efa-bcdefabcdeea',
+    ...start(crypto.randomUUID()),
+    runID: crypto.randomUUID(),
   }
   await acceptExecutionCommand(db, command)
   const claimed = await claim()
-  const assistantMessageID = 'defabcde-fabc-4def-8abc-defabcdefaaa'
+  const assistantMessageID = crypto.randomUUID()
   await db
     .updateTable('execution.runs')
     .set({ assistant_message_id: assistantMessageID })
@@ -679,10 +670,9 @@ test('uppercase leases use the locked stored assistant identity for text and com
   const appended = await appendExecutionText(db, upperLease, 'Answer')
   const completed = await completeExecutionRun(db, upperLease, {
     text: 'Answer',
-    history: [],
   })
   expect(appended).toBe(true)
-  expect(completed).toBe(true)
+  expect(completed).toBe('completed')
   const rows = await db
     .selectFrom('execution.event_outbox')
     .selectAll()
@@ -710,8 +700,8 @@ test('uppercase leases use the locked stored assistant identity for text and com
 
 test('uppercase lease cancellation persists canonical event identities', async () => {
   const command = {
-    ...start('abcdefab-cdef-4abc-8def-abcdefabcdec'),
-    runID: 'bcdefabc-defa-4bcd-8efa-bcdefabcdeeb',
+    ...start(crypto.randomUUID()),
+    runID: crypto.randomUUID(),
   }
   await acceptExecutionCommand(db, command)
   const lease = await claim()
@@ -721,7 +711,7 @@ test('uppercase lease cancellation persists canonical event identities', async (
       threadID: lease.threadID.toUpperCase(),
       runID: lease.runID.toUpperCase(),
     }),
-  ).toBe(true)
+  ).toBe('cancelled')
   const rows = await db
     .selectFrom('execution.event_outbox')
     .select('event')
@@ -747,18 +737,18 @@ test('native identity is durable before completion and stale fences cannot repla
     .where('thread_id', '=', lease.threadID)
     .executeTakeFirstOrThrow()
   expect(row.native_sandbox).toEqual(nativeRef)
-  expect(await completeExecutionRun(db, lease, { text: 'done', history: [] })).toBe(true)
+  expect(await completeExecutionRun(db, lease, { text: 'done' })).toBe('completed')
   await acceptExecutionCommand(db, start(first.threadID))
   const next = await claim()
   expect(next.nativeRef).toEqual(nativeRef)
   expect(await saveNativeSandbox(db, lease, { provider: 'e2b', id: 'stale' })).toBe(false)
-  expect(await cancelExecutionRun(db, next)).toBe(true)
+  expect(await cancelExecutionRun(db, next)).toBe('cancelled')
 })
 
 test('accepted asset-only commands replay allocations and issue them only on their lease', async () => {
   const base = start()
   const material = {
-    assetID: 'ABCDEFAB-CDEF-4ABC-8DEF-ABCDEFABCDEF',
+    assetID: crypto.randomUUID().toUpperCase(),
     objectKey: 'assets/project/allocated',
     name: 'image.png',
     mimeType: 'image/png',
@@ -782,7 +772,7 @@ test('accepted asset-only commands replay allocations and issue them only on the
   ).toBe('conflict')
   const lease = await claim()
   expect(lease.assets).toEqual([{ ...material, assetID: material.assetID.toLowerCase() }])
-  expect(await cancelExecutionRun(db, lease)).toBe(true)
+  expect(await cancelExecutionRun(db, lease)).toBe('cancelled')
 })
 
 test('late quarantine from a committed old fence blocks active spending but retains cleanup authority', async () => {
@@ -794,9 +784,8 @@ test('late quarantine from a committed old fence blocks active spending but reta
   expect(
     await completeExecutionRun(db, old, {
       text: 'committed',
-      history: ['committed'],
     }),
-  ).toBe(true)
+  ).toBe('completed')
   await acceptExecutionCommand(db, start(first.threadID))
   const active = await claim()
   expect(active.nativeRef).toEqual(nativeRef)
@@ -805,14 +794,6 @@ test('late quarantine from a committed old fence blocks active spending but reta
   expect(await renewExecutionLease(db, active, 60000)).toBe('recovery-required')
   expect(await saveNativeSandbox(db, active, { provider: 'e2b', id: 'replacement' })).toBe(false)
   expect(await appendExecutionText(db, active, 'unsafe')).toBe(false)
-  expect(
-    await completeExecutionRun(db, active, {
-      text: 'unsafe',
-      history: ['unsafe'],
-    }),
-  ).toBe(false)
-  expect(await cancelExecutionRun(db, active)).toBe(false)
-  expect(await failExecutionRun(db, active, 'interrupted')).toBe(false)
   const held = await db
     .selectFrom('execution.conversations')
     .selectAll()
@@ -820,16 +801,18 @@ test('late quarantine from a committed old fence blocks active spending but reta
     .executeTakeFirstOrThrow()
   expect(held.active_run_id).toBe(active.runID)
   expect(held.sandbox_recovery_required).toBe(true)
-  expect(held.history).toEqual(['committed'])
+  expect(held.legacy_history).toEqual([])
   expect(held.native_sandbox).toEqual(nativeRef)
-  expect(await failExecutionRun(db, active, 'execution-error')).toBe(true)
+  expect(await completeExecutionRun(db, active, { text: 'unsafe' })).toBe('failed')
+  expect(await cancelExecutionRun(db, active)).toBe('lost')
+  expect(await failExecutionRun(db, active, 'execution-error')).toBe('lost')
   expect(await events(old.runID)).toMatchObject([
     { kind: 'run-started' },
     { kind: 'run-completed' },
   ])
   expect(await events(active.runID)).toMatchObject([
     { kind: 'run-started' },
-    { kind: 'run-failed', reason: 'execution-error' },
+    { kind: 'run-failed', reason: 'sandbox-recovery-required' },
   ])
 })
 
@@ -905,6 +888,34 @@ test('typed asset replay normalizes property order and UUID case but preserves e
     expect(row.command).toEqual(expected)
     expect(startCommandSchema.parse(row.command)).toEqual(expected)
   } finally {
-    await removeExecutionConversation(base.threadID)
+    await clearOwnedExecutionThread(db, base.threadID)
   }
 })
+
+for (const field of ['commandID', 'text'] as const) {
+  test(`admission rejects retained start command ${field} conflict before binding or spending`, async () => {
+    const command = start()
+    await acceptExecutionCommand(db, command)
+    const conflicting =
+      field === 'text'
+        ? { ...command, input: { ...command.input, text: 'Altered canonical input' } }
+        : { ...command, commandID: crypto.randomUUID() }
+    await db
+      .updateTable('execution.command_inbox')
+      .set({ command: sql`${JSON.stringify(conflicting)}::jsonb` })
+      .where('command_id', '=', command.commandID)
+      .execute()
+    await Promise.resolve(
+      expect(
+        claimExecutionRun(db, { ownerID: 'integrity-worker', leaseMs: 60000 }),
+      ).rejects.toThrow('Accepted input does not match assigned request'),
+    )
+    const run = await db
+      .selectFrom('execution.runs')
+      .select(['status', 'native_session_id', 'model_call_count'])
+      .where('run_id', '=', command.runID)
+      .executeTakeFirstOrThrow()
+    expect(run).toEqual({ status: 'queued', native_session_id: null, model_call_count: 0 })
+    expect(await events(command.runID)).toEqual([])
+  })
+}

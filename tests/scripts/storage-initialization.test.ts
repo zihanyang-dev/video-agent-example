@@ -1,7 +1,8 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync, spawnSync } from 'node:child_process'
-import { readFileSync } from 'node:fs'
+import { cpSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 const slot = 'arn:aws:s3:::vid-assets/'
@@ -98,7 +99,8 @@ const docker = (...args: string[]) =>
     timeout: 120000,
   })
 interface NativeService {
-  image: string
+  build: { target: string }
+  volumes?: unknown[]
   entrypoint: string[]
   command: string[]
   environment: Record<string, string>
@@ -121,11 +123,34 @@ function nativeCompose(): NativeService {
   assert.ok(service)
   assert.deepEqual(service.entrypoint, ['bash'])
   assert.deepEqual(service.command, ['/policies/initialize.sh'])
-  assert.match(
-    service.image,
-    /@sha256:635197cb9f36d01bee221d34d1c7d7960f6a95c48b0b6c01d99cd13bdae51a46$/,
-  )
+  assert.equal(service.build.target, 'storage-init')
+  assert.deepEqual(service.volumes ?? [], [])
   return service
+}
+
+let image: string | undefined
+function initializationImage() {
+  if (image !== undefined) return image
+  const context = mkdtempSync(join(tmpdir(), 'vid-storage-source-'))
+  try {
+    for (const path of ['deploy/docker/application.Dockerfile', 'deploy/storage'])
+      cpSync(path, join(context, path), { recursive: true })
+    image = docker(
+      'build',
+      '--quiet',
+      '--label',
+      `vid.check.owner=vid-storage-source-${crypto.randomUUID()}`,
+      '--target',
+      'storage-init',
+      '-f',
+      join(context, 'deploy/docker/application.Dockerfile'),
+      context,
+    ).trim()
+    assert.match(image, /^sha256:[a-f0-9]{64}$/)
+    return image
+  } finally {
+    rmSync(context, { recursive: true, force: true })
+  }
 }
 
 // Exercise real input validation and real offline connection failure. No fake mcli.
@@ -142,15 +167,13 @@ function runInitialization(overrides: Record<string, string> = {}) {
       `vid.check.owner=${owner}`,
       '--tmpfs',
       '/run/storage:mode=0700',
-      '--mount',
-      `type=bind,src=${join(process.cwd(), 'deploy/storage')},dst=/policies,readonly`,
       ...Object.entries({ ...service.environment, ...overrides }).flatMap(([key, value]) => [
         '--env',
         `${key}=${value}`,
       ]),
       '--entrypoint',
       'bash',
-      service.image,
+      initializationImage(),
       ...service.command,
     ).trim()
     docker('start', id)

@@ -34,5 +34,7 @@ if (failures.length) {
     stage: 'worker-entrypoint',
     failures: failures.length,
   })
-  process.exitCode = 1
+  // A bounded SDK cleanup failure may leave a late callback. The failed worker
+  // retains its kernel lock until this physical exit, never lease expiry.
+  process.exit(1)
 }

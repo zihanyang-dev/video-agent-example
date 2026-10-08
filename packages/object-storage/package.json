@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/objects.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "3.1146.0"

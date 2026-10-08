@@ -39,7 +39,7 @@ function env() {
 }
 const noSpend = {
   harness: {
-    turn: async () => {
+    run: async () => {
       throw new Error('Unexpected inference')
     },
   },
@@ -372,7 +372,6 @@ async function intakeFixture() {
 
 test('durable acceptance precedes ACK failure and stop preserves the exact remaining PEL', async () => {
   const f = await intakeFixture()
-  const worker = new WorkerProcess(env())
   const first = f.command()
   const second = f.command()
   try {
@@ -415,7 +414,6 @@ test('durable acceptance precedes ACK failure and stop preserves the exact remai
         .executeTakeFirst(),
     ).toBeUndefined()
   } finally {
-    await worker.stop()
     await f.close()
   }
 })
@@ -453,11 +451,11 @@ test('real saturated long harness remains ready while native SQL renews and stop
           claim: worker.claim,
           writes: bindExecutionWrites(worker.db),
           harness: {
-            turn: async ({ signal }) => {
+            run: async ({ signal }) => {
               entered.resolve()
               await release.promise
               signal.throwIfAborted()
-              return { text: '', history: [] }
+              return { text: '' }
             },
           },
           openSandbox: async () => ({

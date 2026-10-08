@@ -106,6 +106,15 @@ const workerEnvSchema = z
     MODEL_API_KEY: requiredString,
     MODEL_ID: requiredString,
     MODEL_PROMPT_PATH: requiredString.default('/app/apps/agent/prompt.md'),
+    AGENT_ENGINE: z.enum(['pi', 'openai']).default('pi'),
+    NATIVE_STATE_PATH: requiredString
+      .startsWith('/', { error: 'Must be an absolute native storage path' })
+      .default('/state/native'),
+    RUN_TIMEOUT_MS: positiveInteger.max(3600000).default(1800000),
+    // Only the operator-assigned bundle is discoverable; no ambient skill roots.
+    AGENT_SKILLS_PATH: requiredString
+      .startsWith('/', { error: 'Must be an absolute skill bundle path' })
+      .optional(),
     // Custom endpoints must declare limits; do not fabricate model-registry metadata.
     MODEL_CONTEXT_WINDOW: positiveInteger,
     MODEL_MAX_OUTPUT_TOKENS: positiveInteger,

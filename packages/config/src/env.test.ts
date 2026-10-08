@@ -68,6 +68,9 @@ test('worker has complete execution configuration and no provider secrets', () =
   expect(readWorkerEnv({ ...workerInput, FAL_KEY: 'private' })).toEqual({
     ...workerInput,
     ...budgets,
+    AGENT_ENGINE: 'pi',
+    NATIVE_STATE_PATH: '/state/native',
+    RUN_TIMEOUT_MS: 1800000,
     WEB_SEARCH_AUTH_MODE: 'keyless',
     MODEL_CONTEXT_WINDOW: 8192,
     MODEL_MAX_OUTPUT_TOKENS: 1024,
@@ -303,7 +306,13 @@ test('database and Redis endpoints reject wrong protocols without leaking creden
 })
 
 test('numeric settings reject zero, negatives, fractions and nonnumbers', () => {
-  for (const field of ['LEASE_MS', 'POLL_MS', 'CONCURRENCY', 'SANDBOX_TIMEOUT_MS']) {
+  for (const field of [
+    'LEASE_MS',
+    'POLL_MS',
+    'CONCURRENCY',
+    'SANDBOX_TIMEOUT_MS',
+    'RUN_TIMEOUT_MS',
+  ]) {
     for (const invalid of ['0', '-1', '1.5', 'NaN', 'Infinity', 'invalid']) {
       expect(errorMessage(() => readWorkerEnv({ ...workerInput, [field]: invalid }))).toContain(
         field,
@@ -404,6 +413,21 @@ test('runtime has bounded IO and a authentication configured only on the server'
     expect(
       readServerEnv({ ...connections, ...authenticationInput, IO_TIMEOUT_MS }).IO_TIMEOUT_MS,
     ).toBe(Number(IO_TIMEOUT_MS))
+})
+
+test('skills require an explicit absolute worker path and remain disabled for blanks', () => {
+  expect(readWorkerEnv({ ...workerInput, AGENT_SKILLS_PATH: ' ' })).not.toHaveProperty(
+    'AGENT_SKILLS_PATH',
+  )
+  expect(
+    readWorkerEnv({ ...workerInput, AGENT_SKILLS_PATH: '/opt/agent/skills/v1' }),
+  ).toHaveProperty('AGENT_SKILLS_PATH', '/opt/agent/skills/v1')
+  expect(() => readWorkerEnv({ ...workerInput, AGENT_SKILLS_PATH: 'relative/skills' })).toThrow(
+    'AGENT_SKILLS_PATH',
+  )
+  expect(
+    readServerEnv({ ...connections, ...authenticationInput, AGENT_SKILLS_PATH: '/private' }),
+  ).not.toHaveProperty('AGENT_SKILLS_PATH')
 })
 
 test('trusted model prompt path defaults for blanks and accepts explicit assignment', () => {
@@ -575,4 +599,39 @@ test('worker selects keyless demo auth explicitly and keyed auth requires a work
       TAVILY_API_KEY: 'PRIVATE',
     }),
   ).not.toHaveProperty('TAVILY_API_KEY')
+})
+
+test('native engine selection is explicit and state storage must be absolute', () => {
+  for (const AGENT_ENGINE of ['pi', 'openai'] as const)
+    expect(readWorkerEnv({ ...workerInput, AGENT_ENGINE }).AGENT_ENGINE).toBe(AGENT_ENGINE)
+  expect(() => readWorkerEnv({ ...workerInput, AGENT_ENGINE: 'unknown' })).toThrow('AGENT_ENGINE')
+  expect(() => readWorkerEnv({ ...workerInput, NATIVE_STATE_PATH: 'relative/state' })).toThrow(
+    'NATIVE_STATE_PATH',
+  )
+  expect(
+    readWorkerEnv({ ...workerInput, NATIVE_STATE_PATH: '/owned/native' }).NATIVE_STATE_PATH,
+  ).toBe('/owned/native')
+  expect(
+    readWorkerEnv({
+      ...workerInput,
+      AGENT_ENGINE: ' ',
+      NATIVE_STATE_PATH: ' ',
+      RUN_TIMEOUT_MS: ' ',
+    }),
+  ).toMatchObject({
+    AGENT_ENGINE: 'pi',
+    NATIVE_STATE_PATH: '/state/native',
+    RUN_TIMEOUT_MS: 1800000,
+  })
+})
+
+test('total run deadline is independent of the sandbox lifetime', () => {
+  expect(readWorkerEnv({ ...workerInput, SANDBOX_TIMEOUT_MS: '66000' })).toMatchObject({
+    SANDBOX_TIMEOUT_MS: 66000,
+    RUN_TIMEOUT_MS: 1800000,
+  })
+  expect(readWorkerEnv({ ...workerInput, RUN_TIMEOUT_MS: '3600000' }).RUN_TIMEOUT_MS).toBe(3600000)
+  expect(() => readWorkerEnv({ ...workerInput, RUN_TIMEOUT_MS: '3600001' })).toThrow(
+    'RUN_TIMEOUT_MS',
+  )
 })

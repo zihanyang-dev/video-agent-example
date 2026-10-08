@@ -7,7 +7,7 @@ import { openDatabase } from '@vid/database/connection'
 import { createClient, type RedisClientType } from 'redis'
 import { createAuthentication } from './identity/authentication'
 import { createHTTP } from './http'
-import { consumeEventBatch } from './conversation/execution-events'
+import { acceptEventDeliveries } from './conversation/event-intake'
 import { publishPendingCommands } from './conversation/command-publication'
 
 /** One owner for construction, HTTP, subscriptions, background work and release. */
@@ -174,51 +174,14 @@ export async function startServer(
       maxBytes: env.ASSET_MAX_BYTES,
       maxFiles: env.ASSET_MAX_FILES,
     }
-    let eventStage: 'rediscommand' | 'redisread' | 'eventreceipt' = 'rediscommand'
-    async function acceptEventDeliveries() {
-      const consumer = crypto.randomUUID()
-      let startID = '0-0'
-      while (!shutdown.signal.aborted) {
-        eventStage = 'rediscommand'
-        const reclaimed = await commands.xAutoClaim(
-          executionStreams.events,
-          executionStreams.eventGroup,
-          consumer,
-          1000,
-          startID,
-          { COUNT: 32 },
-        )
-        startID = reclaimed.nextId // Empty pages still advance the native cursor.
-        if (shutdown.signal.aborted) return
-        eventStage = 'eventreceipt'
-        await consumeEventBatch(db, {
-          commands,
-          assetLimits,
-          signal: shutdown.signal,
-          messages: reclaimed.messages,
-          deletedMessages: reclaimed.deletedMessages,
-        })
-        if (shutdown.signal.aborted) return
-        eventStage = 'redisread'
-        const streams = await blockingReader.xReadGroup(
-          executionStreams.eventGroup,
-          consumer,
-          { key: executionStreams.events, id: '>' },
-          { COUNT: 32, BLOCK: 200 },
-        )
-        // Newly claimed deliveries stay pending for the replacement during stop.
-        if (shutdown.signal.aborted) return
-        eventStage = 'eventreceipt'
-        await consumeEventBatch(db, {
-          commands,
-          assetLimits,
-          signal: shutdown.signal,
-          messages: streams?.flatMap((stream) => stream.messages) ?? [],
-        })
-      }
-    }
     background.push(
-      acceptEventDeliveries().catch((cause: unknown) => fail(eventStage, cause)),
+      acceptEventDeliveries(db, {
+        commands,
+        blockingReader,
+        assetLimits,
+        signal: shutdown.signal,
+        onFailure: fail,
+      }),
       publishPendingCommands(db, commands, {
         signal: shutdown.signal,
         pollMs: env.POLL_MS,

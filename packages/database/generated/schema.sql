@@ -63,6 +63,42 @@ CREATE TYPE product.message_role AS ENUM (
 );
 
 
+--
+-- Name: keep_native_session(); Type: FUNCTION; Schema: execution; Owner: -
+--
+
+CREATE FUNCTION execution.keep_native_session() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF ROW(NEW.native_session_id, NEW.thread_id, NEW.harness_engine, NEW.storage, NEW.initial_context)
+       IS DISTINCT FROM
+       ROW(OLD.native_session_id, OLD.thread_id, OLD.harness_engine, OLD.storage, OLD.initial_context)
+     OR (OLD.initialized AND NOT NEW.initialized) THEN
+    RAISE EXCEPTION 'Native session binding is immutable';
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+
+--
+-- Name: keep_run_session(); Type: FUNCTION; Schema: execution; Owner: -
+--
+
+CREATE FUNCTION execution.keep_run_session() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF OLD.native_session_id IS NOT NULL
+     AND NEW.native_session_id IS DISTINCT FROM OLD.native_session_id THEN
+    RAISE EXCEPTION 'Accepted native session binding is immutable';
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+
 SET default_tablespace = '';
 
 SET default_table_access_method = heap;
@@ -154,7 +190,7 @@ CREATE TABLE execution.command_inbox (
 
 CREATE TABLE execution.conversations (
     thread_id uuid NOT NULL,
-    history jsonb DEFAULT '[]'::jsonb NOT NULL,
+    legacy_history jsonb DEFAULT '[]'::jsonb CONSTRAINT conversations_history_not_null NOT NULL,
     active_run_id uuid,
     lease_owner text,
     lease_until timestamp with time zone,
@@ -162,8 +198,17 @@ CREATE TABLE execution.conversations (
     legacy_workspace_checkpoint jsonb,
     native_sandbox jsonb,
     sandbox_recovery_required boolean DEFAULT false NOT NULL,
+    harness_engine text,
+    native_session_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    legacy_import_required boolean DEFAULT false NOT NULL,
+    workspace_reset_required boolean DEFAULT false NOT NULL,
+    workspace_transition_pending boolean DEFAULT false NOT NULL,
+    native_state_initialized boolean DEFAULT false NOT NULL,
+    requested_engine text,
     CONSTRAINT conversations_check CHECK ((((active_run_id IS NULL) AND (lease_owner IS NULL) AND (lease_until IS NULL)) OR ((active_run_id IS NOT NULL) AND (lease_owner IS NOT NULL) AND (lease_until IS NOT NULL)))),
     CONSTRAINT conversations_fence_check CHECK ((fence >= 0)),
+    CONSTRAINT conversations_harness_engine_check CHECK ((harness_engine = ANY (ARRAY['pi'::text, 'openai'::text]))),
+    CONSTRAINT conversations_requested_engine_check CHECK ((requested_engine = ANY (ARRAY['pi'::text, 'openai'::text]))),
     CONSTRAINT native_sandbox_reference CHECK (((native_sandbox IS NULL) OR ((jsonb_typeof(native_sandbox) = 'object'::text) AND (native_sandbox ?& ARRAY['provider'::text, 'id'::text]) AND (jsonb_typeof((native_sandbox -> 'provider'::text)) = 'string'::text) AND (jsonb_typeof((native_sandbox -> 'id'::text)) = 'string'::text) AND (length((native_sandbox ->> 'provider'::text)) > 0) AND (length((native_sandbox ->> 'id'::text)) > 0))))
 );
 
@@ -185,6 +230,22 @@ CREATE TABLE execution.event_outbox (
 
 
 --
+-- Name: native_sessions; Type: TABLE; Schema: execution; Owner: -
+--
+
+CREATE TABLE execution.native_sessions (
+    native_session_id uuid NOT NULL,
+    thread_id uuid NOT NULL,
+    harness_engine text NOT NULL,
+    storage text NOT NULL,
+    initialized boolean DEFAULT false NOT NULL,
+    initial_context jsonb,
+    CONSTRAINT native_sessions_harness_engine_check CHECK ((harness_engine = ANY (ARRAY['pi'::text, 'openai'::text]))),
+    CONSTRAINT native_sessions_storage_check CHECK ((storage = ANY (ARRAY['legacy'::text, 'session'::text])))
+);
+
+
+--
 -- Name: runs; Type: TABLE; Schema: execution; Owner: -
 --
 
@@ -197,7 +258,16 @@ CREATE TABLE execution.runs (
     assistant_message_id uuid,
     status execution.run_status DEFAULT 'queued'::execution.run_status NOT NULL,
     cancel_requested boolean DEFAULT false NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    model_call_count integer DEFAULT 0 NOT NULL,
+    uncheckpointed_effects integer DEFAULT 0 NOT NULL,
+    resume_count integer DEFAULT 0 NOT NULL,
+    deadline_at timestamp with time zone,
+    native_session_id uuid,
+    completion jsonb,
+    CONSTRAINT runs_model_call_count_check CHECK (((model_call_count >= 0) AND (model_call_count <= 16))),
+    CONSTRAINT runs_resume_count_check CHECK (((resume_count >= 0) AND (resume_count <= 2))),
+    CONSTRAINT runs_uncheckpointed_effects_check CHECK ((uncheckpointed_effects >= 0))
 );
 
 
@@ -411,6 +481,22 @@ ALTER TABLE ONLY execution.event_outbox
 
 
 --
+-- Name: native_sessions native_sessions_pkey; Type: CONSTRAINT; Schema: execution; Owner: -
+--
+
+ALTER TABLE ONLY execution.native_sessions
+    ADD CONSTRAINT native_sessions_pkey PRIMARY KEY (native_session_id);
+
+
+--
+-- Name: native_sessions native_sessions_thread_id_native_session_id_key; Type: CONSTRAINT; Schema: execution; Owner: -
+--
+
+ALTER TABLE ONLY execution.native_sessions
+    ADD CONSTRAINT native_sessions_thread_id_native_session_id_key UNIQUE (thread_id, native_session_id);
+
+
+--
 -- Name: runs runs_command_id_key; Type: CONSTRAINT; Schema: execution; Owner: -
 --
 
@@ -575,6 +661,13 @@ CREATE INDEX command_inbox_run_kind_idx ON execution.command_inbox USING btree (
 
 
 --
+-- Name: conversations_pending_harness_idx; Type: INDEX; Schema: execution; Owner: -
+--
+
+CREATE INDEX conversations_pending_harness_idx ON execution.conversations USING btree (thread_id) WHERE ((active_run_id IS NULL) AND (requested_engine IS NOT NULL));
+
+
+--
 -- Name: event_outbox_pending_idx; Type: INDEX; Schema: execution; Owner: -
 --
 
@@ -589,10 +682,24 @@ CREATE INDEX event_outbox_retention_idx ON execution.event_outbox USING btree (p
 
 
 --
--- Name: runs_thread_status_idx; Type: INDEX; Schema: execution; Owner: -
+-- Name: runs_native_session_order_idx; Type: INDEX; Schema: execution; Owner: -
 --
 
-CREATE INDEX runs_thread_status_idx ON execution.runs USING btree (thread_id, status, created_at);
+CREATE INDEX runs_native_session_order_idx ON execution.runs USING btree (thread_id, native_session_id, created_at DESC, run_id DESC);
+
+
+--
+-- Name: runs_thread_status_order_idx; Type: INDEX; Schema: execution; Owner: -
+--
+
+CREATE INDEX runs_thread_status_order_idx ON execution.runs USING btree (thread_id, status, created_at, run_id);
+
+
+--
+-- Name: command_outbox_pending_idx; Type: INDEX; Schema: product; Owner: -
+--
+
+CREATE INDEX command_outbox_pending_idx ON product.command_outbox USING btree (created_at, command_id) WHERE (published_at IS NULL);
 
 
 --
@@ -638,6 +745,20 @@ CREATE INDEX threads_owner_created ON product.threads USING btree (owner_id, cre
 
 
 --
+-- Name: native_sessions keep_native_session; Type: TRIGGER; Schema: execution; Owner: -
+--
+
+CREATE TRIGGER keep_native_session BEFORE UPDATE ON execution.native_sessions FOR EACH ROW EXECUTE FUNCTION execution.keep_native_session();
+
+
+--
+-- Name: runs keep_run_session; Type: TRIGGER; Schema: execution; Owner: -
+--
+
+CREATE TRIGGER keep_run_session BEFORE UPDATE ON execution.runs FOR EACH ROW EXECUTE FUNCTION execution.keep_run_session();
+
+
+--
 -- Name: account account_userId_fkey; Type: FK CONSTRAINT; Schema: auth; Owner: -
 --
 
@@ -670,11 +791,27 @@ ALTER TABLE ONLY execution.event_outbox
 
 
 --
+-- Name: native_sessions native_sessions_thread_id_fkey; Type: FK CONSTRAINT; Schema: execution; Owner: -
+--
+
+ALTER TABLE ONLY execution.native_sessions
+    ADD CONSTRAINT native_sessions_thread_id_fkey FOREIGN KEY (thread_id) REFERENCES execution.conversations(thread_id) ON DELETE CASCADE;
+
+
+--
 -- Name: runs runs_command_identity; Type: FK CONSTRAINT; Schema: execution; Owner: -
 --
 
 ALTER TABLE ONLY execution.runs
     ADD CONSTRAINT runs_command_identity FOREIGN KEY (thread_id, run_id, command_id) REFERENCES execution.command_inbox(thread_id, run_id, command_id);
+
+
+--
+-- Name: runs runs_native_session_fk; Type: FK CONSTRAINT; Schema: execution; Owner: -
+--
+
+ALTER TABLE ONLY execution.runs
+    ADD CONSTRAINT runs_native_session_fk FOREIGN KEY (thread_id, native_session_id) REFERENCES execution.native_sessions(thread_id, native_session_id);
 
 
 --

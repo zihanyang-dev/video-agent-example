@@ -8,12 +8,22 @@ umask 077
 mkdir -p .cache
 staging=$(mktemp -d "$root/.cache/deployment.XXXXXX")
 project="vid-deployment-$(basename "$staging" | tr '[:upper:].' '[:lower:]-')"
-compose() { run_stage "$run_timeout" docker compose --project-name "$project" --env-file "$staging/env" -f "$root/compose.yaml" -f "$staging/probe.yaml" "$@"; }
+# --env-file alone does not override ambient operator credentials. Retain only
+# Docker client connection settings; all service inputs come from this fixture.
+compose() {
+  run_stage "$run_timeout" env -i PATH="$PATH" HOME="$HOME" \
+    DOCKER_HOST="${DOCKER_HOST:-}" DOCKER_CONTEXT="${DOCKER_CONTEXT:-}" \
+    DOCKER_CONFIG="${DOCKER_CONFIG:-$HOME/.docker}" \
+    DOCKER_TLS_VERIFY="${DOCKER_TLS_VERIFY:-}" \
+    DOCKER_CERT_PATH="${DOCKER_CERT_PATH:-$HOME/.docker}" \
+    docker compose --project-name "$project" --env-file "$staging/env" \
+    -f "$root/compose.yaml" -f "$staging/probe.yaml" "$@"
+}
 cleanup() {
   status=$?
   trap - EXIT HUP INT TERM
   # Only this test's project is removed; cleanup has its own bounded CLI stage.
-  run_stage "$setup_timeout" docker compose --project-name "$project" --env-file "$staging/env" -f "$root/compose.yaml" -f "$staging/probe.yaml" down --volumes --remove-orphans || status=1
+  compose down --volumes --remove-orphans || status=1
   rm -rf "$staging" || status=1
   exit "$status"
 }

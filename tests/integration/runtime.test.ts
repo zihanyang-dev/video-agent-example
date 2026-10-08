@@ -1,21 +1,25 @@
-import { expect, spyOn, test } from 'bun:test'
+import { mkdtemp, rm, readdir, readFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterEach, expect, spyOn, test } from 'bun:test'
 import { S3Client } from '@aws-sdk/client-s3'
 import { createServer, type Socket } from 'node:net'
 import * as objectStorage from '@vid/object-storage'
 import { readWorkerEnv, readMigrationEnv } from '@vid/config'
-import { executionStreams } from '@vid/contract/execution'
+import { executionCommandSchema, executionStreams } from '@vid/contract/execution'
 import { messagesResponseSchema } from '@vid/contract/http'
 import { createClient } from 'redis'
 import { sql } from 'kysely'
 import { executeRun } from '../../apps/agent/src/execution/execute-run'
-import type { ExecutionLease, SandboxSessionPort } from '../../apps/agent/src/execution/contract'
+import type { ExecutionLease, SandboxSessionPort } from '../../apps/agent/src/contract.ts'
 import { assignFileTools } from '../../apps/agent/src/harness/files'
-import { createPiHarness } from '../../apps/agent/src/harness/pi'
+import { createPiHarness } from '../../apps/agent/src/harness/pi/adapter'
 import { WorkerProcess } from '../../apps/agent/src/worker'
 import { startServer } from '../../apps/server/src/server'
+import { acceptExecutionEvent } from '../../apps/server/src/db/execution-events'
 import { startWorker } from '../../apps/agent/src/worker'
 import { signedTestIdentity, serverTestEnv, storageSettings } from './authentication-fixture'
-import { openTestDatabase } from './database-fixture'
+import { openTestDatabase, settleTestCleanup } from './database-fixture'
 import { postgresProxy, eventually } from './postgres-proxy-fixture'
 import { modelStream } from './model-stream-fixture'
 
@@ -81,6 +85,42 @@ function sandbox(close: () => Promise<void>) {
   }
 }
 const identities = new Map<string, Headers>()
+const ownedThreads = new Set<string>()
+function ownThread(threadID: string = crypto.randomUUID()) {
+  ownedThreads.add(threadID.toLowerCase())
+  return threadID
+}
+// Each test's finally joins its server, worker, model and sandbox tasks first.
+// Unknown SQL acknowledgements can leave a queued/active row even after stop;
+// remove only this test's rows before another global startup recovery runs.
+afterEach(async () => {
+  if (ownedThreads.size === 0) return
+  const { db, close } = openTestDatabase()
+  await settleTestCleanup([
+    ...Array.from(ownedThreads, (threadID) => async () => {
+      await db.transaction().execute(async (tx) => {
+        await tx
+          .updateTable('execution.conversations')
+          .set({ active_run_id: null, lease_owner: null, lease_until: null })
+          .where('thread_id', '=', threadID)
+          .execute()
+        await tx.deleteFrom('execution.event_outbox').where('thread_id', '=', threadID).execute()
+        await tx.deleteFrom('execution.runs').where('thread_id', '=', threadID).execute()
+        await tx.deleteFrom('execution.command_inbox').where('thread_id', '=', threadID).execute()
+        await tx.deleteFrom('execution.conversations').where('thread_id', '=', threadID).execute()
+        await tx.deleteFrom('product.execution_events').where('thread_id', '=', threadID).execute()
+        await tx.deleteFrom('product.command_outbox').where('thread_id', '=', threadID).execute()
+        await tx.deleteFrom('product.message_assets').where('thread_id', '=', threadID).execute()
+        await tx.deleteFrom('product.assets').where('thread_id', '=', threadID).execute()
+        await tx.deleteFrom('product.messages').where('thread_id', '=', threadID).execute()
+        await tx.deleteFrom('product.threads').where('thread_id', '=', threadID).execute()
+      })
+      identities.delete(threadID)
+      ownedThreads.delete(threadID)
+    }),
+    close,
+  ])
+})
 async function submit(url: string) {
   const { db, close } = openTestDatabase()
   const login = await signedTestIdentity(db).catch(async (cause: unknown) => {
@@ -95,11 +135,12 @@ async function submit(url: string) {
   })
   await close()
   const headers = login.headers
+  const requestedThreadID = ownThread()
   const response = await fetch(`${url}/api/threads`, {
     method: 'POST',
     headers,
     body: JSON.stringify({
-      threadID: crypto.randomUUID(),
+      threadID: requestedThreadID,
       title: 'Runtime chat',
     }),
   })
@@ -198,6 +239,97 @@ for (const status of [401, 500]) {
     }
   })
 }
+
+async function removeOwnedPublication(command: string | undefined) {
+  if (command === undefined) return
+  const client = createClient({
+    url: serverTestEnv().REDIS_URL,
+    disableOfflineQueue: true,
+    commandOptions: { timeout: 5000 },
+    socket: { connectTimeout: 5000, reconnectStrategy: false },
+  })
+  try {
+    await client.connect()
+    const entries = await client.xRange(executionStreams.commands, '-', '+', { COUNT: 1000 })
+    const owned = (entries ?? [])
+      .filter((entry) => entry.message.command === command)
+      .map((entry) => entry.id)
+    if (owned.length) await client.xDel(executionStreams.commands, owned)
+  } finally {
+    if (client.isOpen) client.destroy()
+  }
+}
+
+test('HTTP observation keeps alive across silent tools and long polling without new facts', async () => {
+  const server = await startServer({ ...serverTestEnv(), POLL_MS: 10000 }, { port: 0 })
+  const { db, close } = openTestDatabase()
+  const abort = new AbortController()
+  let publication: string | undefined
+  try {
+    const threadID = await submit(server.url)
+    const { run_id: runID, command } = await db
+      .selectFrom('product.command_outbox')
+      .select(['run_id', 'command'])
+      .where('thread_id', '=', threadID)
+      .executeTakeFirstOrThrow()
+    publication = JSON.stringify(executionCommandSchema.parse(command))
+    const base = { version: 1 as const, threadID, runID }
+    expect(
+      await acceptExecutionEvent(db, {
+        ordinal: 1,
+        event: { ...base, eventID: crypto.randomUUID(), kind: 'run-started' },
+      }),
+    ).toBe('accepted')
+    const response = await fetch(`${server.url}/api/threads/${threadID}/runs/${runID}/events`, {
+      method: 'POST',
+      headers: identities.get(threadID)!,
+      signal: abort.signal,
+      body: JSON.stringify({
+        threadId: threadID,
+        runId: runID,
+        messages: [],
+        tools: [],
+        context: [],
+        state: {},
+        forwardedProps: {},
+      }),
+    })
+    expect(response.status).toBe(200)
+    const body = response.text().then(
+      (text) => ({ text, failed: false }),
+      () => ({ text: '', failed: true }),
+    )
+    // Bun's native default is ten seconds. No model/tool text need arrive in that interval.
+    await Bun.sleep(15000)
+    expect(
+      await acceptExecutionEvent(db, {
+        ordinal: 2,
+        event: {
+          ...base,
+          eventID: crypto.randomUUID(),
+          kind: 'run-completed',
+          messageID: crypto.randomUUID(),
+          text: 'done',
+        },
+      }),
+    ).toBe('accepted')
+    const result = await body
+    expect(result.failed).toBe(false)
+    expect(result.text).toContain(': keep-alive\n\n')
+    expect(result.text).toContain('RUN_FINISHED')
+    const facts = await db
+      .selectFrom('product.execution_events')
+      .select('event_id')
+      .where('run_id', '=', runID)
+      .execute()
+    expect(facts).toHaveLength(2)
+  } finally {
+    abort.abort()
+    // No worker consumes this observation-only fixture. Join its publisher
+    // before removing only the exact owned Redis message, then delete SQL rows.
+    await settleTestCleanup([server.stop, () => removeOwnedPublication(publication), close])
+  }
+}, 25000)
 
 test('server releases every allocated object store when native client construction fails', async () => {
   const created: objectStorage.ObjectStore[] = []
@@ -391,7 +523,7 @@ test('unsupported inherited MIME headers are rejected without stopping HTTP', as
   const login = await signedTestIdentity(db)
   const server = await startServer(serverTestEnv(), { port: 0 })
   try {
-    const threadID = crypto.randomUUID()
+    const threadID = ownThread()
     expect(
       (
         await fetch(`${server.url}/api/threads`, {
@@ -438,8 +570,8 @@ test.each(['hello\u0000world', '\ud800', '\udc00'])(
     const { db, close } = openTestDatabase()
     const login = await signedTestIdentity(db)
     const server = await startServer(serverTestEnv(), { port: 0 })
-    const threadID = crypto.randomUUID()
-    const rejectedThreadID = crypto.randomUUID()
+    const threadID = ownThread()
+    const rejectedThreadID = ownThread()
     const messageID = crypto.randomUUID()
     try {
       expect(
@@ -504,12 +636,14 @@ test.each(['hello\u0000world', '\ud800', '\udc00'])(
 )
 
 // Fresh database/Redis from scripts/database-check.sh; real Pi, no cloud or VM.
-test('HTTP -> command -> leased Pi -> private history -> event -> stored public answer', async () => {
+test('HTTP -> command -> leased Pi -> private native session -> event -> stored public answer', async () => {
+  const statePath = await mkdtemp(join(tmpdir(), 'runtime-native-'))
   const model = localModel()
   const server = await startServer(serverTestEnv(), { port: 0 })
   let closed = 0
   const modelEnv = workerEnv(model.baseURL)
   const harness = createPiHarness({
+    statePath,
     baseURL: modelEnv.MODEL_BASE_URL,
     key: modelEnv.MODEL_API_KEY,
     modelID: modelEnv.MODEL_ID,
@@ -533,10 +667,17 @@ test('HTTP -> command -> leased Pi -> private history -> event -> stored public 
     expect(result).not.toContain('header')
     const execution = await db
       .selectFrom('execution.conversations')
-      .select(['history', 'active_run_id'])
+      .select(['harness_engine', 'native_session_id', 'active_run_id'])
       .where('thread_id', '=', threadID)
       .executeTakeFirstOrThrow()
-    expect(execution.history).toHaveProperty('entries')
+    expect(execution.harness_engine).toBe('pi')
+    expect(execution.native_session_id).toMatch(/^[0-9a-f-]{36}$/)
+    const directory = join(statePath, 'pi', threadID)
+    const files = (await readdir(directory)).filter((name) => name.endsWith('.jsonl'))
+    expect(files).toHaveLength(1)
+    const nativeState = await readFile(join(directory, files[0]!), 'utf8')
+    expect(nativeState).toContain(execution.native_session_id!)
+    expect(nativeState).toContain('reply: hello')
     expect(execution.active_run_id).toBeNull()
     expect(closed).toBe(1)
     expect(model.requests).toHaveLength(1)
@@ -545,16 +686,20 @@ test('HTTP -> command -> leased Pi -> private history -> event -> stored public 
       expect.stringContaining((await Bun.file(workerEnv().MODEL_PROMPT_PATH).text()).trim()),
     )
   } finally {
-    await Promise.all([worker.stop(), server.stop()])
-    await model.server.stop(true)
-    await close()
+    await settleTestCleanup([
+      () => worker.stop(),
+      () => server.stop(),
+      () => Promise.resolve(model.server.stop(true)),
+      close,
+      () => rm(statePath, { recursive: true, force: true }),
+    ])
   }
 }, 15000)
 
 // Poison intake must never acquire either external spending capability.
 const noExternalExecution = {
   harness: {
-    turn: async () => {
+    run: async () => {
       throw new Error('Unexpected turn')
     },
   },
@@ -639,7 +784,7 @@ test('worker shutdown aborts inference and awaits sandbox cleanup before closing
     { ...workerEnv(), MODEL_PROMPT_PATH: '/missing/test-profile.md' },
     {
       harness: {
-        async turn({ signal }) {
+        async run({ signal }) {
           started.release()
           await new Promise<void>((resolve) => {
             signal.addEventListener('abort', () => resolve(), { once: true })
@@ -682,9 +827,7 @@ test('worker shutdown aborts inference and awaits sandbox cleanup before closing
     expect(run.status).toBe('failed')
   } finally {
     release.release()
-    await worker.stop()
-    await server.stop()
-    await close()
+    await settleTestCleanup([() => worker.stop(), () => server.stop(), close])
   }
 }, 15000)
 
@@ -848,7 +991,7 @@ test('blackholed worker database stops an active turn and settles pause without 
     },
     {
       harness: {
-        async turn({ signal }) {
+        async run({ signal }) {
           turns++
           proxy.blackhole()
           await new Promise<void>((resolve) => {
@@ -909,10 +1052,12 @@ test('blackholed worker database stops an active turn and settles pause without 
     }
     await worker.stop().catch(() => {})
   } finally {
-    await proxy.close()
-    await worker.stop().catch(() => {})
-    await done
-    await server.stop()
+    await settleTestCleanup([
+      () => proxy.close(),
+      () => worker.stop().catch(() => {}),
+      () => done,
+      () => server.stop(),
+    ])
   }
 }, 15000)
 
@@ -968,7 +1113,11 @@ test('process S3 closes after actual slow file export and native pause settlemen
     threadID: crypto.randomUUID(),
     runID: crypto.randomUUID(),
     text: 'export',
-    history: [],
+    engine: 'pi',
+    nativeSessionID: crypto.randomUUID(),
+    deadlineAt: new Date(Date.now() + 60000),
+    restoring: false,
+    restoreWorkspace: false,
     fence: 1,
     ownerID: 'test',
   }
@@ -988,6 +1137,12 @@ test('process S3 closes after actual slow file export and native pause settlemen
     lease,
     {
       writes: {
+        beginWorkspaceTransition: async () => true,
+        settleWorkspaceTransition: async () => true,
+        reserveModel: async () => 'allowed',
+        beginEffect: async () => 'allowed',
+        checkpoint: async () => true,
+        rejectEffect: async () => true,
         saveSandbox: async () => true,
         quarantine: async () => {},
         renew: async () => 'renewed',
@@ -1003,7 +1158,7 @@ test('process S3 closes after actual slow file export and native pause settlemen
         timeoutMs: 5000,
       }),
       harness: {
-        turn: async ({ fileTools, signal }) => {
+        run: async ({ fileTools, signal, checkpoint }) => {
           if (!fileTools) throw new Error('Missing assigned file tools')
           await fileTools.exportFile({
             path: '/chosen',
@@ -1011,8 +1166,9 @@ test('process S3 closes after actual slow file export and native pause settlemen
             mimeType: 'application/octet-stream',
             signal,
           })
+          await checkpoint()
           signal.throwIfAborted()
-          return { text: 'done', history: [] }
+          return { text: 'done' }
         },
       },
     },

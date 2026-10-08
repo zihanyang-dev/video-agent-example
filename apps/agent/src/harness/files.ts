@@ -1,6 +1,11 @@
 import { sha256, type ObjectStore } from '@vid/object-storage'
 import { assetReferenceSchema, type AssetReference } from '@vid/contract/execution'
-import type { ExecutionLease, FileTools, SandboxFiles } from '../execution/contract'
+import {
+  CapabilityRejectedError,
+  type FileAssignment,
+  type FileTools,
+  type SandboxFiles,
+} from '../contract.ts'
 
 const exportMetadataSchema = assetReferenceSchema.unwrap().pick({ name: true, mimeType: true })
 
@@ -14,12 +19,16 @@ type FileLimits = Readonly<{
  * trusted capability alone allocates immutable output keys. Never deletes after
  * an unknown PUT/COMMIT acknowledgement; orphan reconciliation is operator work. */
 export function assignFileTools(objects: ObjectStore, limits: FileLimits) {
-  return (lease: ExecutionLease, sandbox: SandboxFiles, stopSpending: () => void): FileTools => {
-    const assigned = lease.assets ?? []
+  return (
+    assignment: FileAssignment,
+    sandbox: SandboxFiles,
+    stopSpending: () => void,
+    beforePut: () => Promise<void | (() => Promise<void>)>,
+  ): FileTools => {
+    const assigned = assignment.assets ?? []
     const prepared: AssetReference[] = []
     let count = 0
     let byteLength = 0
-    let unknownOutcome = false
     // Failed actions consume their reservation; no retries reclaim remote IO.
     function reserveFile() {
       if (count >= limits.maxFiles || byteLength >= limits.maxBytes)
@@ -36,7 +45,6 @@ export function assignFileTools(objects: ObjectStore, limits: FileLimits) {
     return {
       assigned,
       prepared,
-      hasUnknownOutcome: () => unknownOutcome,
       async importFile({ assetID, path, signal }) {
         const asset = assigned.find((candidate) => candidate.assetID === assetID)
         if (asset === undefined) throw new Error('Asset was not assigned to this run')
@@ -51,16 +59,17 @@ export function assignFileTools(objects: ObjectStore, limits: FileLimits) {
         try {
           await sandbox.writeBytes(path, bytes, deadline)
         } catch (error) {
-          unknownOutcome = true
+          if (error instanceof CapabilityRejectedError) throw error
           stopSpending()
           throw error
         }
         return { bytes, mimeType: asset.mimeType }
       },
+
       async exportFile({ path, name, mimeType, signal }) {
         // Validate model-produced public metadata before spending on an upload.
         const assetID = crypto.randomUUID()
-        const objectKey = `assets/generated/${lease.threadID}/${lease.runID}/${lease.fence}/${assetID}`
+        const objectKey = `assets/generated/${assignment.threadID}/${assignment.runID}/${assignment.fence}/${assetID}`
         const metadata = exportMetadataSchema.parse({ name, mimeType })
         reserveFile()
         const deadline = bounded(signal)
@@ -68,13 +77,27 @@ export function assignFileTools(objects: ObjectStore, limits: FileLimits) {
         const bytes = await sandbox.readBytes(path, deadline, limits.maxBytes - byteLength)
         reserveBytes(bytes.byteLength)
         deadline.throwIfAborted()
+        // Current lease/cancel/budget admission belongs immediately before PUT,
+        // after readonly guest IO and validation—not to a prior read callback.
+        const releaseUnissued = await beforePut()
+        try {
+          deadline.throwIfAborted()
+        } catch (error) {
+          // This receipt belongs only to this PUT. Once objects.put is invoked,
+          // even an SDK AbortError is an unknown outcome, never a refund proof.
+          try {
+            await releaseUnissued?.()
+          } catch (correctionError) {
+            throw new AggregateError([error, correctionError], 'Unissued PUT correction failed')
+          }
+          throw error
+        }
         let digest
         try {
           digest = await objects.put(objectKey, bytes, mimeType, deadline)
         } catch (error) {
-          unknownOutcome = true
           stopSpending()
-          // Pi may turn a tool error into text; abort spending rather than letting
+          // A harness may turn a tool error into text; abort spending rather than letting
           // it infer or export again after an uncertain external operation.
           throw error
         }

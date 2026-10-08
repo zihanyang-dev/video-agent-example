@@ -1,6 +1,6 @@
 import { executeRun } from './execute-run'
 import { waitForPoll } from './wait-for-poll'
-import type { ExecuteRunDependencies, ExecuteRunOptions, ExecutionLease } from './contract'
+import type { ExecuteRunDependencies, ExecuteRunOptions, ExecutionLease } from '../contract.ts'
 
 type WorkerDependencies = ExecuteRunDependencies &
   Readonly<{
@@ -32,7 +32,8 @@ export async function runWorker(deps: WorkerDependencies, options: WorkerOptions
         signal,
         ...(options.runTimeoutMs === undefined ? {} : { runTimeoutMs: options.runTimeoutMs }),
       }
-      await executeRun(lease, deps, runOptions)
+      const outcome = await executeRun(lease, deps, runOptions)
+      if (outcome === 'lost') throw new Error('Native request ownership was lost')
     } catch (error) {
       failures.push(error)
       stop.abort()

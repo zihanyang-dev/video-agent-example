@@ -8,7 +8,6 @@
     "@vid/contract": "workspace:*",
     "better-auth": "1.7.7",
     "kysely": "0.29.6",
-    "pg": "8.23.1",
     "redis": "6.3.0",
     "@ag-ui/core": "1.0.1",
     "@ag-ui/encoder": "1.0.1",

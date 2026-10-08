@@ -23,6 +23,10 @@ type Observation = Readonly<{
 }>
 type Fact = NonNullable<Awaited<ReturnType<typeof readPublicEvents>>>[number]
 
+// Keep quiet observations below native HTTP/proxy idle limits. Comments are
+// transport liveness only: they never create events or advance replay cursors.
+const keepAliveIntervalMs = 5000
+
 export async function observeEvents(db: Kysely<DB>, query: Observation): Promise<Response> {
   const subscription = new PublicEventSubscription(db, query)
   return await subscription.open()
@@ -153,7 +157,7 @@ class PublicEventSubscription {
   private async readNext(controller: ReadableStreamDefaultController<Uint8Array>) {
     if (this.closed) return
     try {
-      const chunk = await this.readNextFact()
+      const chunk = await this.readNextChunk()
       if (this.closed) return
       if (chunk) controller.enqueue(chunk)
       if (!chunk || this.events.phase === 'terminal') this.stop()
@@ -207,25 +211,33 @@ class PublicEventSubscription {
     return this.utf8.encode(encoded)
   }
 
-  private async readNextFact(): Promise<Uint8Array | null> {
+  private async readAuthorizedFact(): Promise<Fact | null | undefined> {
+    this.stage = 'authority'
+    if (!(await this.query.authorize())) return null
+    this.stage = 'read'
+    const facts = await readPublicEvents(this.db, {
+      ownerID: this.query.ownerID,
+      threadID: this.query.threadID,
+      runID: this.query.runID,
+      after: this.cursor,
+      limit: 1,
+    })
+    if (this.abort.signal.aborted || facts === null) return null
+    // SQL awaits may cross revocation; neither data nor keepalive may bypass it.
+    this.stage = 'authority'
+    return (await this.query.authorize()) ? facts[0] : null
+  }
+
+  private async readNextChunk(): Promise<Uint8Array | null> {
     if (this.initialFrames.length) return await this.readInitialFrames()
+    const keepAliveAt = performance.now() + keepAliveIntervalMs
     while (!this.abort.signal.aborted && this.events.phase !== 'terminal') {
-      this.stage = 'authority'
-      if (!(await this.query.authorize())) return null
-      this.stage = 'read'
-      const facts = await readPublicEvents(this.db, {
-        ownerID: this.query.ownerID,
-        threadID: this.query.threadID,
-        runID: this.query.runID,
-        after: this.cursor,
-        limit: 1,
-      })
-      if (this.abort.signal.aborted || facts === null) return null
-      this.stage = 'authority'
-      if (!(await this.query.authorize())) return null
-      const fact = facts[0]
+      const fact = await this.readAuthorizedFact()
+      if (fact === null) return null
+      const remaining = keepAliveAt - performance.now()
+      if (!fact && remaining <= 0) return this.utf8.encode(': keep-alive\n\n')
       if (!fact) {
-        await waitForPoll(this.query.pollMs, this.abort.signal)
+        await waitForPoll(Math.min(this.query.pollMs, remaining), this.abort.signal)
         continue
       }
       this.cursor = fact.cursor

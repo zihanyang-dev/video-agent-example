@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { webSearchTool, type WebSearchConfig } from './web-search'
+import { assignWebSearch, type WebSearchConfig } from './web-search'
 
 type SearchTransport = NonNullable<WebSearchConfig['transport']>
 
@@ -8,26 +8,13 @@ const source = {
   url: 'https://example.org/story',
   content: '<p>Evidence</p>',
 }
-function tool(transport: SearchTransport, owner = new AbortController().signal) {
-  return webSearchTool({ authMode: 'keyless', transport }, owner)
-}
-async function run(native: ReturnType<typeof tool>, query = 'public facts', signal?: AbortSignal) {
-  const result = await native.execute(
-    'fixture',
-    { query },
-    signal,
-    undefined,
-    {} as Parameters<typeof native.execute>[4],
-  )
-  return JSON.parse(result.content[0]!.type === 'text' ? result.content[0]!.text : '') as Record<
-    string,
-    unknown
-  >
+function assignedSearch(transport: SearchTransport, owner = new AbortController().signal) {
+  return assignWebSearch({ authMode: 'keyless', transport }, owner)
 }
 
 test('fixed provider request and bounded sanitized citation evidence', async () => {
   let dispatches = 0
-  const native = tool((async (url, init) => {
+  const native = assignedSearch(async (url, init) => {
     dispatches++
     expect(url).toBe('https://api.tavily.com/search')
     expect(init?.redirect).toBe('error')
@@ -48,8 +35,8 @@ test('fixed provider request and bounded sanitized citation evidence', async () 
       results: [source],
       answer: 'PRIVATE PROVIDER ANSWER',
     })
-  }) as SearchTransport)
-  expect(await run(native)).toMatchObject({
+  })
+  expect(await native('public facts')).toMatchObject({
     status: 'ok',
     results: [{ title: 'Public', url: source.url, snippet: 'Evidence' }],
   })
@@ -58,28 +45,31 @@ test('fixed provider request and bounded sanitized citation evidence', async () 
 
 test('parallel calls reserve three dispatches before await; no retry/refund', async () => {
   let dispatches = 0
-  const native = tool((async () => {
+  const native = assignedSearch(async () => {
     dispatches++
     await Bun.sleep(10)
     throw new Error('PRIVATE KEY')
-  }) as SearchTransport)
-  const results = await Promise.all(Array.from({ length: 6 }, () => run(native)))
+  })
+  const results = await Promise.all(Array.from({ length: 6 }, () => native('public facts')))
   expect(dispatches).toBe(3)
   expect(JSON.stringify(results)).not.toContain('PRIVATE KEY')
   expect(
-    results.filter((result) => result.error === 'Search limit reached for this turn.'),
+    results.filter(
+      (result) =>
+        result.status === 'unavailable' && result.error === 'Search limit reached for this turn.',
+    ),
   ).toHaveLength(3)
 })
 
 test('empty is explicit, bad shape and oversized body are safe errors', async () => {
   expect(
-    await run(tool((async () => Response.json({ results: [] })) as SearchTransport)),
+    await assignedSearch(async () => Response.json({ results: [] }))('public facts'),
   ).toMatchObject({ status: 'empty', results: [] })
   for (const response of [
     Response.json({ results: 'PRIVATE' }),
     new Response('x'.repeat(262145)),
   ]) {
-    expect(await run(tool((async () => response) as SearchTransport))).toMatchObject({
+    expect(await assignedSearch(async () => response)('public facts')).toMatchObject({
       status: 'unavailable',
       error: 'Web search unavailable.',
     })
@@ -88,20 +78,20 @@ test('empty is explicit, bad shape and oversized body are safe errors', async ()
 
 test('invalid queries never dispatch; pre-aborted owner wins over SDK signal', async () => {
   let dispatches = 0
-  const transport = (async () => {
+  const transport = async () => {
     dispatches++
     return Response.json({ results: [] })
-  }) as SearchTransport
+  }
   for (const query of ['', ' ', 'x'.repeat(401), '😀'.repeat(401)])
-    expect(await run(tool(transport), query)).toMatchObject({
+    expect(await assignedSearch(transport)(query)).toMatchObject({
       status: 'unavailable',
     })
   const owner = new AbortController()
   const reason = new Error('lease lost')
   owner.abort(reason)
-  expect(run(tool(transport, owner.signal), 'public', new AbortController().signal)).rejects.toBe(
-    reason,
-  )
+  expect(
+    assignedSearch(transport, owner.signal)('public', new AbortController().signal),
+  ).rejects.toBe(reason)
   expect(dispatches).toBe(0)
 })
 
@@ -122,21 +112,22 @@ test('unsafe citation URLs are omitted and model JSON remains within 16 KiB', as
       content: '中'.repeat(3000),
     })),
   ]
-  const result = await run(tool((async () => Response.json({ results })) as SearchTransport))
+  const result = await assignedSearch(async () => Response.json({ results }))('public facts')
+  if (result.status === 'unavailable') throw new Error('Expected search evidence')
   expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThanOrEqual(16384)
   expect(JSON.stringify(result)).not.toContain('secret')
   expect(result.truncated).toBe(true)
-  expect((result.results as unknown[]).length).toBeLessThanOrEqual(5)
+  expect(result.results.length).toBeLessThanOrEqual(5)
 })
 
 test('hard auth/quota refusal closes this turn spending gate', async () => {
   let dispatches = 0
-  const native = tool((async () => {
+  const native = assignedSearch(async () => {
     dispatches++
     return new Response('PRIVATE', { status: 429 })
-  }) as SearchTransport)
-  await run(native)
-  await run(native)
+  })
+  await native('public facts')
+  await native('public facts')
   expect(dispatches).toBe(1)
 })
 
@@ -150,8 +141,8 @@ test('active abort preserves reason and awaits body cancellation cleanup', async
   const cleanup = new Promise<void>((resolve) => {
     release = resolve
   })
-  const native = tool(
-    (async () =>
+  const native = assignedSearch(
+    async () =>
       new Response(
         new ReadableStream({
           start() {
@@ -161,10 +152,10 @@ test('active abort preserves reason and awaits body cancellation cleanup', async
             await cleanup
           },
         }),
-      )) as SearchTransport,
+      ),
     owner.signal,
   )
-  const request = run(native)
+  const request = native('public facts')
   let settled = false
   const outcome = request.then(
     () => {
@@ -186,17 +177,17 @@ test('active abort preserves reason and awaits body cancellation cleanup', async
 
 test('deadline includes a stalled body (real ten second budget)', async () => {
   let canceled = false
-  const native = tool(
-    (async () =>
+  const native = assignedSearch(
+    async () =>
       new Response(
         new ReadableStream({
           cancel() {
             canceled = true
           },
         }),
-      )) as SearchTransport,
+      ),
   )
-  expect(await run(native)).toMatchObject({
+  expect(await native('public facts')).toMatchObject({
     status: 'unavailable',
     error: 'Web search timed out.',
   })
@@ -204,40 +195,40 @@ test('deadline includes a stalled body (real ten second budget)', async () => {
 }, 12000)
 
 test('encoded HTML and private host spellings never become citation evidence', async () => {
-  const result = await run(
-    tool((async () =>
-      Response.json({
-        results: [
-          {
-            ...source,
-            title: '&lt;b&gt;Title&lt;/b&gt;',
-            content: '&#60;script&#62;PRIVATE&#60;/script&#62;Public',
-          },
-          { ...source, url: 'http://localhost./' },
-          { ...source, url: 'http://private.internal./' },
-          { ...source, url: 'http://2130706433/' },
-          { ...source, url: 'http://[::ffff:127.0.0.1]/' },
-        ],
-      })) as SearchTransport),
-  )
+  const result = await assignedSearch(async () =>
+    Response.json({
+      results: [
+        {
+          ...source,
+          title: '&lt;b&gt;Title&lt;/b&gt;',
+          content: '&#60;script&#62;PRIVATE&#60;/script&#62;Public',
+        },
+        { ...source, url: 'http://localhost./' },
+        { ...source, url: 'http://private.internal./' },
+        { ...source, url: 'http://2130706433/' },
+        { ...source, url: 'http://[::ffff:127.0.0.1]/' },
+      ],
+    }),
+  )('public facts')
+  if (result.status === 'unavailable') throw new Error('Expected search evidence')
   expect(result.results).toEqual([{ title: 'Title', url: source.url, snippet: 'Public' }])
   expect(JSON.stringify(result)).not.toContain('PRIVATE')
 })
 
 test('sanitization decodes entities before removing private markup and invisible text', async () => {
-  const result = await run(
-    tool((async () =>
-      Response.json({
-        results: [
-          {
-            ...source,
-            title: '&lt;b&gt;Public&lt;/b&gt;&nbsp;&quot;&apos;&amp;',
-            content:
-              '&lt;script&gt;PRIVATE&lt;/script&gt;A&nbsp;&amp;B&#x1F600;&#0;&#x110000;\u200b\n',
-          },
-        ],
-      })) as SearchTransport),
-  )
+  const result = await assignedSearch(async () =>
+    Response.json({
+      results: [
+        {
+          ...source,
+          title: '&lt;b&gt;Public&lt;/b&gt;&nbsp;&quot;&apos;&amp;',
+          content:
+            '&lt;script&gt;PRIVATE&lt;/script&gt;A&nbsp;&amp;B&#x1F600;&#0;&#x110000;\u200b\n',
+        },
+      ],
+    }),
+  )('public facts')
+  if (result.status === 'unavailable') throw new Error('Expected search evidence')
   expect(result.results).toEqual([{ title: 'Public "\'&', url: source.url, snippet: 'A &B😀' }])
   expect(result.truncated).toBe(true)
 })
@@ -245,18 +236,18 @@ test('sanitization decodes entities before removing private markup and invisible
 test('title and snippet limits retain complete astral characters at the boundary', async () => {
   const title = 'a'.repeat(255)
   const snippet = 'b'.repeat(1499)
-  const result = await run(
-    tool((async () =>
-      Response.json({
-        results: [
-          {
-            ...source,
-            title: `${title}😀discarded`,
-            content: `${snippet}🎬discarded`,
-          },
-        ],
-      })) as SearchTransport),
-  )
+  const result = await assignedSearch(async () =>
+    Response.json({
+      results: [
+        {
+          ...source,
+          title: `${title}😀discarded`,
+          content: `${snippet}🎬discarded`,
+        },
+      ],
+    }),
+  )('public facts')
+  if (result.status === 'unavailable') throw new Error('Expected search evidence')
   expect(result.results).toEqual([
     { title: `${title}😀`, url: source.url, snippet: `${snippet}🎬` },
   ])
@@ -264,19 +255,19 @@ test('title and snippet limits retain complete astral characters at the boundary
 })
 
 test('key mode uses only bound worker key and omits credentials from tool output', async () => {
-  const native = webSearchTool(
+  const native = assignWebSearch(
     {
       authMode: 'key',
       apiKey: 'fixture-secret',
-      transport: (async (_url, init) => {
+      transport: async (_url, init) => {
         expect(new Headers(init?.headers).get('Authorization')).toBe('Bearer fixture-secret')
         expect(new Headers(init?.headers).has('X-Tavily-Access-Mode')).toBe(false)
         return Response.json({ results: [source], api_key: 'fixture-secret' })
-      }) as SearchTransport,
+      },
     },
     new AbortController().signal,
   )
-  expect(JSON.stringify(await run(native))).not.toContain('fixture-secret')
+  expect(JSON.stringify(await native('public facts'))).not.toContain('fixture-secret')
 })
 
 test('byte overflow cancels streaming body and waits for cancellation to settle', async () => {
@@ -288,8 +279,8 @@ test('byte overflow cancels streaming body and waits for cancellation to settle'
   const cancellation = new Promise<void>((resolve) => {
     canceled = resolve
   })
-  const native = tool(
-    (async () =>
+  const native = assignedSearch(
+    async () =>
       new Response(
         new ReadableStream({
           start(controller) {
@@ -300,10 +291,10 @@ test('byte overflow cancels streaming body and waits for cancellation to settle'
             await cleanup
           },
         }),
-      )) as SearchTransport,
+      ),
   )
   let settled = false
-  const request = run(native)
+  const request = native('public facts')
   const outcome = request.then(() => {
     settled = true
   })
@@ -318,12 +309,12 @@ test('SDK cancellation preserves the SDK reason and blocks later dispatch', asyn
   const sdk = new AbortController()
   const reason = new Error('SDK aborted')
   let dispatched = 0
-  const native = tool((async () => {
+  const native = assignedSearch(async () => {
     dispatched++
     return Response.json({ results: [] })
-  }) as SearchTransport)
+  })
   sdk.abort(reason)
-  expect(run(native, 'public', sdk.signal)).rejects.toBe(reason)
+  expect(native('public', sdk.signal)).rejects.toBe(reason)
   expect(dispatched).toBe(0)
 })
 
@@ -358,11 +349,11 @@ test('real loopback HTTP rejects redirects and caps decompressed provider bytes'
   })
   try {
     for (const path of ['/redirect', '/compressed']) {
-      const native = tool(((url, init) => {
+      const native = assignedSearch((url, init) => {
         expect(url).toBe('https://api.tavily.com/search')
         return fetch(`http://127.0.0.1:${server.port}${path}`, init)
-      }) as SearchTransport)
-      expect(await run(native)).toMatchObject({
+      })
+      expect(await native('public facts')).toMatchObject({
         status: 'unavailable',
         error: 'Web search unavailable.',
       })
@@ -383,8 +374,8 @@ test('owner abort during refused-response cleanup preserves reason after settlem
   const canceled = new Promise<void>((resolve) => {
     canceling = resolve
   })
-  const native = tool(
-    (async () =>
+  const native = assignedSearch(
+    async () =>
       new Response(
         new ReadableStream({
           async cancel() {
@@ -393,10 +384,10 @@ test('owner abort during refused-response cleanup preserves reason after settlem
           },
         }),
         { status: 500 },
-      )) as SearchTransport,
+      ),
     owner.signal,
   )
-  const request = run(native)
+  const request = native('public facts')
   const outcome = request.catch(() => {})
   await canceled
   const reason = new Error('shutdown during cleanup')
@@ -407,11 +398,12 @@ test('owner abort during refused-response cleanup preserves reason after settlem
 })
 
 test('malformed result fields are unavailable rather than a false no-results claim', async () => {
-  const native = tool((async () =>
+  const native = assignedSearch(async () =>
     Response.json({
       results: [{ ...source, content: 42 }],
-    })) as SearchTransport)
-  expect(await run(native)).toMatchObject({
+    }),
+  )
+  expect(await native('public facts')).toMatchObject({
     status: 'unavailable',
     error: 'Web search unavailable.',
   })
@@ -423,24 +415,24 @@ test('parallel ordinary refusal cannot reopen a hard-refusal spending gate', asy
   const ordinary = new Promise<void>((resolve) => {
     release = resolve
   })
-  const native = tool(async () => {
+  const native = assignedSearch(async () => {
     dispatches++
     if (dispatches === 1) return new Response(null, { status: 429 })
     await ordinary
     return new Response(null, { status: 500 })
   })
-  const hard = run(native)
-  const pending = run(native)
+  const hard = native('public facts')
+  const pending = native('public facts')
   await hard
   release()
   await pending
-  await run(native)
+  await native('public facts')
   expect(dispatches).toBe(2)
 })
 
 test('source capture projects only normalized actual results and drops unsafe entries before the five-result limit', async () => {
   const found: unknown[] = []
-  const native = webSearchTool(
+  const native = assignWebSearch(
     {
       authMode: 'keyless',
       transport: async () =>
@@ -459,7 +451,7 @@ test('source capture projects only normalized actual results and drops unsafe en
     new AbortController().signal,
     (sources) => found.push(...sources),
   )
-  await run(native)
+  await native('public facts')
   expect(found).toEqual(
     Array.from({ length: 5 }, (_, index) => ({
       title: 'Public',
@@ -472,7 +464,7 @@ test('source capture projects only normalized actual results and drops unsafe en
 
 test('normalized citation URL length is bounded after native percent encoding', async () => {
   const found: unknown[] = []
-  const native = webSearchTool(
+  const native = assignWebSearch(
     {
       authMode: 'keyless',
       transport: async () =>
@@ -486,6 +478,6 @@ test('normalized citation URL length is bounded after native percent encoding', 
     new AbortController().signal,
     (sources) => found.push(...sources),
   )
-  await run(native)
+  await native('public facts')
   expect(found).toEqual([{ title: 'Public', url: 'https://example.org/%C3%A9' }])
 })

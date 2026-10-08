@@ -6,7 +6,7 @@
 >
 > **逐条重构复审更新**：用户现已授权实施。本报告保留冻结版本的 BEFORE 与原始证据边界；各项「拟议，未实施／当前验证状态」描述的是首次交付阶段。复审更正及实际实施、测试状态见 [逐条重构记录](handover-refactoring.md)，不能把原始提案的静态解析当作当前源码验证。用户自行调整的 `docs/*.html` 继续排除。
 >
-> **Agent 目录更新**：第五批按用户新增要求把持久执行路径移到 `apps/agent/src/execution/`。本文旧路径/行号仍定位冻结 BEFORE，不冒充现行目录；原文可用 `git show 01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb:<旧路径>` 读取。当前路径对照见重构记录「第五批」，合同现位于 `execution/contract.ts`，没有旧入口兼容转发。
+> **Agent 目录更新**：第五批按用户新增要求把持久执行路径移到 `apps/agent/src/execution/`。本文旧路径/行号仍定位冻结 BEFORE，不冒充现行目录；原文可用 `git show 01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb:<旧路径>` 读取；本文 Markdown 源码导航固定到该 commit 的公开 blob，显示路径与行号保持历史原样。重构记录「第五批」是当时的迁移对照，现行消费合同位于 `apps/agent/src/contract.ts`，没有旧入口兼容转发；当前手册与历史证据分类见 [文档索引](README.md)。
 
 ## 1. 审查范围、版本与证据边界
 
@@ -82,97 +82,97 @@
 
 若先看实际代码形状，集中阅读 **F027–F066（40项）**；其余架构/边界26项、测试与工具23项各有独立位置，不靠重复formatter规则凑数。
 
-| ID            | 分类                 | 优先级                      | 适用置信度                                                                                               | 改进点                                                                     | 原文位置                                                                                                                 |
-| ------------- | -------------------- | --------------------------- | -------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| [F001](#f001) | 架构设计与事实归属   | P3 / 责任与表达可读性       | 高（静态判断）                                                                                           | 能力合同不要成为执行入口前的 147 行类型墙                                  | [`apps/agent/src/execute-run.ts:1–147`](../apps/agent/src/execute-run.ts#L1)                                             |
-| [F002](#f002) | 架构设计与事实归属   | P3 / 责任与表达可读性       | 高（静态判断）                                                                                           | stop reason 优先级是一条纯规则，不是 abort 副作用里的条件拼接              | [`apps/agent/src/execute-run.ts:164–178`](../apps/agent/src/execute-run.ts#L164)                                         |
-| [F003](#f003) | 架构设计与事实归属   | P3 / 责任与表达可读性       | 高（静态判断）                                                                                           | Pi 的 admission 与 cleanup 政策命名，明确不是 SDK 原生保证                 | [`apps/agent/src/harness/pi.ts:219–258`](../apps/agent/src/harness/pi.ts#L219)                                           |
-| [F004](#f004) | 架构设计与事实归属   | P2 / 边界与合同可维护性     | 高（静态判断；不代表动态复现）                                                                           | OpenAPI 引用名字应由现有 schema owner 约束，而非任意 string                | [`apps/server/src/http.ts:60–62`](../apps/server/src/http.ts#L60)                                                        |
-| [F005](#f005) | 架构设计与事实归属   | P2 / 边界与合同可维护性     | 高（静态判断；不代表动态复现）                                                                           | 上传的授权预检仍由路由直接拥有 SQL 事务                                    | [`apps/server/src/http.ts:491–494`](../apps/server/src/http.ts#L491)                                                     |
-| [F006](#f006) | 架构设计与事实归属   | P2 / 边界与验收             | 高（静态证据；拟议实现未验证）                                                                           | 将Compose中的特权storage init正文作为可检查Bash源                          | [`compose.yaml:120–168`](../compose.yaml#L120)                                                                           |
-| [F007](#f007) | 架构设计与事实归属   | P3 / 可维护性               | 高（静态证据；拟议实现未验证）                                                                           | 共享polling政策一个名字，进程schema不合并                                  | [`packages/config/src/env.ts:95–99`](../packages/config/src/env.ts#L95)                                                  |
-| [F008](#f008) | 架构设计与事实归属   | P2 / 边界与合同可维护性     | 高（静态判断；不代表动态复现）                                                                           | 输入附件数上限在两个 wire 合同里重复拥有                                   | [`packages/contract/src/execution.ts:25–26`](../packages/contract/src/execution.ts#L25)                                  |
-| [F009](#f009) | 架构设计与事实归属   | P2 / 边界与合同可维护性     | 中高：合同/PG可表示性差异可定位；真实消费失败路径与SDK增量切分未复现                                     | 公开输入与执行回执对 PostgreSQL text 的可表示性有两个不同 owner            | [`packages/contract/src/execution.ts:28–43`](../packages/contract/src/execution.ts#L28)                                  |
-| [F010](#f010) | 职责、身份与外部边界 | P3 / 责任与表达可读性       | 高（静态判断）                                                                                           | acceptCancel 只接受 schema 已经分辨的 cancel command                       | [`apps/agent/src/db/command-acceptance.ts:128–145`](../apps/agent/src/db/command-acceptance.ts#L128)                     |
-| [F011](#f011) | 职责、身份与外部边界 | P3 / 责任与表达可读性       | 中（适用前提见说明）                                                                                     | 终态 adapter 把 boolean SQL receipt 翻译为统一 outcome                     | [`apps/agent/src/execute-run.ts:93–103`](../apps/agent/src/execute-run.ts#L93)                                           |
-| [F012](#f012) | 职责、身份与外部边界 | P3 / 责任与表达可读性       | 高（静态判断）                                                                                           | quarantine 的 lease 只从当前 execution owner 取一次                        | [`apps/agent/src/execute-run.ts:548–560`](../apps/agent/src/execute-run.ts#L548)                                         |
-| [F013](#f013) | 职责、身份与外部边界 | P2 / 取消权边界（需验证）   | 中（适用前提见说明）                                                                                     | 原生工具调用同时携带 owner 与 SDK 的取消权                                 | [`apps/agent/src/harness/pi.ts:88–155`](../apps/agent/src/harness/pi.ts#L88)                                             |
-| [F014](#f014) | 职责、身份与外部边界 | P3 / 责任与表达可读性       | 高（静态判断）                                                                                           | 工具定义与工具名称 allowlist 应由同一组受信定义派生                        | [`apps/agent/src/harness/pi.ts:156–209`](../apps/agent/src/harness/pi.ts#L156)                                           |
-| [F015](#f015) | 职责、身份与外部边界 | P3 / 责任与表达可读性       | 中：fresh identity runtime不可变性硬化；当前无实际修改且消费port可能已静态readonly，不是已发现跨租户风险 | 已知 native identity 在 session 生命周期内应不可变                         | [`apps/agent/src/sandbox/e2b.ts:58–69`](../apps/agent/src/sandbox/e2b.ts#L58)                                            |
-| [F016](#f016) | 职责、身份与外部边界 | P3 / 责任与表达可读性       | 中（适用前提见说明）                                                                                     | 两条 Redis 连接的拒绝原因应完整保留，而非只选第一条                        | [`apps/agent/src/worker.ts:259–268`](../apps/agent/src/worker.ts#L259)                                                   |
-| [F017](#f017) | 职责、身份与外部边界 | P2 / 降低生命周期误读       | 高                                                                                                       | 取消 run 的名字不要暗示只取消观察                                          | [`apps/server/src/conversation/http.ts:62–79`](../apps/server/src/conversation/http.ts#L62)                              |
-| [F018](#f018) | 职责、身份与外部边界 | P2 / 边界与合同可维护性     | 高（静态判断；不代表动态复现）                                                                           | 资产完成的相邻字符串参数缺少具名 storage confirmation                      | [`apps/server/src/db/assets.ts:84–89`](../apps/server/src/db/assets.ts#L84)                                              |
-| [F019](#f019) | 职责、身份与外部边界 | P2 / 边界与合同可维护性     | 中：这是停止粒度的可选合同增强，不是已证明违反当前批次合同                                               | 停机门应位于每条 outbox publication 的发起点                               | [`apps/server/src/db/command-publication.ts:14–47`](../apps/server/src/db/command-publication.ts#L14)                    |
-| [F020](#f020) | 职责、身份与外部边界 | P2 / 边界与合同可维护性     | 高（静态判断；不代表动态复现）                                                                           | 观察 cursor 文档不可把 thread publication 与 run ordinal 混为一谈          | [`apps/server/src/http.ts:375–390`](../apps/server/src/http.ts#L375)                                                     |
-| [F021](#f021) | 职责、身份与外部边界 | P2 / 边界与验收             | 高（静态证据；拟议实现未验证）                                                                           | bucket名称准入不应只存在于本地provisioning程序                             | [`packages/config/src/env.ts:50–55`](../packages/config/src/env.ts#L50)                                                  |
-| [F022](#f022) | 职责、身份与外部边界 | P2 / 边界与合同可维护性     | 高（静态判断；不代表动态复现）                                                                           | 文件名合同允许孤立 surrogate，但下载 header 编码拒绝它                     | [`packages/contract/src/file-name.ts:3–15`](../packages/contract/src/file-name.ts#L3)                                    |
-| [F023](#f023) | 职责、身份与外部边界 | P2 / 边界与验收             | 高（静态证据；拟议实现未验证）                                                                           | legacy assignment的CLI输出与trusted API原因应分开                          | [`scripts/assign-legacy-threads.ts:34–41`](../scripts/assign-legacy-threads.ts#L34)                                      |
-| [F024](#f024) | 职责、身份与外部边界 | P2 / 边界与验收             | 高（静态证据；拟议实现未验证）                                                                           | generate/verify参数应在分配fixture前明确拒绝                               | [`scripts/database-check.sh:4–8`](../scripts/database-check.sh#L4)                                                       |
-| [F025](#f025) | 职责、身份与外部边界 | P3 / 责任与表达可读性       | 高（静态判断）                                                                                           | 独立测试资源的 cleanup 应互不阻止并保留全部失败                            | [`tests/sandbox/e2b.test.ts:193–196`](../tests/sandbox/e2b.test.ts#L193)                                                 |
-| [F026](#f026) | 职责、身份与外部边界 | P3 / 责任与表达可读性       | 高（静态判断）                                                                                           | restart shell cleanup 不覆盖原始失败或信号状态                             | [`tests/sandbox/restart-check.sh:11–44`](../tests/sandbox/restart-check.sh#L11)                                          |
-| [F027](#f027) | 代码形状与阅读节奏   | P3 / 可读性                 | 高                                                                                                       | 生成 artifact 树的递归归并使用直接循环                                     | [`.github/verify-api.ts:6–25`](../.github/verify-api.ts#L6)                                                              |
-| [F028](#f028) | 代码形状与阅读节奏   | P3 / 可读性                 | 高                                                                                                       | 明确采用 100 列，但把列宽视为排版预算而非重构规则                          | [`.prettierrc.json:1–5`](../.prettierrc.json#L1)                                                                         |
-| [F029](#f029) | 代码形状与阅读节奏   | P3 / 责任与表达可读性       | 高（静态判断）                                                                                           | 并发 fixture 使用原生 Promise.withResolvers 表达 latch                     | [`apps/agent/src/execute-run.test.ts:14–21`](../apps/agent/src/execute-run.test.ts#L14)                                  |
-| [F030](#f030) | 代码形状与阅读节奏   | P3 / 可读性                 | 高                                                                                                       | diagnose 的默认分类从类型/默认参数交界移到函数体                           | [`apps/agent/src/execute-run.ts:200–218`](../apps/agent/src/execute-run.ts#L200)                                         |
-| [F031](#f031) | 代码形状与阅读节奏   | P3 / 责任与表达可读性       | 高（静态判断）                                                                                           | 终态完成分支在本地证明 product，不使用跨条件 non-null assertion            | [`apps/agent/src/execute-run.ts:404–441`](../apps/agent/src/execute-run.ts#L404)                                         |
-| [F032](#f032) | 代码形状与阅读节奏   | P3 / 责任与表达可读性       | 高（静态判断）                                                                                           | tool outcome 的 mutative 政策不要靠位置 boolean 表达                       | [`apps/agent/src/execute-run.ts:493–510`](../apps/agent/src/execute-run.ts#L493)                                         |
-| [F033](#f033) | 代码形状与阅读节奏   | P3 / 可读性                 | 高                                                                                                       | import_file 的图片与普通文件结果采用分支提前返回                           | [`apps/agent/src/harness/file-tools.ts:34–54`](../apps/agent/src/harness/file-tools.ts#L34)                              |
-| [F034](#f034) | 代码形状与阅读节奏   | P3 / 责任与表达可读性       | 高（静态判断）                                                                                           | subprocess eval 只包含真正执行的入口 import                                | [`apps/agent/src/harness/pi.test.ts:503–514`](../apps/agent/src/harness/pi.test.ts#L503)                                 |
-| [F035](#f035) | 代码形状与阅读节奏   | P3 / 可读性                 | 高                                                                                                       | prompt 中资产投影先形成 public metadata 段落                               | [`apps/agent/src/harness/pi.ts:273–278`](../apps/agent/src/harness/pi.ts#L273)                                           |
-| [F036](#f036) | 代码形状与阅读节奏   | P3 / 可读性                 | 高                                                                                                       | canonical answer 文本归约与 history result 分成独立段落                    | [`apps/agent/src/harness/pi.ts:299–314`](../apps/agent/src/harness/pi.ts#L299)                                           |
-| [F037](#f037) | 代码形状与阅读节奏   | P3 / 可读性                 | 高                                                                                                       | 净化、固定实体映射和 Unicode 截断按线性阶段展开                            | [`apps/agent/src/harness/web-search.ts:22–56`](../apps/agent/src/harness/web-search.ts#L22)                              |
-| [F038](#f038) | 代码形状与阅读节奏   | P3 / 可读性                 | 高                                                                                                       | 在拥有 reader 的函数内显式写出 bytes→text→JSON 三步                        | [`apps/agent/src/harness/web-search.ts:138–146`](../apps/agent/src/harness/web-search.ts#L138)                           |
-| [F039](#f039) | 代码形状与阅读节奏   | P3 / 可读性                 | 高                                                                                                       | 认证 headers 的互斥策略用显式赋值而不是条件 spread                         | [`apps/agent/src/harness/web-search.ts:165–171`](../apps/agent/src/harness/web-search.ts#L165)                           |
-| [F040](#f040) | 代码形状与阅读节奏   | P3 / 可读性                 | 高                                                                                                       | 给搜索配额与响应预算一组模块私有政策名字                                   | [`apps/agent/src/harness/web-search.ts:192–204`](../apps/agent/src/harness/web-search.ts#L192)                           |
-| [F041](#f041) | 代码形状与阅读节奏   | P3 / 可读性                 | 中：只是局部阅读次序改善，不是修复错误                                                                   | 把每个 run 的可选超时一次投影成执行 options                                | [`apps/agent/src/run-loop.ts:32–41`](../apps/agent/src/run-loop.ts#L32)                                                  |
-| [F042](#f042) | 代码形状与阅读节奏   | P3 / 可读性                 | 高                                                                                                       | 两个同样的 abortable polling 实现共用一个生命周期 helper                   | [`apps/agent/src/run-loop.ts:89–100`](../apps/agent/src/run-loop.ts#L89)                                                 |
-| [F043](#f043) | 代码形状与阅读节奏   | P3 / 可读性                 | 高                                                                                                       | Worker 的 imports 按外部边界与本地依赖形成稳定段落                         | [`apps/agent/src/worker.ts:1–23`](../apps/agent/src/worker.ts#L1)                                                        |
-| [F044](#f044) | 代码形状与阅读节奏   | P3 / 可读性                 | 高                                                                                                       | 把测试赋值能力直接写成三个可选字段                                         | [`apps/agent/src/worker.ts:25–27`](../apps/agent/src/worker.ts#L25)                                                      |
-| [F045](#f045) | 代码形状与阅读节奏   | P3 / 可读性                 | 高                                                                                                       | 用惰性的空值默认表达启动能力选择                                           | [`apps/agent/src/worker.ts:34–41`](../apps/agent/src/worker.ts#L34)                                                      |
-| [F046](#f046) | 代码形状与阅读节奏   | P3 / 可读性                 | 高                                                                                                       | 连接配置重复的 Pick 交集应有一个 owner 内名字                              | [`apps/agent/src/worker.ts:158–163`](../apps/agent/src/worker.ts#L158)                                                   |
-| [F047](#f047) | 代码形状与阅读节奏   | P3 / 可读性                 | 高                                                                                                       | 健康阶段的优先级不要藏在三层 ternary 中                                    | [`apps/agent/src/worker.ts:195–205`](../apps/agent/src/worker.ts#L195)                                                   |
-| [F048](#f048) | 代码形状与阅读节奏   | P3 / 表达与测试可读性       | 高（静态判断；不代表动态复现）                                                                           | 生成资产预算验证用单次具名累计区分 legacy 与 current                       | [`apps/server/src/assets/files.ts:75–109`](../apps/server/src/assets/files.ts#L75)                                       |
-| [F049](#f049) | 代码形状与阅读节奏   | P3 / 可读性                 | 高                                                                                                       | download header 的 RFC5987 编码从超长插值里移出                            | [`apps/server/src/assets/http.ts:93–102`](../apps/server/src/assets/http.ts#L93)                                         |
-| [F050](#f050) | 代码形状与阅读节奏   | P3 / 表达与测试可读性       | 高（静态判断；不代表动态复现）                                                                           | SSE 最后一帧的元数据投影与 wire framing 应是两个可见阶段                   | [`apps/server/src/conversation/event-stream.ts:331–340`](../apps/server/src/conversation/event-stream.ts#L331)           |
-| [F051](#f051) | 代码形状与阅读节奏   | P3 / 可读性                 | 中高：需编译确认 inferred contract 可写                                                                  | completion 的可选字段用具名白名单对象组装                                  | [`apps/server/src/conversation/execution-receipts.ts:20–30`](../apps/server/src/conversation/execution-receipts.ts#L20)  |
-| [F052](#f052) | 代码形状与阅读节奏   | P3 / 表达与测试可读性       | 高（静态判断；不代表动态复现）                                                                           | AG-UI frame identity 的消息维度先命名再组装                                | [`apps/server/src/conversation/public-run-events.ts:62–69`](../apps/server/src/conversation/public-run-events.ts#L62)    |
-| [F053](#f053) | 代码形状与阅读节奏   | P3 / 表达与测试可读性       | 高（静态判断；不代表动态复现）                                                                           | 失败摘要与共用恢复步骤分开呈现，保留不同 reason                            | [`apps/server/src/conversation/public-run-events.ts:152–165`](../apps/server/src/conversation/public-run-events.ts#L152) |
-| [F054](#f054) | 代码形状与阅读节奏   | P3 / 可读性                 | 高：两段循环保留原覆盖顺序，不需要假定相同键永远不存在                                                   | 终态 outcome map 用两段直接循环替代双链、spread 与 tuple 断言              | [`apps/server/src/db/conversations.ts:162–184`](../apps/server/src/db/conversations.ts#L162)                             |
-| [F055](#f055) | 代码形状与阅读节奏   | P3 / 可读性                 | 高                                                                                                       | readActiveRuns 的 running / terminal SQL 用 SQL 自己的多行结构             | [`apps/server/src/db/conversations.ts:241–250`](../apps/server/src/db/conversations.ts#L241)                             |
-| [F056](#f056) | 代码形状与阅读节奏   | P3 / 可读性                 | 高                                                                                                       | 活动 run 状态优先级用局部变量明确声明                                      | [`apps/server/src/db/conversations.ts:253–264`](../apps/server/src/db/conversations.ts#L253)                             |
-| [F057](#f057) | 代码形状与阅读节奏   | P3 / 表达与测试可读性       | 高（静态判断；不代表动态复现）                                                                           | 完成消息写入的主体不必整段缩进在唯一 kind 条件内                           | [`apps/server/src/db/execution-events.ts:173–194`](../apps/server/src/db/execution-events.ts#L173)                       |
-| [F058](#f058) | 代码形状与阅读节奏   | P3 / 表达与测试可读性       | 高（静态判断；不代表动态复现）                                                                           | 重放的五条 identity 对照不必先变成匿名 tuple 矩阵                          | [`apps/server/src/db/submissions.ts:146–152`](../apps/server/src/db/submissions.ts#L146)                                 |
-| [F059](#f059) | 代码形状与阅读节奏   | P3 / 表达与测试可读性       | 高（静态判断；不代表动态复现）                                                                           | 保留位置的 upload 与 generated 策略用明确分支赋值                          | [`apps/server/src/db/submissions.ts:179–187`](../apps/server/src/db/submissions.ts#L179)                                 |
-| [F060](#f060) | 代码形状与阅读节奏   | P3 / 可读性                 | 高                                                                                                       | OpenAPI SDK 兼容断言用一个 owner 内 type alias 表达                        | [`scripts/generate-api.ts:29–37`](../scripts/generate-api.ts#L29)                                                        |
-| [F061](#f061) | 代码形状与阅读节奏   | P3 / 可读性                 | 高（静态证据；实际失败后果未运行复现）                                                                   | 关系完整性矩阵用具名 case，而不是依赖四槽 tuple 位置                       | [`tests/integration/relational-integrity.test.ts:180–217`](../tests/integration/relational-integrity.test.ts#L180)       |
-| [F062](#f062) | 代码形状与阅读节奏   | P3 / 可读性                 | 高（静态证据；实际失败后果未运行复现）                                                                   | 三个 local model fixtures 只共享 SSE framing，答案与工具叙事继续各自独立   | [`tests/integration/runtime.test.ts:60–68`](../tests/integration/runtime.test.ts#L60)                                    |
-| [F063](#f063) | 代码形状与阅读节奏   | P3 / 可读性                 | 高（静态证据；实际失败后果未运行复现）                                                                   | indexed corruption 场景的值选择显示真实 identity 来源，不用右移三元阶梯    | [`tests/integration/submission.test.ts:333–338`](../tests/integration/submission.test.ts#L333)                           |
-| [F064](#f064) | 代码形状与阅读节奏   | P3 / 可维护性               | 高（静态证据；拟议实现未验证）                                                                           | 让四种fixture凭据旋转显示成四条sed clause                                  | [`tests/scripts/deployment-check.sh:159–163`](../tests/scripts/deployment-check.sh#L159)                                 |
-| [F065](#f065) | 代码形状与阅读节奏   | P3 / 可维护性               | 高（静态证据；拟议实现未验证）                                                                           | 停止进程的diagnostic应只采集成一个快照                                     | [`tests/scripts/production-runtime.test.ts:228–236`](../tests/scripts/production-runtime.test.ts#L228)                   |
-| [F066](#f066) | 代码形状与阅读节奏   | P3 / fixture 状态与表达形状 | 高：requests 的唯一消费者是 length                                                                       | 本地工具模型只记住 request ordinal，不维护无人读取的完整请求历史           | [`tests/storage/assets.test.ts:413–479`](../tests/storage/assets.test.ts#L413)                                           |
-| [F067](#f067) | 测试与工具链的表达   | P3 / 责任与表达可读性       | 高（静态判断）                                                                                           | budget fixture 的闭合场景应与实际 admission 政策一致                       | [`apps/agent/src/harness/pi.test.ts:1224–1287`](../apps/agent/src/harness/pi.test.ts#L1224)                              |
-| [F068](#f068) | 测试与工具链的表达   | P3 / 责任与表达可读性       | 高（静态判断）                                                                                           | WorkerProcess 的 shutdown promise 应有未完成 owned-task 回归               | [`apps/agent/src/worker.test.ts:5–43`](../apps/agent/src/worker.test.ts#L5)                                              |
-| [F069](#f069) | 测试与工具链的表达   | P3 / 表达与测试可读性       | 高（静态判断；不代表动态复现）                                                                           | upload 文档测试应核对全部 MIME，而不是只测一正一负                         | [`apps/server/src/http.test.ts:18–25`](../apps/server/src/http.test.ts#L18)                                              |
-| [F070](#f070) | 测试与工具链的表达   | P2 / 边界与验收             | 高（静态证据；拟议实现未验证）                                                                           | 无需凭据的脚本回归应有同一个本地/CI入口                                    | [`package.json:11–17`](../package.json#L11)                                                                              |
-| [F071](#f071) | 测试与工具链的表达   | P3 / 表达与测试可读性       | 高（静态判断；不代表动态复现）                                                                           | native/foreign 一致性断言需要独立的预期真值                                | [`packages/contract/src/execution-schema.test.ts:34–68`](../packages/contract/src/execution-schema.test.ts#L34)          |
-| [F072](#f072) | 测试与工具链的表达   | P2 / 边界与验收             | 高（静态证据；拟议实现未验证）                                                                           | native PUT测试需钉住immutable条件、metadata与单次尝试                      | [`packages/object-storage/src/objects.test.ts:30–72`](../packages/object-storage/src/objects.test.ts#L30)                |
-| [F073](#f073) | 测试与工具链的表达   | P2 / 测试边界               | 高（静态证据；实际失败后果未运行复现）                                                                   | 第二个 administrative child 与第一个一样由 test owner 设 watchdog 并 join  | [`tests/integration/administration.test.ts:72–113`](../tests/integration/administration.test.ts#L72)                     |
-| [F074](#f074) | 测试与工具链的表达   | P2 / 测试边界               | 高（静态证据；实际失败后果未运行复现）                                                                   | 迁移命令断言先证明 outbox/inbox 两份记录都保留，再检查独立 wire 形状       | [`tests/integration/assets-migration.test.ts:244–259`](../tests/integration/assets-migration.test.ts#L244)               |
-| [F075](#f075) | 测试与工具链的表达   | P2 / 测试边界               | 高（静态证据；实际失败后果未运行复现）                                                                   | 清理序列复用现有 settleTestCleanup，而不是首个 DELETE 失败就跳过余项       | [`tests/integration/database.test.ts:6–24`](../tests/integration/database.test.ts#L6)                                    |
-| [F076](#f076) | 测试与工具链的表达   | P2 / 测试边界               | 高（静态证据；实际失败后果未运行复现）                                                                   | fixture 的 abort 等待需与同文件 late-quarantine 场景一样处理已发生的 abort | [`tests/integration/execute-run.test.ts:136–140`](../tests/integration/execute-run.test.ts#L136)                         |
-| [F077](#f077) | 测试与工具链的表达   | P2 / 测试边界               | 高（静态证据；实际失败后果未运行复现）                                                                   | 失去 fence 的慢 cleanup 测试必须在 assertion 失败后也释放 sandbox gate     | [`tests/integration/execute-run.test.ts:282–316`](../tests/integration/execute-run.test.ts#L282)                         |
-| [F078](#f078) | 测试与工具链的表达   | P2 / 测试边界               | 高（静态证据；实际失败后果未运行复现）                                                                   | canonical inbox 的 oracle 不再对 actual 与 expected 同时运行被测 parser    | [`tests/integration/execution-store.test.ts:861–861`](../tests/integration/execution-store.test.ts#L861)                 |
-| [F079](#f079) | 测试与工具链的表达   | P2 / 测试边界               | 高（静态证据；实际失败后果未运行复现）                                                                   | Postgres proxy 创建 owner 必须把 listen error 接到 setup Promise           | [`tests/integration/postgres-proxy-fixture.ts:41–44`](../tests/integration/postgres-proxy-fixture.ts#L41)                |
-| [F080](#f080) | 测试与工具链的表达   | P2 / 测试边界               | 高（静态证据；实际失败后果未运行复现）                                                                   | 并发fixture接入应先收齐sibling结果，再按owner关闭Redis/SQL资源             | [`tests/integration/redis.test.ts:19–19`](../tests/integration/redis.test.ts#L19)                                        |
-| [F081](#f081) | 测试与工具链的表达   | P2 / 测试边界               | 高（静态证据；实际失败后果未运行复现）                                                                   | SSE 顺序断言先证明两种事件都存在，避免 -1 充当正确先后                     | [`tests/integration/run-scoped-observation.test.ts:254–256`](../tests/integration/run-scoped-observation.test.ts#L254)   |
-| [F082](#f082) | 测试与工具链的表达   | P2 / 测试边界               | 高（静态证据；实际失败后果未运行复现）                                                                   | runtime submit 的身份 setup rejection 不应跳过自己打开的数据库关闭         | [`tests/integration/runtime.test.ts:92–95`](../tests/integration/runtime.test.ts#L92)                                    |
-| [F083](#f083) | 测试与工具链的表达   | P2 / 测试边界               | 高（静态证据；实际失败后果未运行复现）                                                                   | runtime answer polling 证明 assistant 消息，而非响应任意位置含有 canary    | [`tests/integration/runtime.test.ts:116–128`](../tests/integration/runtime.test.ts#L116)                                 |
-| [F084](#f084) | 测试与工具链的表达   | P2 / 测试边界               | 高（静态证据；实际失败后果未运行复现）                                                                   | 会话到期三种场景创建的官方身份也应加入本套件清理账本                       | [`tests/integration/thread-lifecycle.test.ts:47–70`](../tests/integration/thread-lifecycle.test.ts#L47)                  |
-| [F085](#f085) | 测试与工具链的表达   | P2 / 测试边界               | 高（静态证据；实际失败后果未运行复现）                                                                   | archive/send/replay barrier 在失败路径也收齐已发出的真实 writer            | [`tests/integration/thread-lifecycle.test.ts:295–316`](../tests/integration/thread-lifecycle.test.ts#L295)               |
-| [F086](#f086) | 测试与工具链的表达   | P2 / 边界与验收             | 高（静态证据；拟议实现未验证）                                                                           | readiness polling同时拥有monotonic预算和每次请求截止                       | [`tests/scripts/deployment-web.test.ts:4–18`](../tests/scripts/deployment-web.test.ts#L4)                                |
-| [F087](#f087) | 测试与工具链的表达   | P2 / 边界与验收             | 高（静态证据；拟议实现未验证）                                                                           | daemon probe需要在Docker client超时前登记可定位身份                        | [`tests/scripts/production-runtime.test.ts:157–179`](../tests/scripts/production-runtime.test.ts#L157)                   |
-| [F088](#f088) | 测试与工具链的表达   | P3 / 测试叙述与职责         | 高：已完整读两份 storage tests；不是功能缺陷                                                             | 上传 fixture 只保证初始可用状态；重放和冲突应由命名测试自己拥有            | [`tests/storage/assets.test.ts:92–118`](../tests/storage/assets.test.ts#L92)                                             |
-| [F089](#f089) | 测试与工具链的表达   | P2 / 边界与验收             | 高（静态证据；拟议实现未验证）                                                                           | 可执行CI TypeScript应进入现有compiler/lint边界                             | [`tsconfig.json:30–36`](../tsconfig.json#L30)                                                                            |
+| ID            | 分类                 | 优先级                      | 适用置信度                                                                                               | 改进点                                                                     | 原文位置                                                                                                                                                                                                                 |
+| ------------- | -------------------- | --------------------------- | -------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| [F001](#f001) | 架构设计与事实归属   | P3 / 责任与表达可读性       | 高（静态判断）                                                                                           | 能力合同不要成为执行入口前的 147 行类型墙                                  | [`apps/agent/src/execute-run.ts:1–147`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/execute-run.ts#L1)                                             |
+| [F002](#f002) | 架构设计与事实归属   | P3 / 责任与表达可读性       | 高（静态判断）                                                                                           | stop reason 优先级是一条纯规则，不是 abort 副作用里的条件拼接              | [`apps/agent/src/execute-run.ts:164–178`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/execute-run.ts#L164)                                         |
+| [F003](#f003) | 架构设计与事实归属   | P3 / 责任与表达可读性       | 高（静态判断）                                                                                           | Pi 的 admission 与 cleanup 政策命名，明确不是 SDK 原生保证                 | [`apps/agent/src/harness/pi.ts:219–258`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/harness/pi.ts#L219)                                           |
+| [F004](#f004) | 架构设计与事实归属   | P2 / 边界与合同可维护性     | 高（静态判断；不代表动态复现）                                                                           | OpenAPI 引用名字应由现有 schema owner 约束，而非任意 string                | [`apps/server/src/http.ts:60–62`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/server/src/http.ts#L60)                                                        |
+| [F005](#f005) | 架构设计与事实归属   | P2 / 边界与合同可维护性     | 高（静态判断；不代表动态复现）                                                                           | 上传的授权预检仍由路由直接拥有 SQL 事务                                    | [`apps/server/src/http.ts:491–494`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/server/src/http.ts#L491)                                                     |
+| [F006](#f006) | 架构设计与事实归属   | P2 / 边界与验收             | 高（静态证据；拟议实现未验证）                                                                           | 将Compose中的特权storage init正文作为可检查Bash源                          | [`compose.yaml:120–168`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/compose.yaml#L120)                                                                           |
+| [F007](#f007) | 架构设计与事实归属   | P3 / 可维护性               | 高（静态证据；拟议实现未验证）                                                                           | 共享polling政策一个名字，进程schema不合并                                  | [`packages/config/src/env.ts:95–99`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/packages/config/src/env.ts#L95)                                                  |
+| [F008](#f008) | 架构设计与事实归属   | P2 / 边界与合同可维护性     | 高（静态判断；不代表动态复现）                                                                           | 输入附件数上限在两个 wire 合同里重复拥有                                   | [`packages/contract/src/execution.ts:25–26`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/packages/contract/src/execution.ts#L25)                                  |
+| [F009](#f009) | 架构设计与事实归属   | P2 / 边界与合同可维护性     | 中高：合同/PG可表示性差异可定位；真实消费失败路径与SDK增量切分未复现                                     | 公开输入与执行回执对 PostgreSQL text 的可表示性有两个不同 owner            | [`packages/contract/src/execution.ts:28–43`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/packages/contract/src/execution.ts#L28)                                  |
+| [F010](#f010) | 职责、身份与外部边界 | P3 / 责任与表达可读性       | 高（静态判断）                                                                                           | acceptCancel 只接受 schema 已经分辨的 cancel command                       | [`apps/agent/src/db/command-acceptance.ts:128–145`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/db/command-acceptance.ts#L128)                     |
+| [F011](#f011) | 职责、身份与外部边界 | P3 / 责任与表达可读性       | 中（适用前提见说明）                                                                                     | 终态 adapter 把 boolean SQL receipt 翻译为统一 outcome                     | [`apps/agent/src/execute-run.ts:93–103`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/execute-run.ts#L93)                                           |
+| [F012](#f012) | 职责、身份与外部边界 | P3 / 责任与表达可读性       | 高（静态判断）                                                                                           | quarantine 的 lease 只从当前 execution owner 取一次                        | [`apps/agent/src/execute-run.ts:548–560`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/execute-run.ts#L548)                                         |
+| [F013](#f013) | 职责、身份与外部边界 | P2 / 取消权边界（需验证）   | 中（适用前提见说明）                                                                                     | 原生工具调用同时携带 owner 与 SDK 的取消权                                 | [`apps/agent/src/harness/pi.ts:88–155`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/harness/pi.ts#L88)                                             |
+| [F014](#f014) | 职责、身份与外部边界 | P3 / 责任与表达可读性       | 高（静态判断）                                                                                           | 工具定义与工具名称 allowlist 应由同一组受信定义派生                        | [`apps/agent/src/harness/pi.ts:156–209`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/harness/pi.ts#L156)                                           |
+| [F015](#f015) | 职责、身份与外部边界 | P3 / 责任与表达可读性       | 中：fresh identity runtime不可变性硬化；当前无实际修改且消费port可能已静态readonly，不是已发现跨租户风险 | 已知 native identity 在 session 生命周期内应不可变                         | [`apps/agent/src/sandbox/e2b.ts:58–69`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/sandbox/e2b.ts#L58)                                            |
+| [F016](#f016) | 职责、身份与外部边界 | P3 / 责任与表达可读性       | 中（适用前提见说明）                                                                                     | 两条 Redis 连接的拒绝原因应完整保留，而非只选第一条                        | [`apps/agent/src/worker.ts:259–268`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/worker.ts#L259)                                                   |
+| [F017](#f017) | 职责、身份与外部边界 | P2 / 降低生命周期误读       | 高                                                                                                       | 取消 run 的名字不要暗示只取消观察                                          | [`apps/server/src/conversation/http.ts:62–79`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/server/src/conversation/http.ts#L62)                              |
+| [F018](#f018) | 职责、身份与外部边界 | P2 / 边界与合同可维护性     | 高（静态判断；不代表动态复现）                                                                           | 资产完成的相邻字符串参数缺少具名 storage confirmation                      | [`apps/server/src/db/assets.ts:84–89`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/server/src/db/assets.ts#L84)                                              |
+| [F019](#f019) | 职责、身份与外部边界 | P2 / 边界与合同可维护性     | 中：这是停止粒度的可选合同增强，不是已证明违反当前批次合同                                               | 停机门应位于每条 outbox publication 的发起点                               | [`apps/server/src/db/command-publication.ts:14–47`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/server/src/db/command-publication.ts#L14)                    |
+| [F020](#f020) | 职责、身份与外部边界 | P2 / 边界与合同可维护性     | 高（静态判断；不代表动态复现）                                                                           | 观察 cursor 文档不可把 thread publication 与 run ordinal 混为一谈          | [`apps/server/src/http.ts:375–390`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/server/src/http.ts#L375)                                                     |
+| [F021](#f021) | 职责、身份与外部边界 | P2 / 边界与验收             | 高（静态证据；拟议实现未验证）                                                                           | bucket名称准入不应只存在于本地provisioning程序                             | [`packages/config/src/env.ts:50–55`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/packages/config/src/env.ts#L50)                                                  |
+| [F022](#f022) | 职责、身份与外部边界 | P2 / 边界与合同可维护性     | 高（静态判断；不代表动态复现）                                                                           | 文件名合同允许孤立 surrogate，但下载 header 编码拒绝它                     | [`packages/contract/src/file-name.ts:3–15`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/packages/contract/src/file-name.ts#L3)                                    |
+| [F023](#f023) | 职责、身份与外部边界 | P2 / 边界与验收             | 高（静态证据；拟议实现未验证）                                                                           | legacy assignment的CLI输出与trusted API原因应分开                          | [`scripts/assign-legacy-threads.ts:34–41`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/scripts/assign-legacy-threads.ts#L34)                                      |
+| [F024](#f024) | 职责、身份与外部边界 | P2 / 边界与验收             | 高（静态证据；拟议实现未验证）                                                                           | generate/verify参数应在分配fixture前明确拒绝                               | [`scripts/database-check.sh:4–8`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/scripts/database-check.sh#L4)                                                       |
+| [F025](#f025) | 职责、身份与外部边界 | P3 / 责任与表达可读性       | 高（静态判断）                                                                                           | 独立测试资源的 cleanup 应互不阻止并保留全部失败                            | [`tests/sandbox/e2b.test.ts:193–196`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/sandbox/e2b.test.ts#L193)                                                 |
+| [F026](#f026) | 职责、身份与外部边界 | P3 / 责任与表达可读性       | 高（静态判断）                                                                                           | restart shell cleanup 不覆盖原始失败或信号状态                             | [`tests/sandbox/restart-check.sh:11–44`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/sandbox/restart-check.sh#L11)                                          |
+| [F027](#f027) | 代码形状与阅读节奏   | P3 / 可读性                 | 高                                                                                                       | 生成 artifact 树的递归归并使用直接循环                                     | [`.github/verify-api.ts:6–25`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/.github/verify-api.ts#L6)                                                              |
+| [F028](#f028) | 代码形状与阅读节奏   | P3 / 可读性                 | 高                                                                                                       | 明确采用 100 列，但把列宽视为排版预算而非重构规则                          | [`.prettierrc.json:1–5`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/.prettierrc.json#L1)                                                                         |
+| [F029](#f029) | 代码形状与阅读节奏   | P3 / 责任与表达可读性       | 高（静态判断）                                                                                           | 并发 fixture 使用原生 Promise.withResolvers 表达 latch                     | [`apps/agent/src/execute-run.test.ts:14–21`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/execute-run.test.ts#L14)                                  |
+| [F030](#f030) | 代码形状与阅读节奏   | P3 / 可读性                 | 高                                                                                                       | diagnose 的默认分类从类型/默认参数交界移到函数体                           | [`apps/agent/src/execute-run.ts:200–218`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/execute-run.ts#L200)                                         |
+| [F031](#f031) | 代码形状与阅读节奏   | P3 / 责任与表达可读性       | 高（静态判断）                                                                                           | 终态完成分支在本地证明 product，不使用跨条件 non-null assertion            | [`apps/agent/src/execute-run.ts:404–441`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/execute-run.ts#L404)                                         |
+| [F032](#f032) | 代码形状与阅读节奏   | P3 / 责任与表达可读性       | 高（静态判断）                                                                                           | tool outcome 的 mutative 政策不要靠位置 boolean 表达                       | [`apps/agent/src/execute-run.ts:493–510`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/execute-run.ts#L493)                                         |
+| [F033](#f033) | 代码形状与阅读节奏   | P3 / 可读性                 | 高                                                                                                       | import_file 的图片与普通文件结果采用分支提前返回                           | [`apps/agent/src/harness/file-tools.ts:34–54`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/harness/file-tools.ts#L34)                              |
+| [F034](#f034) | 代码形状与阅读节奏   | P3 / 责任与表达可读性       | 高（静态判断）                                                                                           | subprocess eval 只包含真正执行的入口 import                                | [`apps/agent/src/harness/pi.test.ts:503–514`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/harness/pi.test.ts#L503)                                 |
+| [F035](#f035) | 代码形状与阅读节奏   | P3 / 可读性                 | 高                                                                                                       | prompt 中资产投影先形成 public metadata 段落                               | [`apps/agent/src/harness/pi.ts:273–278`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/harness/pi.ts#L273)                                           |
+| [F036](#f036) | 代码形状与阅读节奏   | P3 / 可读性                 | 高                                                                                                       | canonical answer 文本归约与 history result 分成独立段落                    | [`apps/agent/src/harness/pi.ts:299–314`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/harness/pi.ts#L299)                                           |
+| [F037](#f037) | 代码形状与阅读节奏   | P3 / 可读性                 | 高                                                                                                       | 净化、固定实体映射和 Unicode 截断按线性阶段展开                            | [`apps/agent/src/harness/web-search.ts:22–56`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/harness/web-search.ts#L22)                              |
+| [F038](#f038) | 代码形状与阅读节奏   | P3 / 可读性                 | 高                                                                                                       | 在拥有 reader 的函数内显式写出 bytes→text→JSON 三步                        | [`apps/agent/src/harness/web-search.ts:138–146`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/harness/web-search.ts#L138)                           |
+| [F039](#f039) | 代码形状与阅读节奏   | P3 / 可读性                 | 高                                                                                                       | 认证 headers 的互斥策略用显式赋值而不是条件 spread                         | [`apps/agent/src/harness/web-search.ts:165–171`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/harness/web-search.ts#L165)                           |
+| [F040](#f040) | 代码形状与阅读节奏   | P3 / 可读性                 | 高                                                                                                       | 给搜索配额与响应预算一组模块私有政策名字                                   | [`apps/agent/src/harness/web-search.ts:192–204`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/harness/web-search.ts#L192)                           |
+| [F041](#f041) | 代码形状与阅读节奏   | P3 / 可读性                 | 中：只是局部阅读次序改善，不是修复错误                                                                   | 把每个 run 的可选超时一次投影成执行 options                                | [`apps/agent/src/run-loop.ts:32–41`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/run-loop.ts#L32)                                                  |
+| [F042](#f042) | 代码形状与阅读节奏   | P3 / 可读性                 | 高                                                                                                       | 两个同样的 abortable polling 实现共用一个生命周期 helper                   | [`apps/agent/src/run-loop.ts:89–100`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/run-loop.ts#L89)                                                 |
+| [F043](#f043) | 代码形状与阅读节奏   | P3 / 可读性                 | 高                                                                                                       | Worker 的 imports 按外部边界与本地依赖形成稳定段落                         | [`apps/agent/src/worker.ts:1–23`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/worker.ts#L1)                                                        |
+| [F044](#f044) | 代码形状与阅读节奏   | P3 / 可读性                 | 高                                                                                                       | 把测试赋值能力直接写成三个可选字段                                         | [`apps/agent/src/worker.ts:25–27`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/worker.ts#L25)                                                      |
+| [F045](#f045) | 代码形状与阅读节奏   | P3 / 可读性                 | 高                                                                                                       | 用惰性的空值默认表达启动能力选择                                           | [`apps/agent/src/worker.ts:34–41`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/worker.ts#L34)                                                      |
+| [F046](#f046) | 代码形状与阅读节奏   | P3 / 可读性                 | 高                                                                                                       | 连接配置重复的 Pick 交集应有一个 owner 内名字                              | [`apps/agent/src/worker.ts:158–163`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/worker.ts#L158)                                                   |
+| [F047](#f047) | 代码形状与阅读节奏   | P3 / 可读性                 | 高                                                                                                       | 健康阶段的优先级不要藏在三层 ternary 中                                    | [`apps/agent/src/worker.ts:195–205`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/worker.ts#L195)                                                   |
+| [F048](#f048) | 代码形状与阅读节奏   | P3 / 表达与测试可读性       | 高（静态判断；不代表动态复现）                                                                           | 生成资产预算验证用单次具名累计区分 legacy 与 current                       | [`apps/server/src/assets/files.ts:75–109`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/server/src/assets/files.ts#L75)                                       |
+| [F049](#f049) | 代码形状与阅读节奏   | P3 / 可读性                 | 高                                                                                                       | download header 的 RFC5987 编码从超长插值里移出                            | [`apps/server/src/assets/http.ts:93–102`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/server/src/assets/http.ts#L93)                                         |
+| [F050](#f050) | 代码形状与阅读节奏   | P3 / 表达与测试可读性       | 高（静态判断；不代表动态复现）                                                                           | SSE 最后一帧的元数据投影与 wire framing 应是两个可见阶段                   | [`apps/server/src/conversation/event-stream.ts:331–340`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/server/src/conversation/event-stream.ts#L331)           |
+| [F051](#f051) | 代码形状与阅读节奏   | P3 / 可读性                 | 中高：需编译确认 inferred contract 可写                                                                  | completion 的可选字段用具名白名单对象组装                                  | [`apps/server/src/conversation/execution-receipts.ts:20–30`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/server/src/conversation/execution-receipts.ts#L20)  |
+| [F052](#f052) | 代码形状与阅读节奏   | P3 / 表达与测试可读性       | 高（静态判断；不代表动态复现）                                                                           | AG-UI frame identity 的消息维度先命名再组装                                | [`apps/server/src/conversation/public-run-events.ts:62–69`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/server/src/conversation/public-run-events.ts#L62)    |
+| [F053](#f053) | 代码形状与阅读节奏   | P3 / 表达与测试可读性       | 高（静态判断；不代表动态复现）                                                                           | 失败摘要与共用恢复步骤分开呈现，保留不同 reason                            | [`apps/server/src/conversation/public-run-events.ts:152–165`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/server/src/conversation/public-run-events.ts#L152) |
+| [F054](#f054) | 代码形状与阅读节奏   | P3 / 可读性                 | 高：两段循环保留原覆盖顺序，不需要假定相同键永远不存在                                                   | 终态 outcome map 用两段直接循环替代双链、spread 与 tuple 断言              | [`apps/server/src/db/conversations.ts:162–184`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/server/src/db/conversations.ts#L162)                             |
+| [F055](#f055) | 代码形状与阅读节奏   | P3 / 可读性                 | 高                                                                                                       | readActiveRuns 的 running / terminal SQL 用 SQL 自己的多行结构             | [`apps/server/src/db/conversations.ts:241–250`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/server/src/db/conversations.ts#L241)                             |
+| [F056](#f056) | 代码形状与阅读节奏   | P3 / 可读性                 | 高                                                                                                       | 活动 run 状态优先级用局部变量明确声明                                      | [`apps/server/src/db/conversations.ts:253–264`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/server/src/db/conversations.ts#L253)                             |
+| [F057](#f057) | 代码形状与阅读节奏   | P3 / 表达与测试可读性       | 高（静态判断；不代表动态复现）                                                                           | 完成消息写入的主体不必整段缩进在唯一 kind 条件内                           | [`apps/server/src/db/execution-events.ts:173–194`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/server/src/db/execution-events.ts#L173)                       |
+| [F058](#f058) | 代码形状与阅读节奏   | P3 / 表达与测试可读性       | 高（静态判断；不代表动态复现）                                                                           | 重放的五条 identity 对照不必先变成匿名 tuple 矩阵                          | [`apps/server/src/db/submissions.ts:146–152`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/server/src/db/submissions.ts#L146)                                 |
+| [F059](#f059) | 代码形状与阅读节奏   | P3 / 表达与测试可读性       | 高（静态判断；不代表动态复现）                                                                           | 保留位置的 upload 与 generated 策略用明确分支赋值                          | [`apps/server/src/db/submissions.ts:179–187`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/server/src/db/submissions.ts#L179)                                 |
+| [F060](#f060) | 代码形状与阅读节奏   | P3 / 可读性                 | 高                                                                                                       | OpenAPI SDK 兼容断言用一个 owner 内 type alias 表达                        | [`scripts/generate-api.ts:29–37`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/scripts/generate-api.ts#L29)                                                        |
+| [F061](#f061) | 代码形状与阅读节奏   | P3 / 可读性                 | 高（静态证据；实际失败后果未运行复现）                                                                   | 关系完整性矩阵用具名 case，而不是依赖四槽 tuple 位置                       | [`tests/integration/relational-integrity.test.ts:180–217`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/integration/relational-integrity.test.ts#L180)       |
+| [F062](#f062) | 代码形状与阅读节奏   | P3 / 可读性                 | 高（静态证据；实际失败后果未运行复现）                                                                   | 三个 local model fixtures 只共享 SSE framing，答案与工具叙事继续各自独立   | [`tests/integration/runtime.test.ts:60–68`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/integration/runtime.test.ts#L60)                                    |
+| [F063](#f063) | 代码形状与阅读节奏   | P3 / 可读性                 | 高（静态证据；实际失败后果未运行复现）                                                                   | indexed corruption 场景的值选择显示真实 identity 来源，不用右移三元阶梯    | [`tests/integration/submission.test.ts:333–338`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/integration/submission.test.ts#L333)                           |
+| [F064](#f064) | 代码形状与阅读节奏   | P3 / 可维护性               | 高（静态证据；拟议实现未验证）                                                                           | 让四种fixture凭据旋转显示成四条sed clause                                  | [`tests/scripts/deployment-check.sh:159–163`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/scripts/deployment-check.sh#L159)                                 |
+| [F065](#f065) | 代码形状与阅读节奏   | P3 / 可维护性               | 高（静态证据；拟议实现未验证）                                                                           | 停止进程的diagnostic应只采集成一个快照                                     | [`tests/scripts/production-runtime.test.ts:228–236`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/scripts/production-runtime.test.ts#L228)                   |
+| [F066](#f066) | 代码形状与阅读节奏   | P3 / fixture 状态与表达形状 | 高：requests 的唯一消费者是 length                                                                       | 本地工具模型只记住 request ordinal，不维护无人读取的完整请求历史           | [`tests/storage/assets.test.ts:413–479`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/storage/assets.test.ts#L413)                                           |
+| [F067](#f067) | 测试与工具链的表达   | P3 / 责任与表达可读性       | 高（静态判断）                                                                                           | budget fixture 的闭合场景应与实际 admission 政策一致                       | [`apps/agent/src/harness/pi.test.ts:1224–1287`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/harness/pi.test.ts#L1224)                              |
+| [F068](#f068) | 测试与工具链的表达   | P3 / 责任与表达可读性       | 高（静态判断）                                                                                           | WorkerProcess 的 shutdown promise 应有未完成 owned-task 回归               | [`apps/agent/src/worker.test.ts:5–43`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/worker.test.ts#L5)                                              |
+| [F069](#f069) | 测试与工具链的表达   | P3 / 表达与测试可读性       | 高（静态判断；不代表动态复现）                                                                           | upload 文档测试应核对全部 MIME，而不是只测一正一负                         | [`apps/server/src/http.test.ts:18–25`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/server/src/http.test.ts#L18)                                              |
+| [F070](#f070) | 测试与工具链的表达   | P2 / 边界与验收             | 高（静态证据；拟议实现未验证）                                                                           | 无需凭据的脚本回归应有同一个本地/CI入口                                    | [`package.json:11–17`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/package.json#L11)                                                                              |
+| [F071](#f071) | 测试与工具链的表达   | P3 / 表达与测试可读性       | 高（静态判断；不代表动态复现）                                                                           | native/foreign 一致性断言需要独立的预期真值                                | [`packages/contract/src/execution-schema.test.ts:34–68`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/packages/contract/src/execution-schema.test.ts#L34)          |
+| [F072](#f072) | 测试与工具链的表达   | P2 / 边界与验收             | 高（静态证据；拟议实现未验证）                                                                           | native PUT测试需钉住immutable条件、metadata与单次尝试                      | [`packages/object-storage/src/objects.test.ts:30–72`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/packages/object-storage/src/objects.test.ts#L30)                |
+| [F073](#f073) | 测试与工具链的表达   | P2 / 测试边界               | 高（静态证据；实际失败后果未运行复现）                                                                   | 第二个 administrative child 与第一个一样由 test owner 设 watchdog 并 join  | [`tests/integration/administration.test.ts:72–113`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/integration/administration.test.ts#L72)                     |
+| [F074](#f074) | 测试与工具链的表达   | P2 / 测试边界               | 高（静态证据；实际失败后果未运行复现）                                                                   | 迁移命令断言先证明 outbox/inbox 两份记录都保留，再检查独立 wire 形状       | [`tests/integration/assets-migration.test.ts:244–259`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/integration/assets-migration.test.ts#L244)               |
+| [F075](#f075) | 测试与工具链的表达   | P2 / 测试边界               | 高（静态证据；实际失败后果未运行复现）                                                                   | 清理序列复用现有 settleTestCleanup，而不是首个 DELETE 失败就跳过余项       | [`tests/integration/database.test.ts:6–24`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/integration/database.test.ts#L6)                                    |
+| [F076](#f076) | 测试与工具链的表达   | P2 / 测试边界               | 高（静态证据；实际失败后果未运行复现）                                                                   | fixture 的 abort 等待需与同文件 late-quarantine 场景一样处理已发生的 abort | [`tests/integration/execute-run.test.ts:136–140`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/integration/execute-run.test.ts#L136)                         |
+| [F077](#f077) | 测试与工具链的表达   | P2 / 测试边界               | 高（静态证据；实际失败后果未运行复现）                                                                   | 失去 fence 的慢 cleanup 测试必须在 assertion 失败后也释放 sandbox gate     | [`tests/integration/execute-run.test.ts:282–316`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/integration/execute-run.test.ts#L282)                         |
+| [F078](#f078) | 测试与工具链的表达   | P2 / 测试边界               | 高（静态证据；实际失败后果未运行复现）                                                                   | canonical inbox 的 oracle 不再对 actual 与 expected 同时运行被测 parser    | [`tests/integration/execution-store.test.ts:861–861`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/integration/execution-store.test.ts#L861)                 |
+| [F079](#f079) | 测试与工具链的表达   | P2 / 测试边界               | 高（静态证据；实际失败后果未运行复现）                                                                   | Postgres proxy 创建 owner 必须把 listen error 接到 setup Promise           | [`tests/integration/postgres-proxy-fixture.ts:41–44`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/integration/postgres-proxy-fixture.ts#L41)                |
+| [F080](#f080) | 测试与工具链的表达   | P2 / 测试边界               | 高（静态证据；实际失败后果未运行复现）                                                                   | 并发fixture接入应先收齐sibling结果，再按owner关闭Redis/SQL资源             | [`tests/integration/redis.test.ts:19–19`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/integration/redis.test.ts#L19)                                        |
+| [F081](#f081) | 测试与工具链的表达   | P2 / 测试边界               | 高（静态证据；实际失败后果未运行复现）                                                                   | SSE 顺序断言先证明两种事件都存在，避免 -1 充当正确先后                     | [`tests/integration/run-scoped-observation.test.ts:254–256`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/integration/run-scoped-observation.test.ts#L254)   |
+| [F082](#f082) | 测试与工具链的表达   | P2 / 测试边界               | 高（静态证据；实际失败后果未运行复现）                                                                   | runtime submit 的身份 setup rejection 不应跳过自己打开的数据库关闭         | [`tests/integration/runtime.test.ts:92–95`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/integration/runtime.test.ts#L92)                                    |
+| [F083](#f083) | 测试与工具链的表达   | P2 / 测试边界               | 高（静态证据；实际失败后果未运行复现）                                                                   | runtime answer polling 证明 assistant 消息，而非响应任意位置含有 canary    | [`tests/integration/runtime.test.ts:116–128`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/integration/runtime.test.ts#L116)                                 |
+| [F084](#f084) | 测试与工具链的表达   | P2 / 测试边界               | 高（静态证据；实际失败后果未运行复现）                                                                   | 会话到期三种场景创建的官方身份也应加入本套件清理账本                       | [`tests/integration/thread-lifecycle.test.ts:47–70`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/integration/thread-lifecycle.test.ts#L47)                  |
+| [F085](#f085) | 测试与工具链的表达   | P2 / 测试边界               | 高（静态证据；实际失败后果未运行复现）                                                                   | archive/send/replay barrier 在失败路径也收齐已发出的真实 writer            | [`tests/integration/thread-lifecycle.test.ts:295–316`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/integration/thread-lifecycle.test.ts#L295)               |
+| [F086](#f086) | 测试与工具链的表达   | P2 / 边界与验收             | 高（静态证据；拟议实现未验证）                                                                           | readiness polling同时拥有monotonic预算和每次请求截止                       | [`tests/scripts/deployment-web.test.ts:4–18`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/scripts/deployment-web.test.ts#L4)                                |
+| [F087](#f087) | 测试与工具链的表达   | P2 / 边界与验收             | 高（静态证据；拟议实现未验证）                                                                           | daemon probe需要在Docker client超时前登记可定位身份                        | [`tests/scripts/production-runtime.test.ts:157–179`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/scripts/production-runtime.test.ts#L157)                   |
+| [F088](#f088) | 测试与工具链的表达   | P3 / 测试叙述与职责         | 高：已完整读两份 storage tests；不是功能缺陷                                                             | 上传 fixture 只保证初始可用状态；重放和冲突应由命名测试自己拥有            | [`tests/storage/assets.test.ts:92–118`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/storage/assets.test.ts#L92)                                             |
+| [F089](#f089) | 测试与工具链的表达   | P2 / 边界与验收             | 高（静态证据；拟议实现未验证）                                                                           | 可执行CI TypeScript应进入现有compiler/lint边界                             | [`tsconfig.json:30–36`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tsconfig.json#L30)                                                                            |
 
 ## 5. 逐项对照：现在 → 为什么不好 → 怎么改 → 改后形状
 
@@ -186,7 +186,7 @@
 - **适用置信度**：高（静态判断）。
 - **符号**：`execution capability declarations`。
 
-**现在（连续原文）** — [`apps/agent/src/execute-run.ts:1–147`](../apps/agent/src/execute-run.ts#L1)
+**现在（连续原文）** — [`apps/agent/src/execute-run.ts:1–147`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/execute-run.ts#L1)
 
 ```ts
 import { HistoryLimitError } from './harness/pi-history'
@@ -613,7 +613,7 @@ import type {
 - **适用置信度**：高（静态判断）。
 - **符号**：`stop`。
 
-**现在（连续原文）** — [`apps/agent/src/execute-run.ts:164–178`](../apps/agent/src/execute-run.ts#L164)
+**现在（连续原文）** — [`apps/agent/src/execute-run.ts:164–178`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/execute-run.ts#L164)
 
 ```ts
 function stop(execution: Execution, reason: StopReason) {
@@ -730,7 +730,7 @@ function stop(execution: Execution, reason: StopReason) {
 - **适用置信度**：高（静态判断）。
 - **符号**：`runTurn budget state / admitDelta`。
 
-**现在（连续原文）** — [`apps/agent/src/harness/pi.ts:219–258`](../apps/agent/src/harness/pi.ts#L219)
+**现在（连续原文）** — [`apps/agent/src/harness/pi.ts:219–258`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/harness/pi.ts#L219)
 
 ```ts
   let budgetError: Error | undefined
@@ -833,7 +833,7 @@ timer = setTimeout(
 - **适用置信度**：高（静态判断；不代表动态复现）。
 - **符号**：`json(name)`。
 
-**现在（连续原文）** — [`apps/server/src/http.ts:60–62`](../apps/server/src/http.ts#L60)
+**现在（连续原文）** — [`apps/server/src/http.ts:60–62`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/server/src/http.ts#L60)
 
 ```ts
 const json = (name: string) => ({
@@ -912,7 +912,7 @@ const json = (name: PublicSchemaName) => ({
 - **适用置信度**：高（静态判断；不代表动态复现）。
 - **符号**：`upload route handler`。
 
-**现在（连续原文）** — [`apps/server/src/http.ts:491–494`](../apps/server/src/http.ts#L491)
+**现在（连续原文）** — [`apps/server/src/http.ts:491–494`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/server/src/http.ts#L491)
 
 ```ts
       await c.env.db
@@ -1025,7 +1025,7 @@ export async function uploadAsset(
 - **适用置信度**：高（静态证据；拟议实现未验证）。
 - **符号**：`storage-init Bash program embedded in Compose`。
 
-**现在（连续原文）** — [`compose.yaml:120–168`](../compose.yaml#L120)
+**现在（连续原文）** — [`compose.yaml:120–168`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/compose.yaml#L120)
 
 ```yaml
     entrypoint: [bash, -ec]
@@ -1211,7 +1211,7 @@ esac
 - **适用置信度**：高（静态证据；拟议实现未验证）。
 - **符号**：`server polling default; duplicate worker policy at line130`。
 
-**现在（连续原文）** — [`packages/config/src/env.ts:95–99`](../packages/config/src/env.ts#L95)
+**现在（连续原文）** — [`packages/config/src/env.ts:95–99`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/packages/config/src/env.ts#L95)
 
 ```ts
   GITHUB_CLIENT_ID: requiredString,
@@ -1275,7 +1275,7 @@ POLL_MS: pollingInterval,
 - **适用置信度**：高（静态判断；不代表动态复现）。
 - **符号**：`ASSET_MAX_INPUT_FILES and messageSubmissionSchema.assetIDs`。
 
-**现在（连续原文）** — [`packages/contract/src/execution.ts:25–26`](../packages/contract/src/execution.ts#L25)
+**现在（连续原文）** — [`packages/contract/src/execution.ts:25–26`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/packages/contract/src/execution.ts#L25)
 
 ```ts
 const ASSET_MAX_INPUT_FILES = 16
@@ -1341,7 +1341,7 @@ assetIDs: z.array(uuid).max(ASSET_MAX_INPUT_FILES).default([]).meta({
 - **符号**：`startInputSchema.text; analogous completedEventSchema.text`。
 - **是否改变合同**：是：收紧私有执行wire可接受字符集合，并使生成JSON Schema改变；先核对SDK delta Unicode分片方式及现有消费者，不能按排版提交静默改变。
 
-**现在（连续原文）** — [`packages/contract/src/execution.ts:28–43`](../packages/contract/src/execution.ts#L28)
+**现在（连续原文）** — [`packages/contract/src/execution.ts:28–43`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/packages/contract/src/execution.ts#L28)
 
 ```ts
 const startInputSchema = z
@@ -1441,7 +1441,7 @@ delta: productTextSchema,
 - **适用置信度**：高（静态判断）。
 - **符号**：`acceptCancel`。
 
-**现在（连续原文）** — [`apps/agent/src/db/command-acceptance.ts:128–145`](../apps/agent/src/db/command-acceptance.ts#L128)
+**现在（连续原文）** — [`apps/agent/src/db/command-acceptance.ts:128–145`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/db/command-acceptance.ts#L128)
 
 ```ts
 
@@ -1534,7 +1534,7 @@ async function acceptCancel(tx: Transaction<DB>, command: CancelCommand) {
 - **适用置信度**：中（适用前提见说明）。
 - **符号**：`ExecutionWrites.complete / fail / cancel`。
 
-**现在（连续原文）** — [`apps/agent/src/execute-run.ts:93–103`](../apps/agent/src/execute-run.ts#L93)
+**现在（连续原文）** — [`apps/agent/src/execute-run.ts:93–103`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/execute-run.ts#L93)
 
 ```ts
   appendText: (lease: ExecutionLease, delta: string) => Promise<boolean>
@@ -1639,7 +1639,7 @@ return accepted
 - **适用置信度**：高（静态判断）。
 - **符号**：`quarantineExecution`。
 
-**现在（连续原文）** — [`apps/agent/src/execute-run.ts:548–560`](../apps/agent/src/execute-run.ts#L548)
+**现在（连续原文）** — [`apps/agent/src/execute-run.ts:548–560`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/execute-run.ts#L548)
 
 ```ts
 
@@ -1762,7 +1762,7 @@ async function quarantineExecution(
 - **符号**：`executeTool / readTool / writeTool`。
 - **是否改变合同**：是：受信SandboxTools adapter获得owner与SDK联合取消权，不再只收到SDKsignal；生产E2B已有独立owner合并。需证明两方取消和SDK生命周期都兼容，不能称已修复生产继续spending问题。
 
-**现在（连续原文）** — [`apps/agent/src/harness/pi.ts:88–155`](../apps/agent/src/harness/pi.ts#L88)
+**现在（连续原文）** — [`apps/agent/src/harness/pi.ts:88–155`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/harness/pi.ts#L88)
 
 ```ts
 function executeTool(tools: SandboxTools, signal: AbortSignal) {
@@ -1901,7 +1901,7 @@ signal: sdkSignal === undefined ? signal : AbortSignal.any([signal, sdkSignal]),
 - **适用置信度**：高（静态判断）。
 - **符号**：`assignedSession`。
 
-**现在（连续原文）** — [`apps/agent/src/harness/pi.ts:156–209`](../apps/agent/src/harness/pi.ts#L156)
+**现在（连续原文）** — [`apps/agent/src/harness/pi.ts:156–209`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/harness/pi.ts#L156)
 
 ```ts
 
@@ -2096,7 +2096,7 @@ async function assignedSession(
 - **适用置信度**：中：fresh identity runtime不可变性硬化；当前无实际修改且消费port可能已静态readonly，不是已发现跨租户风险。
 - **符号**：`E2BSandboxSession.nativeRef / constructor`。
 
-**现在（连续原文）** — [`apps/agent/src/sandbox/e2b.ts:58–69`](../apps/agent/src/sandbox/e2b.ts#L58)
+**现在（连续原文）** — [`apps/agent/src/sandbox/e2b.ts:58–69`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/sandbox/e2b.ts#L58)
 
 ```ts
 class E2BSandboxSession implements SandboxSessionPort {
@@ -2165,7 +2165,7 @@ this.nativeRef = Object.freeze({ provider: 'e2b', id: remote.sandboxId })
 - **适用置信度**：中（适用前提见说明）。
 - **符号**：`WorkerProcess.connectRedis`。
 
-**现在（连续原文）** — [`apps/agent/src/worker.ts:259–268`](../apps/agent/src/worker.ts#L259)
+**现在（连续原文）** — [`apps/agent/src/worker.ts:259–268`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/worker.ts#L259)
 
 ```ts
   private async connectRedis() {
@@ -2217,7 +2217,7 @@ if (failures.length)
 - **适用置信度**：高。
 - **符号**：`cancelObservation`。
 
-**现在（连续原文）** — [`apps/server/src/conversation/http.ts:62–79`](../apps/server/src/conversation/http.ts#L62)
+**现在（连续原文）** — [`apps/server/src/conversation/http.ts:62–79`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/server/src/conversation/http.ts#L62)
 
 ```ts
 export async function cancelObservation(
@@ -2321,7 +2321,7 @@ export async function requestRunCancellation(
 - **适用置信度**：高（静态判断；不代表动态复现）。
 - **符号**：`completeAsset signature`。
 
-**现在（连续原文）** — [`apps/server/src/db/assets.ts:84–89`](../apps/server/src/db/assets.ts#L84)
+**现在（连续原文）** — [`apps/server/src/db/assets.ts:84–89`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/server/src/db/assets.ts#L84)
 
 ```ts
 export async function completeAsset(
@@ -2417,7 +2417,7 @@ return await completeAsset(db, query, {
 - **符号**：`CommandBatch / publishCommands`。
 - **是否改变合同**：是：从batch-level stopping改为per-publication stopping；需要先确认停止合同。已发IO/COMMIT仍正常结算，不能以abort推断没有后果。
 
-**现在（连续原文）** — [`apps/server/src/db/command-publication.ts:14–47`](../apps/server/src/db/command-publication.ts#L14)
+**现在（连续原文）** — [`apps/server/src/db/command-publication.ts:14–47`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/server/src/db/command-publication.ts#L14)
 
 ```ts
 type CommandBatch = Readonly<{
@@ -2569,7 +2569,7 @@ await publishCommands(db, {
 - **适用置信度**：高（静态判断；不代表动态复现）。
 - **符号**：`observeRun.description and Last-Event-ID.description`。
 
-**现在（连续原文）** — [`apps/server/src/http.ts:375–390`](../apps/server/src/http.ts#L375)
+**现在（连续原文）** — [`apps/server/src/http.ts:375–390`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/server/src/http.ts#L375)
 
 ```ts
       description:
@@ -2625,7 +2625,7 @@ await publishCommands(db, {
 - **符号**：`objectStorage configuration shape`。
 - **是否改变合同**：配置合同收紧：原先非空但格式更宽的external bucket被拒绝。先确认所有支持的S3-compatible endpoints采用这组portable限制；不是无行为变化重构。
 
-**现在（连续原文）** — [`packages/config/src/env.ts:50–55`](../packages/config/src/env.ts#L50)
+**现在（连续原文）** — [`packages/config/src/env.ts:50–55`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/packages/config/src/env.ts#L50)
 
 ```ts
 const objectStorage = {
@@ -2705,7 +2705,7 @@ OBJECT_STORAGE_BUCKET: objectBucket,
 - **符号**：`fileNameSchema`。
 - **是否改变合同**：是：现有测试明确接受lone surrogate；改为拒绝是filename合同改变，不是保持行为的排版。需要评估旧数据与native/foreign兼容。
 
-**现在（连续原文）** — [`packages/contract/src/file-name.ts:3–15`](../packages/contract/src/file-name.ts#L3)
+**现在（连续原文）** — [`packages/contract/src/file-name.ts:3–15`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/packages/contract/src/file-name.ts#L3)
 
 ```ts
 export const fileNameSchema = z
@@ -2771,7 +2771,7 @@ export const fileNameSchema = z
 - **符号**：`administrative CLI entrypoint`。
 - **是否改变合同**：CLI的可见diagnostic/exit输出政策改变；exported trusted API保留全原因。现有administration child断言明确期待native原因，因此必须协调更新，不能宣称零行为diff。
 
-**现在（连续原文）** — [`scripts/assign-legacy-threads.ts:34–41`](../scripts/assign-legacy-threads.ts#L34)
+**现在（连续原文）** — [`scripts/assign-legacy-threads.ts:34–41`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/scripts/assign-legacy-threads.ts#L34)
 
 ```ts
 if (import.meta.main) {
@@ -2840,7 +2840,7 @@ if (import.meta.main) {
 - **符号**：`mode and forwarded argument admission`。
 - **是否改变合同**：新拒绝以前被忽略的generate/verify trailing args，exit2发生在allocation前。正常合法模式不变。
 
-**现在（连续原文）** — [`scripts/database-check.sh:4–8`](../scripts/database-check.sh#L4)
+**现在（连续原文）** — [`scripts/database-check.sh:4–8`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/scripts/database-check.sh#L4)
 
 ```sh
 mode=${1:-test}
@@ -2910,7 +2910,7 @@ esac
 - **适用置信度**：高（静态判断）。
 - **符号**：`network probe finally`。
 
-**现在（连续原文）** — [`tests/sandbox/e2b.test.ts:193–196`](../tests/sandbox/e2b.test.ts#L193)
+**现在（连续原文）** — [`tests/sandbox/e2b.test.ts:193–196`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/sandbox/e2b.test.ts#L193)
 
 ```ts
     } finally {
@@ -2961,7 +2961,7 @@ if (failures.length)
 - **符号**：`cleanup shell trap`。
 - **是否改变合同**：是：主失败且cleanup失败时退出码从1改为原主失败/信号码；仍非零。必须用shell harness验证，不伪称不改变可观察行为。
 
-**现在（连续原文）** — [`tests/sandbox/restart-check.sh:11–44`](../tests/sandbox/restart-check.sh#L11)
+**现在（连续原文）** — [`tests/sandbox/restart-check.sh:11–44`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/sandbox/restart-check.sh#L11)
 
 ```sh
 cleanup() {
@@ -3073,7 +3073,7 @@ CLEAN
 - **适用置信度**：高。
 - **符号**：`tree`。
 
-**现在（连续原文）** — [`.github/verify-api.ts:6–25`](../.github/verify-api.ts#L6)
+**现在（连续原文）** — [`.github/verify-api.ts:6–25`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/.github/verify-api.ts#L6)
 
 ```ts
 async function tree(directory: string): Promise<Record<string, string>> {
@@ -3144,7 +3144,7 @@ async function tree(directory: string): Promise<Record<string, string>> {
 - **适用置信度**：高。
 - **符号**：`Prettier configuration`。
 
-**现在（连续原文）** — [`.prettierrc.json:1–5`](../.prettierrc.json#L1)
+**现在（连续原文）** — [`.prettierrc.json:1–5`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/.prettierrc.json#L1)
 
 ```json
 {
@@ -3202,7 +3202,7 @@ async function tree(directory: string): Promise<Record<string, string>> {
 - **适用置信度**：高（静态判断）。
 - **符号**：`deferred`。
 
-**现在（连续原文）** — [`apps/agent/src/execute-run.test.ts:14–21`](../apps/agent/src/execute-run.test.ts#L14)
+**现在（连续原文）** — [`apps/agent/src/execute-run.test.ts:14–21`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/execute-run.test.ts#L14)
 
 ```ts
 function deferred<T>() {
@@ -3248,7 +3248,7 @@ function deferred<Value>() {
 - **适用置信度**：高。
 - **符号**：`diagnose`。
 
-**现在（连续原文）** — [`apps/agent/src/execute-run.ts:200–218`](../apps/agent/src/execute-run.ts#L200)
+**现在（连续原文）** — [`apps/agent/src/execute-run.ts:200–218`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/execute-run.ts#L200)
 
 ```ts
 function diagnose(
@@ -3335,7 +3335,7 @@ function diagnose(
 - **符号**：`finishExecution`。
 - **是否改变合同**：仅内部不可能状态的日志数量会改变：guard移入try会新增安全diagnose。正常complete/cancel/fail与unknown COMMIT不变；若要完全保持日志合同需采用说明里的try前narrowing方案。
 
-**现在（连续原文）** — [`apps/agent/src/execute-run.ts:404–441`](../apps/agent/src/execute-run.ts#L404)
+**现在（连续原文）** — [`apps/agent/src/execute-run.ts:404–441`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/execute-run.ts#L404)
 
 ```ts
 async function finishExecution(
@@ -3466,7 +3466,7 @@ async function finishExecution(
 - **适用置信度**：高（静态判断）。
 - **符号**：`executeToolOperation`。
 
-**现在（连续原文）** — [`apps/agent/src/execute-run.ts:493–510`](../apps/agent/src/execute-run.ts#L493)
+**现在（连续原文）** — [`apps/agent/src/execute-run.ts:493–510`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/execute-run.ts#L493)
 
 ```ts
 async function executeToolOperation<Outcome>(
@@ -3601,7 +3601,7 @@ read: (request) => executeToolOperation(execution, () => tools.read(request), 'r
 - **适用置信度**：高。
 - **符号**：`fileToolDefinitions → import_file.execute`。
 
-**现在（连续原文）** — [`apps/agent/src/harness/file-tools.ts:34–54`](../apps/agent/src/harness/file-tools.ts#L34)
+**现在（连续原文）** — [`apps/agent/src/harness/file-tools.ts:34–54`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/harness/file-tools.ts#L34)
 
 ```ts
         const bytes = image ? file.bytes : undefined
@@ -3706,7 +3706,7 @@ return {
 - **适用置信度**：高（静态判断）。
 - **符号**：`invalid-history subprocess script`。
 
-**现在（连续原文）** — [`apps/agent/src/harness/pi.test.ts:503–514`](../apps/agent/src/harness/pi.test.ts#L503)
+**现在（连续原文）** — [`apps/agent/src/harness/pi.test.ts:503–514`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/harness/pi.test.ts#L503)
 
 ```ts
       const script = `
@@ -3765,7 +3765,7 @@ const script = `
 - **适用置信度**：高。
 - **符号**：`runTurn inputText`。
 
-**现在（连续原文）** — [`apps/agent/src/harness/pi.ts:273–278`](../apps/agent/src/harness/pi.ts#L273)
+**现在（连续原文）** — [`apps/agent/src/harness/pi.ts:273–278`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/harness/pi.ts#L273)
 
 ```ts
     const inputText =
@@ -3841,7 +3841,7 @@ ${JSON.stringify(assets)}`
 - **适用置信度**：高。
 - **符号**：`runTurn result`。
 
-**现在（连续原文）** — [`apps/agent/src/harness/pi.ts:299–314`](../apps/agent/src/harness/pi.ts#L299)
+**现在（连续原文）** — [`apps/agent/src/harness/pi.ts:299–314`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/harness/pi.ts#L299)
 
 ```ts
     const answer = session.messages.findLast(
@@ -3925,7 +3925,7 @@ return { text: finalText, history: structuredClone(history) }
 - **适用置信度**：高。
 - **符号**：`plainText`。
 
-**现在（连续原文）** — [`apps/agent/src/harness/web-search.ts:22–56`](../apps/agent/src/harness/web-search.ts#L22)
+**现在（连续原文）** — [`apps/agent/src/harness/web-search.ts:22–56`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/harness/web-search.ts#L22)
 
 ```ts
 function plainText(value: string, limit: number) {
@@ -4048,7 +4048,7 @@ function plainText(value: string, limit: number) {
 - **适用置信度**：高。
 - **符号**：`boundedBody`。
 
-**现在（连续原文）** — [`apps/agent/src/harness/web-search.ts:138–146`](../apps/agent/src/harness/web-search.ts#L138)
+**现在（连续原文）** — [`apps/agent/src/harness/web-search.ts:138–146`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/harness/web-search.ts#L138)
 
 ```ts
     const bytes = new Uint8Array(size)
@@ -4119,7 +4119,7 @@ return payload
 - **适用置信度**：高。
 - **符号**：`webSearchTool`。
 
-**现在（连续原文）** — [`apps/agent/src/harness/web-search.ts:165–171`](../apps/agent/src/harness/web-search.ts#L165)
+**现在（连续原文）** — [`apps/agent/src/harness/web-search.ts:165–171`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/harness/web-search.ts#L165)
 
 ```ts
   const transport = config.transport ?? fetch
@@ -4192,7 +4192,7 @@ if (config.authMode === 'keyless') {
 - **适用置信度**：高。
 - **符号**：`webSearchTool.execute`。
 
-**现在（连续原文）** — [`apps/agent/src/harness/web-search.ts:192–204`](../apps/agent/src/harness/web-search.ts#L192)
+**现在（连续原文）** — [`apps/agent/src/harness/web-search.ts:192–204`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/harness/web-search.ts#L192)
 
 ```ts
       const query = searchQuery.safeParse(params.query)
@@ -4295,7 +4295,7 @@ chunks.push(chunk.value)
 - **适用置信度**：中：只是局部阅读次序改善，不是修复错误。
 - **符号**：`runWorker.superviseRun`。
 
-**现在（连续原文）** — [`apps/agent/src/run-loop.ts:32–41`](../apps/agent/src/run-loop.ts#L32)
+**现在（连续原文）** — [`apps/agent/src/run-loop.ts:32–41`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/run-loop.ts#L32)
 
 ```ts
   async function superviseRun(lease: ExecutionLease) {
@@ -4380,7 +4380,7 @@ async function superviseRun(lease: ExecutionLease) {
 - **适用置信度**：高。
 - **符号**：`waitForPoll; duplicate execute-run.ts:239–250`。
 
-**现在（连续原文）** — [`apps/agent/src/run-loop.ts:89–100`](../apps/agent/src/run-loop.ts#L89)
+**现在（连续原文）** — [`apps/agent/src/run-loop.ts:89–100`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/run-loop.ts#L89)
 
 ```ts
 function waitForPoll(ms: number, signal: AbortSignal): Promise<void> {
@@ -4464,7 +4464,7 @@ export function waitForPoll(ms: number, signal: AbortSignal): Promise<void> {
 - **适用置信度**：高。
 - **符号**：`module imports`。
 
-**现在（连续原文）** — [`apps/agent/src/worker.ts:1–23`](../apps/agent/src/worker.ts#L1)
+**现在（连续原文）** — [`apps/agent/src/worker.ts:1–23`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/worker.ts#L1)
 
 ```ts
 import { once } from 'node:events'
@@ -4565,7 +4565,7 @@ import type { WorkerHealth } from './worker-health'
 - **适用置信度**：高。
 - **符号**：`WorkerAssignment`。
 
-**现在（连续原文）** — [`apps/agent/src/worker.ts:25–27`](../apps/agent/src/worker.ts#L25)
+**现在（连续原文）** — [`apps/agent/src/worker.ts:25–27`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/worker.ts#L25)
 
 ```ts
 type WorkerAssignment = Partial<
@@ -4629,7 +4629,7 @@ type WorkerAssignment = {
 - **适用置信度**：高。
 - **符号**：`startWorker`。
 
-**现在（连续原文）** — [`apps/agent/src/worker.ts:34–41`](../apps/agent/src/worker.ts#L34)
+**现在（连续原文）** — [`apps/agent/src/worker.ts:34–41`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/worker.ts#L34)
 
 ```ts
   const harness =
@@ -4697,7 +4697,7 @@ const {
 - **适用置信度**：高。
 - **符号**：`allocateWorkerProcess / WorkerProcess.constructor`。
 
-**现在（连续原文）** — [`apps/agent/src/worker.ts:158–163`](../apps/agent/src/worker.ts#L158)
+**现在（连续原文）** — [`apps/agent/src/worker.ts:158–163`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/worker.ts#L158)
 
 ```ts
 function allocateWorkerProcess(
@@ -4786,7 +4786,7 @@ function allocateWorkerProcess(
 - **适用置信度**：高。
 - **符号**：`WorkerProcess.health`。
 
-**现在（连续原文）** — [`apps/agent/src/worker.ts:195–205`](../apps/agent/src/worker.ts#L195)
+**现在（连续原文）** — [`apps/agent/src/worker.ts:195–205`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/worker.ts#L195)
 
 ```ts
   readonly health = (): WorkerHealth => {
@@ -4867,7 +4867,7 @@ readonly health = (): WorkerHealth => {
 - **适用置信度**：高（静态判断；不代表动态复现）。
 - **符号**：`validGeneratedAssets`。
 
-**现在（连续原文）** — [`apps/server/src/assets/files.ts:75–109`](../apps/server/src/assets/files.ts#L75)
+**现在（连续原文）** — [`apps/server/src/assets/files.ts:75–109`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/server/src/assets/files.ts#L75)
 
 ```ts
 export function validGeneratedAssets(
@@ -4963,7 +4963,7 @@ export function validGeneratedAssets(
 - **适用置信度**：高。
 - **符号**：`downloadAsset headers`。
 
-**现在（连续原文）** — [`apps/server/src/assets/http.ts:93–102`](../apps/server/src/assets/http.ts#L93)
+**现在（连续原文）** — [`apps/server/src/assets/http.ts:93–102`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/server/src/assets/http.ts#L93)
 
 ```ts
     return new Response(Buffer.from(bytes), {
@@ -5021,7 +5021,7 @@ return new Response(Buffer.from(bytes), {
 - **适用置信度**：高（静态判断；不代表动态复现）。
 - **符号**：`encodeFact`。
 
-**现在（连续原文）** — [`apps/server/src/conversation/event-stream.ts:331–340`](../apps/server/src/conversation/event-stream.ts#L331)
+**现在（连续原文）** — [`apps/server/src/conversation/event-stream.ts:331–340`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/server/src/conversation/event-stream.ts#L331)
 
 ```ts
 function encodeFact(cursor: string, frames: Event[], encoder: EventEncoder) {
@@ -5100,7 +5100,7 @@ function encodeFact(cursor: string, frames: Event[], encoder: EventEncoder) {
 - **适用置信度**：中高：需编译确认 inferred contract 可写。
 - **符号**：`publicEvent run-completed branch`。
 
-**现在（连续原文）** — [`apps/server/src/conversation/execution-receipts.ts:20–30`](../apps/server/src/conversation/execution-receipts.ts#L20)
+**现在（连续原文）** — [`apps/server/src/conversation/execution-receipts.ts:20–30`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/server/src/conversation/execution-receipts.ts#L20)
 
 ```ts
     case 'run-completed':
@@ -5176,7 +5176,7 @@ case 'run-completed': {
 - **适用置信度**：高（静态判断；不代表动态复现）。
 - **符号**：`projectPublicRunEvent.frames.map`。
 
-**现在（连续原文）** — [`apps/server/src/conversation/public-run-events.ts:62–69`](../apps/server/src/conversation/public-run-events.ts#L62)
+**现在（连续原文）** — [`apps/server/src/conversation/public-run-events.ts:62–69`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/server/src/conversation/public-run-events.ts#L62)
 
 ```ts
   return frames.map((frame) => ({
@@ -5229,7 +5229,7 @@ return frames.map((frame) => {
 - **适用置信度**：高（静态判断；不代表动态复现）。
 - **符号**：`failureMessage`。
 
-**现在（连续原文）** — [`apps/server/src/conversation/public-run-events.ts:152–165`](../apps/server/src/conversation/public-run-events.ts#L152)
+**现在（连续原文）** — [`apps/server/src/conversation/public-run-events.ts:152–165`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/server/src/conversation/public-run-events.ts#L152)
 
 ```ts
 function failureMessage(
@@ -5317,7 +5317,7 @@ function failureMessage(
 - **适用置信度**：高：两段循环保留原覆盖顺序，不需要假定相同键永远不存在。
 - **符号**：`snapshotOwnedMessages outcomes`。
 
-**现在（连续原文）** — [`apps/server/src/db/conversations.ts:162–184`](../apps/server/src/db/conversations.ts#L162)
+**现在（连续原文）** — [`apps/server/src/db/conversations.ts:162–184`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/server/src/db/conversations.ts#L162)
 
 ```ts
       const outcomes = new Map<
@@ -5410,7 +5410,7 @@ for (const terminal of terminals) {
 - **适用置信度**：高。
 - **符号**：`readActiveRuns SQL predicates`。
 
-**现在（连续原文）** — [`apps/server/src/db/conversations.ts:241–250`](../apps/server/src/db/conversations.ts#L241)
+**现在（连续原文）** — [`apps/server/src/db/conversations.ts:241–250`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/server/src/db/conversations.ts#L241)
 
 ```ts
     .select(
@@ -5485,7 +5485,7 @@ and e.payload ->> 'kind' in ('run-completed','run-cancelled','run-failed')
 - **适用置信度**：高。
 - **符号**：`readActiveRuns result mapping`。
 
-**现在（连续原文）** — [`apps/server/src/db/conversations.ts:253–264`](../apps/server/src/db/conversations.ts#L253)
+**现在（连续原文）** — [`apps/server/src/db/conversations.ts:253–264`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/server/src/db/conversations.ts#L253)
 
 ```ts
   return runs.map((run) => {
@@ -5556,7 +5556,7 @@ return runs.map((run) => {
 - **适用置信度**：高（静态判断；不代表动态复现）。
 - **符号**：`storeFinalMessage`。
 
-**现在（连续原文）** — [`apps/server/src/db/execution-events.ts:173–194`](../apps/server/src/db/execution-events.ts#L173)
+**现在（连续原文）** — [`apps/server/src/db/execution-events.ts:173–194`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/server/src/db/execution-events.ts#L173)
 
 ```ts
 async function storeFinalMessage(
@@ -5670,7 +5670,7 @@ async function storeFinalMessage(
 - **适用置信度**：高（静态判断；不代表动态复现）。
 - **符号**：`acceptedMessage matchingHeaders`。
 
-**现在（连续原文）** — [`apps/server/src/db/submissions.ts:146–152`](../apps/server/src/db/submissions.ts#L146)
+**现在（连续原文）** — [`apps/server/src/db/submissions.ts:146–152`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/server/src/db/submissions.ts#L146)
 
 ```ts
   const matchingHeaders = [
@@ -5728,7 +5728,7 @@ const matchingHeaders =
 - **适用置信度**：高（静态判断；不代表动态复现）。
 - **符号**：`retainedReferencesMatch.locationMatches`。
 
-**现在（连续原文）** — [`apps/server/src/db/submissions.ts:179–187`](../apps/server/src/db/submissions.ts#L179)
+**现在（连续原文）** — [`apps/server/src/db/submissions.ts:179–187`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/server/src/db/submissions.ts#L179)
 
 ```ts
     const locationMatches =
@@ -5783,7 +5783,7 @@ if (asset.source === 'upload') {
 - **适用置信度**：高。
 - **符号**：`generateDocuments component schema adapter`。
 
-**现在（连续原文）** — [`scripts/generate-api.ts:29–37`](../scripts/generate-api.ts#L29)
+**现在（连续原文）** — [`scripts/generate-api.ts:29–37`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/scripts/generate-api.ts#L29)
 
 ```ts
       components: {
@@ -5860,7 +5860,7 @@ components: {
 - **适用置信度**：高（静态证据；实际失败后果未运行复现）。
 - **符号**：`invalid relational-integrity cases`。
 
-**现在（连续原文）** — [`tests/integration/relational-integrity.test.ts:180–217`](../tests/integration/relational-integrity.test.ts#L180)
+**现在（连续原文）** — [`tests/integration/relational-integrity.test.ts:180–217`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/integration/relational-integrity.test.ts#L180)
 
 ```ts
 const invalid = [
@@ -6002,7 +6002,7 @@ const invalid = [
 - **适用置信度**：高（静态证据；实际失败后果未运行复现）。
 - **符号**：`localModel fetch response / shared model SSE framing`。
 
-**现在（连续原文）** — [`tests/integration/runtime.test.ts:60–68`](../tests/integration/runtime.test.ts#L60)
+**现在（连续原文）** — [`tests/integration/runtime.test.ts:60–68`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/integration/runtime.test.ts#L60)
 
 ```ts
       return new Response(
@@ -6161,7 +6161,7 @@ return modelStream(envelopes)
 - **适用置信度**：高（静态证据；实际失败后果未运行复现）。
 - **符号**：`exact replay rejects inconsistent indexed header: value`。
 
-**现在（连续原文）** — [`tests/integration/submission.test.ts:333–338`](../tests/integration/submission.test.ts#L333)
+**现在（连续原文）** — [`tests/integration/submission.test.ts:333–338`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/integration/submission.test.ts#L333)
 
 ```ts
     const value =
@@ -6260,7 +6260,7 @@ switch (header) {
 - **适用置信度**：高（静态证据；拟议实现未验证）。
 - **符号**：`rotation fixture rewrite and native reapplication`。
 
-**现在（连续原文）** — [`tests/scripts/deployment-check.sh:159–163`](../tests/scripts/deployment-check.sh#L159)
+**现在（连续原文）** — [`tests/scripts/deployment-check.sh:159–163`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/scripts/deployment-check.sh#L159)
 
 ```sh
 # Reapply the same native initialization with rotated fixture passwords.
@@ -6327,7 +6327,7 @@ compose run --rm -T storage-init
 - **适用置信度**：高（静态证据；拟议实现未验证）。
 - **符号**：`private native process failure assertions`。
 
-**现在（连续原文）** — [`tests/scripts/production-runtime.test.ts:228–236`](../tests/scripts/production-runtime.test.ts#L228)
+**现在（连续原文）** — [`tests/scripts/production-runtime.test.ts:228–236`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/scripts/production-runtime.test.ts#L228)
 
 ```ts
         // The unchanged CMD must fail privately when native services are absent.
@@ -6399,7 +6399,7 @@ assert.doesNotMatch(
 - **适用置信度**：高：requests 的唯一消费者是 length。
 - **符号**：`toolModel`。
 
-**现在（连续原文）** — [`tests/storage/assets.test.ts:413–479`](../tests/storage/assets.test.ts#L413)
+**现在（连续原文）** — [`tests/storage/assets.test.ts:413–479`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/storage/assets.test.ts#L413)
 
 ```ts
 function toolModel(assetPath: string, expected: string) {
@@ -6595,7 +6595,7 @@ function toolModel(assetID: string, expected: string) {
 - **适用置信度**：高（静态判断）。
 - **符号**：`budgetResponses`。
 
-**现在（连续原文）** — [`apps/agent/src/harness/pi.test.ts:1224–1287`](../apps/agent/src/harness/pi.test.ts#L1224)
+**现在（连续原文）** — [`apps/agent/src/harness/pi.test.ts:1224–1287`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/harness/pi.test.ts#L1224)
 
 ```ts
 function budgetResponses(scenario: string) {
@@ -6734,7 +6734,7 @@ function budgetResponses(scenario: BudgetScenario) {
 - **适用置信度**：高（静态判断）。
 - **符号**：`WorkerProcess lifecycle regression`。
 
-**现在（连续原文）** — [`apps/agent/src/worker.test.ts:5–43`](../apps/agent/src/worker.test.ts#L5)
+**现在（连续原文）** — [`apps/agent/src/worker.test.ts:5–43`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/worker.test.ts#L5)
 
 ```ts
 test('worker installs one cleanup receipt before abort listeners can reenter close', async () => {
@@ -6868,7 +6868,7 @@ test('worker close drains owned work before closing object storage', async () =>
 - **适用置信度**：高（静态判断；不代表动态复现）。
 - **符号**：`upload documentation test`。
 
-**现在（连续原文）** — [`apps/server/src/http.test.ts:18–25`](../apps/server/src/http.test.ts#L18)
+**现在（连续原文）** — [`apps/server/src/http.test.ts:18–25`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/server/src/http.test.ts#L18)
 
 ```ts
 test('upload documentation only advertises media types accepted by the byte boundary', async () => {
@@ -6958,7 +6958,7 @@ test('upload documentation advertises the entire declared MIME set and no extras
 - **适用置信度**：高（静态证据；拟议实现未验证）。
 - **符号**：`check and test scripts`。
 
-**现在（连续原文）** — [`package.json:11–17`](../package.json#L11)
+**现在（连续原文）** — [`package.json:11–17`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/package.json#L11)
 
 ```json
     "check": "bun run typecheck && bun run lint && bun run fmt:check && bun run boundaries && bun run test",
@@ -7025,7 +7025,7 @@ mkdir -p ci-logs
 - **适用置信度**：高（静态判断；不代表动态复现）。
 - **符号**：`command samples and differential loop`。
 
-**现在（连续原文）** — [`packages/contract/src/execution-schema.test.ts:34–68`](../packages/contract/src/execution-schema.test.ts#L34)
+**现在（连续原文）** — [`packages/contract/src/execution-schema.test.ts:34–68`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/packages/contract/src/execution-schema.test.ts#L34)
 
 ```ts
   const samples = [
@@ -7146,7 +7146,7 @@ for (const [value, valid] of samples) {
 - **适用置信度**：高（静态证据；拟议实现未验证）。
 - **符号**：`native S3 GET-only adapter coverage`。
 
-**现在（连续原文）** — [`packages/object-storage/src/objects.test.ts:30–72`](../packages/object-storage/src/objects.test.ts#L30)
+**现在（连续原文）** — [`packages/object-storage/src/objects.test.ts:30–72`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/packages/object-storage/src/objects.test.ts#L30)
 
 ```ts
 test('native S3 GET bounds both declared and chunked HTTP bodies', async () => {
@@ -7301,7 +7301,7 @@ test('native S3 PUT sends the immutable-key condition and never retries a reject
 - **适用置信度**：高（静态证据；实际失败后果未运行复现）。
 - **符号**：`administrative cleanup retains the primary rejection after closing the actual database`。
 
-**现在（连续原文）** — [`tests/integration/administration.test.ts:72–113`](../tests/integration/administration.test.ts#L72)
+**现在（连续原文）** — [`tests/integration/administration.test.ts:72–113`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/integration/administration.test.ts#L72)
 
 ```ts
 test('administrative cleanup retains the primary rejection after closing the actual database', async () => {
@@ -7470,7 +7470,7 @@ test('administrative cleanup retains the primary rejection after closing the act
 - **适用置信度**：高（静态证据；实际失败后果未运行复现）。
 - **符号**：`asset migration: command_outbox and command_inbox assertions`。
 
-**现在（连续原文）** — [`tests/integration/assets-migration.test.ts:244–259`](../tests/integration/assets-migration.test.ts#L244)
+**现在（连续原文）** — [`tests/integration/assets-migration.test.ts:244–259`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/integration/assets-migration.test.ts#L244)
 
 ```ts
     const { materialID, ...reference } = file
@@ -7565,7 +7565,7 @@ for (const row of commands.rows) {
 - **适用置信度**：高（静态证据；实际失败后果未运行复现）。
 - **符号**：`afterAll cleanup`。
 
-**现在（连续原文）** — [`tests/integration/database.test.ts:6–24`](../tests/integration/database.test.ts#L6)
+**现在（连续原文）** — [`tests/integration/database.test.ts:6–24`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/integration/database.test.ts#L6)
 
 ```ts
 afterAll(async () => {
@@ -7671,7 +7671,7 @@ afterAll(async () => {
 - **适用置信度**：高（静态证据；实际失败后果未运行复现）。
 - **符号**：`fixture aborted waiter`。
 
-**现在（连续原文）** — [`tests/integration/execute-run.test.ts:136–140`](../tests/integration/execute-run.test.ts#L136)
+**现在（连续原文）** — [`tests/integration/execute-run.test.ts:136–140`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/integration/execute-run.test.ts#L136)
 
 ```ts
   const input = await started.promise
@@ -7726,7 +7726,7 @@ if (input.signal.aborted) aborted.resolve()
 - **适用置信度**：高（静态证据；实际失败后果未运行复现）。
 - **符号**：`true fence loss during cleanup excludes text, history and terminal writes`。
 
-**现在（连续原文）** — [`tests/integration/execute-run.test.ts:282–316`](../tests/integration/execute-run.test.ts#L282)
+**现在（连续原文）** — [`tests/integration/execute-run.test.ts:282–316`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/integration/execute-run.test.ts#L282)
 
 ```ts
 test('true fence loss during cleanup excludes text, history and terminal writes', async () => {
@@ -7892,7 +7892,7 @@ test('true fence loss during cleanup excludes text, history and terminal writes'
 - **适用置信度**：高（静态证据；实际失败后果未运行复现）。
 - **符号**：`typed asset replay normalizes property order and UUID case but preserves exact facts: persisted command`。
 
-**现在（连续原文）** — [`tests/integration/execution-store.test.ts:861–861`](../tests/integration/execution-store.test.ts#L861)
+**现在（连续原文）** — [`tests/integration/execution-store.test.ts:861–861`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/integration/execution-store.test.ts#L861)
 
 ```ts
     expect(startCommandSchema.parse(row.command)).toEqual(parsed)
@@ -7965,7 +7965,7 @@ expect(startCommandSchema.parse(row.command)).toEqual(expected)
 - **符号**：`postgresProxy listen admission`。
 - **是否改变合同**：把listen失败显式接入setup rejection；不是已复现绑定失败。正常TCP/blackhole路径不变。
 
-**现在（连续原文）** — [`tests/integration/postgres-proxy-fixture.ts:41–44`](../tests/integration/postgres-proxy-fixture.ts#L41)
+**现在（连续原文）** — [`tests/integration/postgres-proxy-fixture.ts:41–44`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/integration/postgres-proxy-fixture.ts#L41)
 
 ```ts
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
@@ -8067,13 +8067,13 @@ if (!address || typeof address === 'string') {
 - **符号**：`beforeEach Redis connect`。
 - **是否改变合同**：测试setup失败结算方式改变；新增native error listener仅阻止EventEmitter未处理异常，不能把命令/promise失败吞掉。
 
-**现在（连续原文）** — [`tests/integration/redis.test.ts:19–19`](../tests/integration/redis.test.ts#L19)
+**现在（连续原文）** — [`tests/integration/redis.test.ts:19–19`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/integration/redis.test.ts#L19)
 
 ```ts
   await Promise.all([commands.connect(), reader.connect()])
 ```
 
-相关现状：[`tests/scripts/deployment-boundaries.test.ts:93–126`](../tests/scripts/deployment-boundaries.test.ts#L93)
+相关现状：[`tests/scripts/deployment-boundaries.test.ts:93–126`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/scripts/deployment-boundaries.test.ts#L93)
 
 ```ts
 test('authentication storage belongs to the server and remains private from workers', async () => {
@@ -8225,7 +8225,7 @@ test('authentication storage belongs to the server and remains private from work
 - **适用置信度**：高（静态证据；实际失败后果未运行复现）。
 - **符号**：`reconstruction retains text before an unrelated-run boundary: SSE order assertion`。
 
-**现在（连续原文）** — [`tests/integration/run-scoped-observation.test.ts:254–256`](../tests/integration/run-scoped-observation.test.ts#L254)
+**现在（连续原文）** — [`tests/integration/run-scoped-observation.test.ts:254–256`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/integration/run-scoped-observation.test.ts#L254)
 
 ```ts
     expect(text.indexOf('TEXT_MESSAGE_START')).toBeLessThan(
@@ -8288,7 +8288,7 @@ expect(startOffset).toBeLessThan(contentOffset)
 - **适用置信度**：高（静态证据；实际失败后果未运行复现）。
 - **符号**：`submit identity setup`。
 
-**现在（连续原文）** — [`tests/integration/runtime.test.ts:92–95`](../tests/integration/runtime.test.ts#L92)
+**现在（连续原文）** — [`tests/integration/runtime.test.ts:92–95`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/integration/runtime.test.ts#L92)
 
 ```ts
   const { db, close } = openTestDatabase()
@@ -8372,7 +8372,7 @@ const headers = login.headers
 - **适用置信度**：高（静态证据；实际失败后果未运行复现）。
 - **符号**：`answer`。
 
-**现在（连续原文）** — [`tests/integration/runtime.test.ts:116–128`](../tests/integration/runtime.test.ts#L116)
+**现在（连续原文）** — [`tests/integration/runtime.test.ts:116–128`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/integration/runtime.test.ts#L116)
 
 ```ts
 async function answer(url: string, threadID: string) {
@@ -8460,7 +8460,7 @@ async function answer(url: string, threadID: string) {
 - **适用置信度**：高（静态证据；实际失败后果未运行复现）。
 - **符号**：`threadIDs / afterAll / session lifetime identities`。
 
-**现在（连续原文）** — [`tests/integration/thread-lifecycle.test.ts:47–70`](../tests/integration/thread-lifecycle.test.ts#L47)
+**现在（连续原文）** — [`tests/integration/thread-lifecycle.test.ts:47–70`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/integration/thread-lifecycle.test.ts#L47)
 
 ```ts
 const threadIDs: string[] = []
@@ -8573,7 +8573,7 @@ const identity = await ownedIdentity()
 - **适用置信度**：高（静态证据；实际失败后果未运行复现）。
 - **符号**：`real PG barrier serializes archive against send and exact replay under the thread lock`。
 
-**现在（连续原文）** — [`tests/integration/thread-lifecycle.test.ts:295–316`](../tests/integration/thread-lifecycle.test.ts#L295)
+**现在（连续原文）** — [`tests/integration/thread-lifecycle.test.ts:295–316`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/integration/thread-lifecycle.test.ts#L295)
 
 ```ts
 test('real PG barrier serializes archive against send and exact replay under the thread lock', async () => {
@@ -8712,7 +8712,7 @@ test('real PG barrier serializes archive against send and exact replay under the
 - **适用置信度**：高（静态证据；拟议实现未验证）。
 - **符号**：`same-origin deployment readiness test`。
 
-**现在（连续原文）** — [`tests/scripts/deployment-web.test.ts:4–18`](../tests/scripts/deployment-web.test.ts#L4)
+**现在（连续原文）** — [`tests/scripts/deployment-web.test.ts:4–18`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/scripts/deployment-web.test.ts#L4)
 
 ```ts
 test('same-origin native auth and private API routes are proxied by Caddy', async () => {
@@ -8786,7 +8786,7 @@ test('same-origin native auth and private API routes are proxied by Caddy', asyn
 - **适用置信度**：高（静态证据；拟议实现未验证）。
 - **符号**：`anonymous inventory docker run`。
 
-**现在（连续原文）** — [`tests/scripts/production-runtime.test.ts:157–179`](../tests/scripts/production-runtime.test.ts#L157)
+**现在（连续原文）** — [`tests/scripts/production-runtime.test.ts:157–179`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/scripts/production-runtime.test.ts#L157)
 
 ```ts
         const installed = execFileSync(
@@ -8916,7 +8916,7 @@ console.log(child.stdout);`,
 - **适用置信度**：高：已完整读两份 storage tests；不是功能缺陷。
 - **符号**：`uploadedAsset`。
 
-**现在（连续原文）** — [`tests/storage/assets.test.ts:92–118`](../tests/storage/assets.test.ts#L92)
+**现在（连续原文）** — [`tests/storage/assets.test.ts:92–118`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/storage/assets.test.ts#L92)
 
 ```ts
 async function uploadedAsset() {
@@ -9056,7 +9056,7 @@ test('owned uploads replay exactly and reject changed bytes without disclosing s
 - **适用置信度**：高（静态证据；拟议实现未验证）。
 - **符号**：`compiler source include set`。
 
-**现在（连续原文）** — [`tsconfig.json:30–36`](../tsconfig.json#L30)
+**现在（连续原文）** — [`tsconfig.json:30–36`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tsconfig.json#L30)
 
 ```json
   "include": [
@@ -9148,7 +9148,7 @@ lint: 'oxlint --type-aware --deny-warnings apps packages tests scripts deploy .g
 
 `decideMessageReplay`没有把授权、持久化和重放裁决混成框架。它明确区分未接受/conflict/返回durable identity；asset order与text空格都属于精确事实。这里的条件长度可以承担真实责任，不需要为了短函数名再拆一层。
 
-[`apps/server/src/conversation/submission.ts:47–70`](../apps/server/src/conversation/submission.ts#L47)
+[`apps/server/src/conversation/submission.ts:47–70`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/server/src/conversation/submission.ts#L47)
 
 ```ts
 // Call only after locking the requested thread. Replay IDs belong to the durable
@@ -9183,179 +9183,179 @@ export function decideMessageReplay(
 
 完整阅读以连续区间证据为准；hash/line count检查本身不代表已阅读。下表合并代理完整body读取记录，未将outline、grep或截断read当覆盖。没有独立建议的文件不强行填一个问题。
 
-| 文件                                                                                                                                                    | 行数 | 完整body读取区间                                                                                  | 审查结果/关联项                                                                                                                        |
-| ------------------------------------------------------------------------------------------------------------------------------------------------------- | ---: | ------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| [`.dependency-cruiser.cjs`](../.dependency-cruiser.cjs)                                                                                                 |   50 | 1–50                                                                                              | 已读；无独立改动建议。必要现有合同保留。 已记录具体保留理由。 保留实际parser驱动的cycle/unresolved/type-only owner规则，不换词汇扫描。 |
-| [`.dockerignore`](../.dockerignore)                                                                                                                     |   16 | 1–16                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`.github/python/check.sh`](../.github/python/check.sh)                                                                                                 |   33 | 1–33                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`.github/verify-api.ts`](../.github/verify-api.ts)                                                                                                     |   42 | 1–42                                                                                              | [F027](#f027)                                                                                                                          |
-| [`.github/workflows/ci.yaml`](../.github/workflows/ci.yaml)                                                                                             |  130 | 1–130                                                                                             | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`.gitignore`](../.gitignore)                                                                                                                           |   14 | 1–14                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`.oxlintrc.json`](../.oxlintrc.json)                                                                                                                   |   53 | 1–53                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`.prettierrc.json`](../.prettierrc.json)                                                                                                               |    5 | 1–5                                                                                               | [F028](#f028)                                                                                                                          |
-| [`.yamllint.yaml`](../.yamllint.yaml)                                                                                                                   |    8 | 1–8                                                                                               | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`apps/agent/package.json`](../apps/agent/package.json)                                                                                                 |   18 | 1–18                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`apps/agent/src/commands.test.ts`](../apps/agent/src/commands.test.ts)                                                                                 |   53 | 1–53                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`apps/agent/src/commands.ts`](../apps/agent/src/commands.ts)                                                                                           |  124 | 1–124                                                                                             | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`apps/agent/src/db/command-acceptance.ts`](../apps/agent/src/db/command-acceptance.ts)                                                                 |  145 | 1–145                                                                                             | [F010](#f010)                                                                                                                          |
-| [`apps/agent/src/db/event-outbox.ts`](../apps/agent/src/db/event-outbox.ts)                                                                             |   36 | 1–36                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`apps/agent/src/db/event-publication.ts`](../apps/agent/src/db/event-publication.ts)                                                                   |   84 | 1–84                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`apps/agent/src/db/execution-leases.ts`](../apps/agent/src/db/execution-leases.ts)                                                                     |  265 | 1–200, 201–265                                                                                    | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`apps/agent/src/db/run-writes.ts`](../apps/agent/src/db/run-writes.ts)                                                                                 |  253 | 1–200, 201–253                                                                                    | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`apps/agent/src/events.ts`](../apps/agent/src/events.ts)                                                                                               |   46 | 1–46                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`apps/agent/src/execute-run.sources.test.ts`](../apps/agent/src/execute-run.sources.test.ts)                                                           |   82 | 1–82                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`apps/agent/src/execute-run.test.ts`](../apps/agent/src/execute-run.test.ts)                                                                           | 1213 | 1–200, 201–400, 401–600, 601–800, 801–1000, 1001–1200, 1201–1213                                  | [F029](#f029)                                                                                                                          |
-| [`apps/agent/src/execute-run.ts`](../apps/agent/src/execute-run.ts)                                                                                     |  560 | 1–200, 201–400, 401–560                                                                           | [F001](#f001), [F002](#f002), [F011](#f011), [F012](#f012), [F030](#f030), [F031](#f031), [F032](#f032)                                |
-| [`apps/agent/src/harness/file-tools.ts`](../apps/agent/src/harness/file-tools.ts)                                                                       |   91 | 1–91                                                                                              | [F033](#f033)                                                                                                                          |
-| [`apps/agent/src/harness/files.test.ts`](../apps/agent/src/harness/files.test.ts)                                                                       |  297 | 1–200, 201–297                                                                                    | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`apps/agent/src/harness/files.ts`](../apps/agent/src/harness/files.ts)                                                                                 |  115 | 1–115                                                                                             | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`apps/agent/src/harness/pi-history.ts`](../apps/agent/src/harness/pi-history.ts)                                                                       |  154 | 1–154                                                                                             | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`apps/agent/src/harness/pi.test.ts`](../apps/agent/src/harness/pi.test.ts)                                                                             | 1511 | 1–200, 201–400, 401–600, 601–800, 801–1000, 1001–1200, 1201–1400, 1401–1511                       | [F034](#f034), [F067](#f067)                                                                                                           |
-| [`apps/agent/src/harness/pi.ts`](../apps/agent/src/harness/pi.ts)                                                                                       |  364 | 1–200, 201–364                                                                                    | [F003](#f003), [F013](#f013), [F014](#f014), [F035](#f035), [F036](#f036)                                                              |
-| [`apps/agent/src/harness/web-search.test.ts`](../apps/agent/src/harness/web-search.test.ts)                                                             |  477 | 1–200, 201–400, 401–477                                                                           | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`apps/agent/src/harness/web-search.ts`](../apps/agent/src/harness/web-search.ts)                                                                       |  251 | 1–200, 201–251                                                                                    | [F037](#f037), [F038](#f038), [F039](#f039), [F040](#f040)                                                                             |
-| [`apps/agent/src/main.ts`](../apps/agent/src/main.ts)                                                                                                   |   38 | 1–38                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`apps/agent/src/run-loop.test.ts`](../apps/agent/src/run-loop.test.ts)                                                                                 |  199 | 1–199                                                                                             | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`apps/agent/src/run-loop.ts`](../apps/agent/src/run-loop.ts)                                                                                           |  100 | 1–100                                                                                             | [F041](#f041), [F042](#f042)                                                                                                           |
-| [`apps/agent/src/sandbox/e2b.test.ts`](../apps/agent/src/sandbox/e2b.test.ts)                                                                           |  342 | 1–200, 201–342                                                                                    | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`apps/agent/src/sandbox/e2b.ts`](../apps/agent/src/sandbox/e2b.ts)                                                                                     |  215 | 1–200, 201–215                                                                                    | [F015](#f015)                                                                                                                          |
-| [`apps/agent/src/sandbox/native-command.test.ts`](../apps/agent/src/sandbox/native-command.test.ts)                                                     |  304 | 1–200, 201–304                                                                                    | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`apps/agent/src/sandbox/native-files.test.ts`](../apps/agent/src/sandbox/native-files.test.ts)                                                         |   80 | 1–80                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`apps/agent/src/sandbox/reference.test.ts`](../apps/agent/src/sandbox/reference.test.ts)                                                               |   36 | 1–36                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`apps/agent/src/sandbox/reference.ts`](../apps/agent/src/sandbox/reference.ts)                                                                         |   15 | 1–15                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`apps/agent/src/worker-health.test.ts`](../apps/agent/src/worker-health.test.ts)                                                                       |   26 | 1–26                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`apps/agent/src/worker-health.ts`](../apps/agent/src/worker-health.ts)                                                                                 |   23 | 1–23                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`apps/agent/src/worker.test.ts`](../apps/agent/src/worker.test.ts)                                                                                     |   43 | 1–43                                                                                              | [F068](#f068)                                                                                                                          |
-| [`apps/agent/src/worker.ts`](../apps/agent/src/worker.ts)                                                                                               |  328 | 1–200, 201–328                                                                                    | [F016](#f016), [F043](#f043), [F044](#f044), [F045](#f045), [F046](#f046), [F047](#f047)                                               |
-| [`apps/server/package.json`](../apps/server/package.json)                                                                                               |   20 | 1–20                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`apps/server/src/assets/files.test.ts`](../apps/server/src/assets/files.test.ts)                                                                       |  118 | 1–118                                                                                             | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`apps/server/src/assets/files.ts`](../apps/server/src/assets/files.ts)                                                                                 |  109 | 1–109                                                                                             | [F048](#f048)                                                                                                                          |
-| [`apps/server/src/assets/http.ts`](../apps/server/src/assets/http.ts)                                                                                   |  123 | 1–123                                                                                             | [F049](#f049)                                                                                                                          |
-| [`apps/server/src/assets/uploads.ts`](../apps/server/src/assets/uploads.ts)                                                                             |   97 | 1–97                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`apps/server/src/conversation/command-publication.ts`](../apps/server/src/conversation/command-publication.ts)                                         |   42 | 1–42                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`apps/server/src/conversation/event-stream.ts`](../apps/server/src/conversation/event-stream.ts)                                                       |  356 | 1–200, 201–356                                                                                    | [F050](#f050)                                                                                                                          |
-| [`apps/server/src/conversation/execution-events.ts`](../apps/server/src/conversation/execution-events.ts)                                               |   62 | 1–62                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`apps/server/src/conversation/execution-receipts.test.ts`](../apps/server/src/conversation/execution-receipts.test.ts)                                 |   55 | 1–55                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`apps/server/src/conversation/execution-receipts.ts`](../apps/server/src/conversation/execution-receipts.ts)                                           |   43 | 1–43                                                                                              | [F051](#f051)                                                                                                                          |
-| [`apps/server/src/conversation/http.ts`](../apps/server/src/conversation/http.ts)                                                                       |  130 | 1–130                                                                                             | [F017](#f017)                                                                                                                          |
-| [`apps/server/src/conversation/public-run-events.test.ts`](../apps/server/src/conversation/public-run-events.test.ts)                                   |  198 | 1–198                                                                                             | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`apps/server/src/conversation/public-run-events.ts`](../apps/server/src/conversation/public-run-events.ts)                                             |  169 | 1–169                                                                                             | [F052](#f052), [F053](#f053)                                                                                                           |
-| [`apps/server/src/conversation/submission.test.ts`](../apps/server/src/conversation/submission.test.ts)                                                 |  102 | 1–102                                                                                             | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`apps/server/src/conversation/submission.ts`](../apps/server/src/conversation/submission.ts)                                                           |   82 | 1–82                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`apps/server/src/db/accepted-start.ts`](../apps/server/src/db/accepted-start.ts)                                                                       |   15 | 1–15                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`apps/server/src/db/assets.ts`](../apps/server/src/db/assets.ts)                                                                                       |  173 | 1–173                                                                                             | [F018](#f018)                                                                                                                          |
-| [`apps/server/src/db/cancellations.ts`](../apps/server/src/db/cancellations.ts)                                                                         |  143 | 1–143                                                                                             | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`apps/server/src/db/command-publication.ts`](../apps/server/src/db/command-publication.ts)                                                             |  103 | 1–103                                                                                             | [F019](#f019)                                                                                                                          |
-| [`apps/server/src/db/conversations.ts`](../apps/server/src/db/conversations.ts)                                                                         |  266 | 1–200, 201–266                                                                                    | [F054](#f054), [F055](#f055), [F056](#f056)                                                                                            |
-| [`apps/server/src/db/execution-events.ts`](../apps/server/src/db/execution-events.ts)                                                                   |  295 | 1–200, 201–295                                                                                    | [F057](#f057)                                                                                                                          |
-| [`apps/server/src/db/legacy-thread-ownership.ts`](../apps/server/src/db/legacy-thread-ownership.ts)                                                     |   78 | 1–78                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`apps/server/src/db/sessions.ts`](../apps/server/src/db/sessions.ts)                                                                                   |   18 | 1–18                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`apps/server/src/db/submissions.ts`](../apps/server/src/db/submissions.ts)                                                                             |  231 | 1–200, 201–231                                                                                    | [F058](#f058), [F059](#f059)                                                                                                           |
-| [`apps/server/src/db/thread-access.ts`](../apps/server/src/db/thread-access.ts)                                                                         |   34 | 1–34                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`apps/server/src/http.test.ts`](../apps/server/src/http.test.ts)                                                                                       |   33 | 1–33                                                                                              | [F069](#f069)                                                                                                                          |
-| [`apps/server/src/http.ts`](../apps/server/src/http.ts)                                                                                                 |  559 | 1–200, 201–400, 401–559                                                                           | [F004](#f004), [F005](#f005), [F020](#f020)                                                                                            |
-| [`apps/server/src/identity/authentication.ts`](../apps/server/src/identity/authentication.ts)                                                           |  130 | 1–130                                                                                             | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`apps/server/src/main.ts`](../apps/server/src/main.ts)                                                                                                 |   19 | 1–19                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`apps/server/src/request-body.test.ts`](../apps/server/src/request-body.test.ts)                                                                       |  324 | 1–200, 201–324                                                                                    | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`apps/server/src/request-body.ts`](../apps/server/src/request-body.ts)                                                                                 |  110 | 1–110                                                                                             | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`apps/server/src/server.ts`](../apps/server/src/server.ts)                                                                                             |  287 | 1–200, 201–287                                                                                    | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`apps/server/tsconfig.json`](../apps/server/tsconfig.json)                                                                                             |    4 | 1–4                                                                                               | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`compose.yaml`](../compose.yaml)                                                                                                                       |  298 | 1–200, 201–298                                                                                    | [F006](#f006)                                                                                                                          |
-| [`config/.env.example`](../config/.env.example)                                                                                                         |   91 | 1–91                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`deploy/Caddyfile`](../deploy/Caddyfile)                                                                                                               |   12 | 1–12                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`deploy/database.sql`](../deploy/database.sql)                                                                                                         |   49 | 1–49                                                                                              | 已读；无独立改动建议。必要现有合同保留。 已记录具体保留理由。                                                                          |
-| [`deploy/docker/application.Dockerfile`](../deploy/docker/application.Dockerfile)                                                                       |   56 | 1–56                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`deploy/docker/checks.Dockerfile`](../deploy/docker/checks.Dockerfile)                                                                                 |   16 | 1–16                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`deploy/storage/server-policy.json`](../deploy/storage/server-policy.json)                                                                             |   20 | 1–20                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`deploy/storage/worker-policy.json`](../deploy/storage/worker-policy.json)                                                                             |   20 | 1–20                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`package.json`](../package.json)                                                                                                                       |   43 | 1–43                                                                                              | [F070](#f070)                                                                                                                          |
-| [`packages/config/package.json`](../packages/config/package.json)                                                                                       |   11 | 1–11                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`packages/config/src/env.test.ts`](../packages/config/src/env.test.ts)                                                                                 |  618 | 1–200, 201–400, 401–600, 601–618                                                                  | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`packages/config/src/env.ts`](../packages/config/src/env.ts)                                                                                           |  211 | 1–200, 201–211                                                                                    | [F007](#f007), [F021](#f021)                                                                                                           |
-| [`packages/contract/package.json`](../packages/contract/package.json)                                                                                   |   17 | 1–17                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`packages/contract/src/execution-schema.test.ts`](../packages/contract/src/execution-schema.test.ts)                                                   |  102 | 1–102                                                                                             | [F071](#f071)                                                                                                                          |
-| [`packages/contract/src/execution.test.ts`](../packages/contract/src/execution.test.ts)                                                                 |  326 | 1–200, 201–326                                                                                    | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`packages/contract/src/execution.ts`](../packages/contract/src/execution.ts)                                                                           |  261 | 1–200, 201–261                                                                                    | [F008](#f008), [F009](#f009)                                                                                                           |
-| [`packages/contract/src/failure-reason.ts`](../packages/contract/src/failure-reason.ts)                                                                 |    8 | 1–8                                                                                               | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`packages/contract/src/file-name.test.ts`](../packages/contract/src/file-name.test.ts)                                                                 |   87 | 1–87                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`packages/contract/src/file-name.ts`](../packages/contract/src/file-name.ts)                                                                           |   15 | 1–15                                                                                              | [F022](#f022)                                                                                                                          |
-| [`packages/contract/src/http.test.ts`](../packages/contract/src/http.test.ts)                                                                           |  352 | 1–200, 201–352                                                                                    | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`packages/contract/src/http.ts`](../packages/contract/src/http.ts)                                                                                     |  233 | 1–200, 201–233                                                                                    | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`packages/contract/src/inbound.test.ts`](../packages/contract/src/inbound.test.ts)                                                                     |  204 | 1–200, 201–204                                                                                    | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`packages/contract/src/sources.test.ts`](../packages/contract/src/sources.test.ts)                                                                     |   60 | 1–60                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`packages/contract/src/web-source.test.ts`](../packages/contract/src/web-source.test.ts)                                                               |   80 | 1–80                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`packages/contract/src/web-source.ts`](../packages/contract/src/web-source.ts)                                                                         |   58 | 1–58                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`packages/database/migrations/20260601000000_product.sql`](../packages/database/migrations/20260601000000_product.sql)                                 |   38 | 1–38                                                                                              | 已读；历史迁移保持不可变，保留原schema/identity/retained位置演进证据。                                                                 |
-| [`packages/database/migrations/20260602000000_execution.sql`](../packages/database/migrations/20260602000000_execution.sql)                             |   61 | 1–61                                                                                              | 已读；历史迁移保持不可变，保留原schema/identity/retained位置演进证据。                                                                 |
-| [`packages/database/migrations/20260603000000_public_execution_events.sql`](../packages/database/migrations/20260603000000_public_execution_events.sql) |   25 | 1–25                                                                                              | 已读；历史迁移保持不可变，保留原schema/identity/retained位置演进证据。                                                                 |
-| [`packages/database/migrations/20261004000000_identity.sql`](../packages/database/migrations/20261004000000_identity.sql)                               |   64 | 1–64                                                                                              | 已读；历史迁移保持不可变，保留原schema/identity/retained位置演进证据。                                                                 |
-| [`packages/database/migrations/20261004001000_account_identity.sql`](../packages/database/migrations/20261004001000_account_identity.sql)               |   10 | 1–10                                                                                              | 已读；历史迁移保持不可变，保留原schema/identity/retained位置演进证据。                                                                 |
-| [`packages/database/migrations/20261004010000_thread_identity.sql`](../packages/database/migrations/20261004010000_thread_identity.sql)                 |   21 | 1–21                                                                                              | 已读；历史迁移保持不可变，保留原schema/identity/retained位置演进证据。                                                                 |
-| [`packages/database/migrations/20261004020000_thread_workspace.sql`](../packages/database/migrations/20261004020000_thread_workspace.sql)               |    6 | 1–6                                                                                               | 已读；历史迁移保持不可变，保留原schema/identity/retained位置演进证据。                                                                 |
-| [`packages/database/migrations/20261004030000_product_files.sql`](../packages/database/migrations/20261004030000_product_files.sql)                     |   44 | 1–44                                                                                              | 已读；历史迁移保持不可变，保留原schema/identity/retained位置演进证据。                                                                 |
-| [`packages/database/migrations/20261004040000_assets.sql`](../packages/database/migrations/20261004040000_assets.sql)                                   |   79 | 1–79                                                                                              | 已读；历史迁移保持不可变，保留原schema/identity/retained位置演进证据。                                                                 |
-| [`packages/database/migrations/20261004050000_native_sandbox.sql`](../packages/database/migrations/20261004050000_native_sandbox.sql)                   |   27 | 1–27                                                                                              | 已读；历史迁移保持不可变，保留原schema/identity/retained位置演进证据。                                                                 |
-| [`packages/database/migrations/20261005000000_receipt_publication.sql`](../packages/database/migrations/20261005000000_receipt_publication.sql)         |   20 | 1–20                                                                                              | 已读；历史迁移保持不可变，保留原schema/identity/retained位置演进证据。                                                                 |
-| [`packages/database/migrations/20261005010000_message_sources.sql`](../packages/database/migrations/20261005010000_message_sources.sql)                 |    7 | 1–7                                                                                               | 已读；历史迁移保持不可变，保留原schema/identity/retained位置演进证据。                                                                 |
-| [`packages/database/migrations/20261006000000_relational_integrity.sql`](../packages/database/migrations/20261006000000_relational_integrity.sql)       |   47 | 1–47                                                                                              | 已读；历史迁移保持不可变，保留原schema/identity/retained位置演进证据。                                                                 |
-| [`packages/database/package.json`](../packages/database/package.json)                                                                                   |   22 | 1–22                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`packages/database/src/connection.ts`](../packages/database/src/connection.ts)                                                                         |   33 | 1–33                                                                                              | 已读；无独立改动建议。必要现有合同保留。 已记录具体保留理由。 保留native pg Pool/public hooks与当前max8，不加未经测量的新开关。        |
-| [`packages/object-storage/package.json`](../packages/object-storage/package.json)                                                                       |   11 | 1–11                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`packages/object-storage/src/index.ts`](../packages/object-storage/src/index.ts)                                                                       |    1 | 1–1                                                                                               | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`packages/object-storage/src/objects.test.ts`](../packages/object-storage/src/objects.test.ts)                                                         |   72 | 1–72                                                                                              | [F072](#f072)                                                                                                                          |
-| [`packages/object-storage/src/objects.ts`](../packages/object-storage/src/objects.ts)                                                                   |  102 | 1–102                                                                                             | 已读；无独立改动建议。必要现有合同保留。 保留assigned key、IfNoneMatch、maxAttempts:1与bounded stream owner。                          |
-| [`scripts/assign-legacy-threads.ts`](../scripts/assign-legacy-threads.ts)                                                                               |   41 | 1–41                                                                                              | [F023](#f023)                                                                                                                          |
-| [`scripts/check-lifecycle.sh`](../scripts/check-lifecycle.sh)                                                                                           |   42 | 1–42                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`scripts/check.sh`](../scripts/check.sh)                                                                                                               |   36 | 1–36                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`scripts/database-check.sh`](../scripts/database-check.sh)                                                                                             |  141 | 1–141                                                                                             | [F024](#f024)                                                                                                                          |
-| [`scripts/generate-api.test.ts`](../scripts/generate-api.test.ts)                                                                                       |   64 | 1–64                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`scripts/generate-api.ts`](../scripts/generate-api.ts)                                                                                                 |   86 | 1–86                                                                                              | [F060](#f060)                                                                                                                          |
-| [`scripts/generate-database.sh`](../scripts/generate-database.sh)                                                                                       |   18 | 1–18                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`scripts/reconcile-deliveries.ts`](../scripts/reconcile-deliveries.ts)                                                                                 |   85 | 1–85                                                                                              | 已读；无独立改动建议。必要现有合同保留。 已记录具体保留理由。                                                                          |
-| [`scripts/sandbox-check.sh`](../scripts/sandbox-check.sh)                                                                                               |  130 | 1–130                                                                                             | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`tests/integration/administration.test.ts`](../tests/integration/administration.test.ts)                                                               |  113 | 1–113                                                                                             | [F073](#f073)                                                                                                                          |
-| [`tests/integration/assets-migration.test.ts`](../tests/integration/assets-migration.test.ts)                                                           |  601 | 1–200, 201–400, 401–600, 601–601                                                                  | [F074](#f074)                                                                                                                          |
-| [`tests/integration/authentication-fixture.ts`](../tests/integration/authentication-fixture.ts)                                                         |   72 | 1–72                                                                                              | 已读；无独立改动建议。必要现有合同保留。 已记录具体保留理由。 保留官方Better Auth生成/签名真实session，不造cookie旁路。                |
-| [`tests/integration/command-publication.test.ts`](../tests/integration/command-publication.test.ts)                                                     |  352 | 1–200, 201–352                                                                                    | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`tests/integration/command-relay.test.ts`](../tests/integration/command-relay.test.ts)                                                                 |   92 | 1–92                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`tests/integration/connection.test.ts`](../tests/integration/connection.test.ts)                                                                       |  164 | 1–164                                                                                             | 已读；无独立改动建议。必要现有合同保留。 已记录具体保留理由。                                                                          |
-| [`tests/integration/conversation-http.test.ts`](../tests/integration/conversation-http.test.ts)                                                         | 1859 | 1–200, 201–400, 401–600, 601–800, 801–1000, 1001–1200, 1201–1400, 1401–1600, 1601–1800, 1801–1859 | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`tests/integration/database-fixture.ts`](../tests/integration/database-fixture.ts)                                                                     |   95 | 1–95                                                                                              | 已读；无独立改动建议。必要现有合同保留。 已记录具体保留理由。                                                                          |
-| [`tests/integration/database.test.ts`](../tests/integration/database.test.ts)                                                                           |  197 | 1–197                                                                                             | [F075](#f075)                                                                                                                          |
-| [`tests/integration/delivery-reconciliation.test.ts`](../tests/integration/delivery-reconciliation.test.ts)                                             |  235 | 1–200, 201–235                                                                                    | 已读；无独立改动建议。必要现有合同保留。 已记录具体保留理由。                                                                          |
-| [`tests/integration/execute-run.test.ts`](../tests/integration/execute-run.test.ts)                                                                     |  509 | 1–200, 201–400, 401–509                                                                           | [F076](#f076), [F077](#f077)                                                                                                           |
-| [`tests/integration/execution-events.test.ts`](../tests/integration/execution-events.test.ts)                                                           |  566 | 1–200, 201–400, 401–566                                                                           | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`tests/integration/execution-store.test.ts`](../tests/integration/execution-store.test.ts)                                                             |  865 | 1–200, 201–400, 401–600, 601–800, 801–865                                                         | [F078](#f078)                                                                                                                          |
-| [`tests/integration/execution-transport.test.ts`](../tests/integration/execution-transport.test.ts)                                                     |  817 | 1–200, 201–400, 401–600, 601–800, 801–817                                                         | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`tests/integration/fixture-ownership.test.ts`](../tests/integration/fixture-ownership.test.ts)                                                         |  123 | 1–123                                                                                             | 已读；无独立改动建议。必要现有合同保留。 已记录具体保留理由。                                                                          |
-| [`tests/integration/history-budget.test.ts`](../tests/integration/history-budget.test.ts)                                                               |  221 | 1–200, 201–221                                                                                    | 已读；无独立改动建议。必要现有合同保留。 已记录具体保留理由。                                                                          |
-| [`tests/integration/identity.test.ts`](../tests/integration/identity.test.ts)                                                                           |  351 | 1–200, 201–351                                                                                    | 已读；无独立改动建议。必要现有合同保留。 已记录具体保留理由。                                                                          |
-| [`tests/integration/postgres-proxy-fixture.ts`](../tests/integration/postgres-proxy-fixture.ts)                                                         |   76 | 1–76                                                                                              | [F079](#f079)                                                                                                                          |
-| [`tests/integration/public-sources.test.ts`](../tests/integration/public-sources.test.ts)                                                               |  298 | 1–200, 201–298                                                                                    | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`tests/integration/redis.test.ts`](../tests/integration/redis.test.ts)                                                                                 |  148 | 1–148                                                                                             | [F080](#f080)                                                                                                                          |
-| [`tests/integration/relational-integrity.test.ts`](../tests/integration/relational-integrity.test.ts)                                                   |  397 | 1–200, 201–397                                                                                    | [F061](#f061)                                                                                                                          |
-| [`tests/integration/run-scoped-observation.test.ts`](../tests/integration/run-scoped-observation.test.ts)                                               |  319 | 1–200, 201–319                                                                                    | [F081](#f081)                                                                                                                          |
-| [`tests/integration/runtime.test.ts`](../tests/integration/runtime.test.ts)                                                                             |  986 | 1–200, 201–400, 401–600, 601–800, 801–986                                                         | [F062](#f062), [F082](#f082), [F083](#f083)                                                                                            |
-| [`tests/integration/submission.test.ts`](../tests/integration/submission.test.ts)                                                                       |  541 | 1–200, 201–400, 401–541                                                                           | [F063](#f063)                                                                                                                          |
-| [`tests/integration/thread-lifecycle.test.ts`](../tests/integration/thread-lifecycle.test.ts)                                                           |  783 | 1–200, 201–400, 401–600, 601–783                                                                  | [F084](#f084), [F085](#f085)                                                                                                           |
-| [`tests/integration/worker-health.test.ts`](../tests/integration/worker-health.test.ts)                                                                 |  580 | 1–200, 201–400, 401–580                                                                           | 已读；无独立改动建议。必要现有合同保留。 已记录具体保留理由。                                                                          |
-| [`tests/sandbox/e2b.test.ts`](../tests/sandbox/e2b.test.ts)                                                                                             |  617 | 1–200, 201–400, 401–600, 601–617                                                                  | [F025](#f025)                                                                                                                          |
-| [`tests/sandbox/native-restart.test.ts`](../tests/sandbox/native-restart.test.ts)                                                                       |  127 | 1–127                                                                                             | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`tests/sandbox/restart-check.sh`](../tests/sandbox/restart-check.sh)                                                                                   |   82 | 1–82                                                                                              | [F026](#f026)                                                                                                                          |
-| [`tests/scripts/architecture.test.ts`](../tests/scripts/architecture.test.ts)                                                                           |  200 | 1–200                                                                                             | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`tests/scripts/ci-policy.test.ts`](../tests/scripts/ci-policy.test.ts)                                                                                 |   58 | 1–58                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`tests/scripts/database-project.test.ts`](../tests/scripts/database-project.test.ts)                                                                   |   42 | 1–42                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`tests/scripts/deployment-boundaries.test.ts`](../tests/scripts/deployment-boundaries.test.ts)                                                         |  328 | 1–200, 201–328                                                                                    | [F080](#f080)                                                                                                                          |
-| [`tests/scripts/deployment-check.sh`](../tests/scripts/deployment-check.sh)                                                                             |  178 | 1–178                                                                                             | [F064](#f064)                                                                                                                          |
-| [`tests/scripts/deployment-web.test.ts`](../tests/scripts/deployment-web.test.ts)                                                                       |   18 | 1–18                                                                                              | [F086](#f086)                                                                                                                          |
-| [`tests/scripts/process-diagnostics.test.ts`](../tests/scripts/process-diagnostics.test.ts)                                                             |   74 | 1–74                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`tests/scripts/production-runtime.test.ts`](../tests/scripts/production-runtime.test.ts)                                                               |  244 | 1–200, 201–244                                                                                    | [F065](#f065), [F087](#f087)                                                                                                           |
-| [`tests/scripts/proxy-deadline.test.ts`](../tests/scripts/proxy-deadline.test.ts)                                                                       |   21 | 1–21                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`tests/scripts/reconciliation-cli.test.ts`](../tests/scripts/reconciliation-cli.test.ts)                                                               |   31 | 1–31                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`tests/scripts/storage-initialization.test.ts`](../tests/scripts/storage-initialization.test.ts)                                                       |  225 | 1–200, 201–225                                                                                    | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`tests/storage/assets.test.ts`](../tests/storage/assets.test.ts)                                                                                       | 1083 | 1–200, 201–400, 401–600, 601–800, 801–1000, 1001–1083                                             | [F066](#f066), [F088](#f088)                                                                                                           |
-| [`tests/storage/objects.test.ts`](../tests/storage/objects.test.ts)                                                                                     |   88 | 1–88                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
-| [`tsconfig.json`](../tsconfig.json)                                                                                                                     |   38 | 1–38                                                                                              | [F089](#f089)                                                                                                                          |
+| 文件                                                                                                                                                                                                                                                    | 行数 | 完整body读取区间                                                                                  | 审查结果/关联项                                                                                                                        |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---: | ------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| [`.dependency-cruiser.cjs`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/.dependency-cruiser.cjs)                                                                                                 |   50 | 1–50                                                                                              | 已读；无独立改动建议。必要现有合同保留。 已记录具体保留理由。 保留实际parser驱动的cycle/unresolved/type-only owner规则，不换词汇扫描。 |
+| [`.dockerignore`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/.dockerignore)                                                                                                                     |   16 | 1–16                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`.github/python/check.sh`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/.github/python/check.sh)                                                                                                 |   33 | 1–33                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`.github/verify-api.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/.github/verify-api.ts)                                                                                                     |   42 | 1–42                                                                                              | [F027](#f027)                                                                                                                          |
+| [`.github/workflows/ci.yaml`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/.github/workflows/ci.yaml)                                                                                             |  130 | 1–130                                                                                             | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`.gitignore`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/.gitignore)                                                                                                                           |   14 | 1–14                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`.oxlintrc.json`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/.oxlintrc.json)                                                                                                                   |   53 | 1–53                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`.prettierrc.json`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/.prettierrc.json)                                                                                                               |    5 | 1–5                                                                                               | [F028](#f028)                                                                                                                          |
+| [`.yamllint.yaml`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/.yamllint.yaml)                                                                                                                   |    8 | 1–8                                                                                               | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`apps/agent/package.json`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/package.json)                                                                                                 |   18 | 1–18                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`apps/agent/src/commands.test.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/commands.test.ts)                                                                                 |   53 | 1–53                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`apps/agent/src/commands.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/commands.ts)                                                                                           |  124 | 1–124                                                                                             | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`apps/agent/src/db/command-acceptance.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/db/command-acceptance.ts)                                                                 |  145 | 1–145                                                                                             | [F010](#f010)                                                                                                                          |
+| [`apps/agent/src/db/event-outbox.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/db/event-outbox.ts)                                                                             |   36 | 1–36                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`apps/agent/src/db/event-publication.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/db/event-publication.ts)                                                                   |   84 | 1–84                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`apps/agent/src/db/execution-leases.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/db/execution-leases.ts)                                                                     |  265 | 1–200, 201–265                                                                                    | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`apps/agent/src/db/run-writes.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/db/run-writes.ts)                                                                                 |  253 | 1–200, 201–253                                                                                    | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`apps/agent/src/events.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/events.ts)                                                                                               |   46 | 1–46                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`apps/agent/src/execute-run.sources.test.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/execute-run.sources.test.ts)                                                           |   82 | 1–82                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`apps/agent/src/execute-run.test.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/execute-run.test.ts)                                                                           | 1213 | 1–200, 201–400, 401–600, 601–800, 801–1000, 1001–1200, 1201–1213                                  | [F029](#f029)                                                                                                                          |
+| [`apps/agent/src/execute-run.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/execute-run.ts)                                                                                     |  560 | 1–200, 201–400, 401–560                                                                           | [F001](#f001), [F002](#f002), [F011](#f011), [F012](#f012), [F030](#f030), [F031](#f031), [F032](#f032)                                |
+| [`apps/agent/src/harness/file-tools.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/harness/file-tools.ts)                                                                       |   91 | 1–91                                                                                              | [F033](#f033)                                                                                                                          |
+| [`apps/agent/src/harness/files.test.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/harness/files.test.ts)                                                                       |  297 | 1–200, 201–297                                                                                    | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`apps/agent/src/harness/files.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/harness/files.ts)                                                                                 |  115 | 1–115                                                                                             | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`apps/agent/src/harness/pi-history.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/harness/pi-history.ts)                                                                       |  154 | 1–154                                                                                             | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`apps/agent/src/harness/pi.test.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/harness/pi.test.ts)                                                                             | 1511 | 1–200, 201–400, 401–600, 601–800, 801–1000, 1001–1200, 1201–1400, 1401–1511                       | [F034](#f034), [F067](#f067)                                                                                                           |
+| [`apps/agent/src/harness/pi.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/harness/pi.ts)                                                                                       |  364 | 1–200, 201–364                                                                                    | [F003](#f003), [F013](#f013), [F014](#f014), [F035](#f035), [F036](#f036)                                                              |
+| [`apps/agent/src/harness/web-search.test.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/harness/web-search.test.ts)                                                             |  477 | 1–200, 201–400, 401–477                                                                           | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`apps/agent/src/harness/web-search.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/harness/web-search.ts)                                                                       |  251 | 1–200, 201–251                                                                                    | [F037](#f037), [F038](#f038), [F039](#f039), [F040](#f040)                                                                             |
+| [`apps/agent/src/main.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/main.ts)                                                                                                   |   38 | 1–38                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`apps/agent/src/run-loop.test.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/run-loop.test.ts)                                                                                 |  199 | 1–199                                                                                             | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`apps/agent/src/run-loop.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/run-loop.ts)                                                                                           |  100 | 1–100                                                                                             | [F041](#f041), [F042](#f042)                                                                                                           |
+| [`apps/agent/src/sandbox/e2b.test.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/sandbox/e2b.test.ts)                                                                           |  342 | 1–200, 201–342                                                                                    | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`apps/agent/src/sandbox/e2b.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/sandbox/e2b.ts)                                                                                     |  215 | 1–200, 201–215                                                                                    | [F015](#f015)                                                                                                                          |
+| [`apps/agent/src/sandbox/native-command.test.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/sandbox/native-command.test.ts)                                                     |  304 | 1–200, 201–304                                                                                    | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`apps/agent/src/sandbox/native-files.test.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/sandbox/native-files.test.ts)                                                         |   80 | 1–80                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`apps/agent/src/sandbox/reference.test.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/sandbox/reference.test.ts)                                                               |   36 | 1–36                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`apps/agent/src/sandbox/reference.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/sandbox/reference.ts)                                                                         |   15 | 1–15                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`apps/agent/src/worker-health.test.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/worker-health.test.ts)                                                                       |   26 | 1–26                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`apps/agent/src/worker-health.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/worker-health.ts)                                                                                 |   23 | 1–23                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`apps/agent/src/worker.test.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/worker.test.ts)                                                                                     |   43 | 1–43                                                                                              | [F068](#f068)                                                                                                                          |
+| [`apps/agent/src/worker.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/agent/src/worker.ts)                                                                                               |  328 | 1–200, 201–328                                                                                    | [F016](#f016), [F043](#f043), [F044](#f044), [F045](#f045), [F046](#f046), [F047](#f047)                                               |
+| [`apps/server/package.json`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/server/package.json)                                                                                               |   20 | 1–20                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`apps/server/src/assets/files.test.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/server/src/assets/files.test.ts)                                                                       |  118 | 1–118                                                                                             | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`apps/server/src/assets/files.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/server/src/assets/files.ts)                                                                                 |  109 | 1–109                                                                                             | [F048](#f048)                                                                                                                          |
+| [`apps/server/src/assets/http.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/server/src/assets/http.ts)                                                                                   |  123 | 1–123                                                                                             | [F049](#f049)                                                                                                                          |
+| [`apps/server/src/assets/uploads.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/server/src/assets/uploads.ts)                                                                             |   97 | 1–97                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`apps/server/src/conversation/command-publication.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/server/src/conversation/command-publication.ts)                                         |   42 | 1–42                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`apps/server/src/conversation/event-stream.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/server/src/conversation/event-stream.ts)                                                       |  356 | 1–200, 201–356                                                                                    | [F050](#f050)                                                                                                                          |
+| [`apps/server/src/conversation/execution-events.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/server/src/conversation/execution-events.ts)                                               |   62 | 1–62                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`apps/server/src/conversation/execution-receipts.test.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/server/src/conversation/execution-receipts.test.ts)                                 |   55 | 1–55                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`apps/server/src/conversation/execution-receipts.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/server/src/conversation/execution-receipts.ts)                                           |   43 | 1–43                                                                                              | [F051](#f051)                                                                                                                          |
+| [`apps/server/src/conversation/http.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/server/src/conversation/http.ts)                                                                       |  130 | 1–130                                                                                             | [F017](#f017)                                                                                                                          |
+| [`apps/server/src/conversation/public-run-events.test.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/server/src/conversation/public-run-events.test.ts)                                   |  198 | 1–198                                                                                             | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`apps/server/src/conversation/public-run-events.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/server/src/conversation/public-run-events.ts)                                             |  169 | 1–169                                                                                             | [F052](#f052), [F053](#f053)                                                                                                           |
+| [`apps/server/src/conversation/submission.test.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/server/src/conversation/submission.test.ts)                                                 |  102 | 1–102                                                                                             | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`apps/server/src/conversation/submission.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/server/src/conversation/submission.ts)                                                           |   82 | 1–82                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`apps/server/src/db/accepted-start.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/server/src/db/accepted-start.ts)                                                                       |   15 | 1–15                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`apps/server/src/db/assets.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/server/src/db/assets.ts)                                                                                       |  173 | 1–173                                                                                             | [F018](#f018)                                                                                                                          |
+| [`apps/server/src/db/cancellations.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/server/src/db/cancellations.ts)                                                                         |  143 | 1–143                                                                                             | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`apps/server/src/db/command-publication.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/server/src/db/command-publication.ts)                                                             |  103 | 1–103                                                                                             | [F019](#f019)                                                                                                                          |
+| [`apps/server/src/db/conversations.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/server/src/db/conversations.ts)                                                                         |  266 | 1–200, 201–266                                                                                    | [F054](#f054), [F055](#f055), [F056](#f056)                                                                                            |
+| [`apps/server/src/db/execution-events.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/server/src/db/execution-events.ts)                                                                   |  295 | 1–200, 201–295                                                                                    | [F057](#f057)                                                                                                                          |
+| [`apps/server/src/db/legacy-thread-ownership.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/server/src/db/legacy-thread-ownership.ts)                                                     |   78 | 1–78                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`apps/server/src/db/sessions.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/server/src/db/sessions.ts)                                                                                   |   18 | 1–18                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`apps/server/src/db/submissions.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/server/src/db/submissions.ts)                                                                             |  231 | 1–200, 201–231                                                                                    | [F058](#f058), [F059](#f059)                                                                                                           |
+| [`apps/server/src/db/thread-access.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/server/src/db/thread-access.ts)                                                                         |   34 | 1–34                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`apps/server/src/http.test.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/server/src/http.test.ts)                                                                                       |   33 | 1–33                                                                                              | [F069](#f069)                                                                                                                          |
+| [`apps/server/src/http.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/server/src/http.ts)                                                                                                 |  559 | 1–200, 201–400, 401–559                                                                           | [F004](#f004), [F005](#f005), [F020](#f020)                                                                                            |
+| [`apps/server/src/identity/authentication.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/server/src/identity/authentication.ts)                                                           |  130 | 1–130                                                                                             | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`apps/server/src/main.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/server/src/main.ts)                                                                                                 |   19 | 1–19                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`apps/server/src/request-body.test.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/server/src/request-body.test.ts)                                                                       |  324 | 1–200, 201–324                                                                                    | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`apps/server/src/request-body.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/server/src/request-body.ts)                                                                                 |  110 | 1–110                                                                                             | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`apps/server/src/server.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/server/src/server.ts)                                                                                             |  287 | 1–200, 201–287                                                                                    | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`apps/server/tsconfig.json`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/apps/server/tsconfig.json)                                                                                             |    4 | 1–4                                                                                               | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`compose.yaml`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/compose.yaml)                                                                                                                       |  298 | 1–200, 201–298                                                                                    | [F006](#f006)                                                                                                                          |
+| [`config/.env.example`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/config/.env.example)                                                                                                         |   91 | 1–91                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`deploy/Caddyfile`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/deploy/Caddyfile)                                                                                                               |   12 | 1–12                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`deploy/database.sql`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/deploy/database.sql)                                                                                                         |   49 | 1–49                                                                                              | 已读；无独立改动建议。必要现有合同保留。 已记录具体保留理由。                                                                          |
+| [`deploy/docker/application.Dockerfile`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/deploy/docker/application.Dockerfile)                                                                       |   56 | 1–56                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`deploy/docker/checks.Dockerfile`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/deploy/docker/checks.Dockerfile)                                                                                 |   16 | 1–16                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`deploy/storage/server-policy.json`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/deploy/storage/server-policy.json)                                                                             |   20 | 1–20                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`deploy/storage/worker-policy.json`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/deploy/storage/worker-policy.json)                                                                             |   20 | 1–20                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`package.json`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/package.json)                                                                                                                       |   43 | 1–43                                                                                              | [F070](#f070)                                                                                                                          |
+| [`packages/config/package.json`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/packages/config/package.json)                                                                                       |   11 | 1–11                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`packages/config/src/env.test.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/packages/config/src/env.test.ts)                                                                                 |  618 | 1–200, 201–400, 401–600, 601–618                                                                  | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`packages/config/src/env.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/packages/config/src/env.ts)                                                                                           |  211 | 1–200, 201–211                                                                                    | [F007](#f007), [F021](#f021)                                                                                                           |
+| [`packages/contract/package.json`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/packages/contract/package.json)                                                                                   |   17 | 1–17                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`packages/contract/src/execution-schema.test.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/packages/contract/src/execution-schema.test.ts)                                                   |  102 | 1–102                                                                                             | [F071](#f071)                                                                                                                          |
+| [`packages/contract/src/execution.test.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/packages/contract/src/execution.test.ts)                                                                 |  326 | 1–200, 201–326                                                                                    | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`packages/contract/src/execution.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/packages/contract/src/execution.ts)                                                                           |  261 | 1–200, 201–261                                                                                    | [F008](#f008), [F009](#f009)                                                                                                           |
+| [`packages/contract/src/failure-reason.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/packages/contract/src/failure-reason.ts)                                                                 |    8 | 1–8                                                                                               | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`packages/contract/src/file-name.test.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/packages/contract/src/file-name.test.ts)                                                                 |   87 | 1–87                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`packages/contract/src/file-name.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/packages/contract/src/file-name.ts)                                                                           |   15 | 1–15                                                                                              | [F022](#f022)                                                                                                                          |
+| [`packages/contract/src/http.test.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/packages/contract/src/http.test.ts)                                                                           |  352 | 1–200, 201–352                                                                                    | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`packages/contract/src/http.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/packages/contract/src/http.ts)                                                                                     |  233 | 1–200, 201–233                                                                                    | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`packages/contract/src/inbound.test.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/packages/contract/src/inbound.test.ts)                                                                     |  204 | 1–200, 201–204                                                                                    | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`packages/contract/src/sources.test.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/packages/contract/src/sources.test.ts)                                                                     |   60 | 1–60                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`packages/contract/src/web-source.test.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/packages/contract/src/web-source.test.ts)                                                               |   80 | 1–80                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`packages/contract/src/web-source.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/packages/contract/src/web-source.ts)                                                                         |   58 | 1–58                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`packages/database/migrations/20260601000000_product.sql`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/packages/database/migrations/20260601000000_product.sql)                                 |   38 | 1–38                                                                                              | 已读；历史迁移保持不可变，保留原schema/identity/retained位置演进证据。                                                                 |
+| [`packages/database/migrations/20260602000000_execution.sql`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/packages/database/migrations/20260602000000_execution.sql)                             |   61 | 1–61                                                                                              | 已读；历史迁移保持不可变，保留原schema/identity/retained位置演进证据。                                                                 |
+| [`packages/database/migrations/20260603000000_public_execution_events.sql`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/packages/database/migrations/20260603000000_public_execution_events.sql) |   25 | 1–25                                                                                              | 已读；历史迁移保持不可变，保留原schema/identity/retained位置演进证据。                                                                 |
+| [`packages/database/migrations/20261004000000_identity.sql`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/packages/database/migrations/20261004000000_identity.sql)                               |   64 | 1–64                                                                                              | 已读；历史迁移保持不可变，保留原schema/identity/retained位置演进证据。                                                                 |
+| [`packages/database/migrations/20261004001000_account_identity.sql`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/packages/database/migrations/20261004001000_account_identity.sql)               |   10 | 1–10                                                                                              | 已读；历史迁移保持不可变，保留原schema/identity/retained位置演进证据。                                                                 |
+| [`packages/database/migrations/20261004010000_thread_identity.sql`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/packages/database/migrations/20261004010000_thread_identity.sql)                 |   21 | 1–21                                                                                              | 已读；历史迁移保持不可变，保留原schema/identity/retained位置演进证据。                                                                 |
+| [`packages/database/migrations/20261004020000_thread_workspace.sql`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/packages/database/migrations/20261004020000_thread_workspace.sql)               |    6 | 1–6                                                                                               | 已读；历史迁移保持不可变，保留原schema/identity/retained位置演进证据。                                                                 |
+| [`packages/database/migrations/20261004030000_product_files.sql`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/packages/database/migrations/20261004030000_product_files.sql)                     |   44 | 1–44                                                                                              | 已读；历史迁移保持不可变，保留原schema/identity/retained位置演进证据。                                                                 |
+| [`packages/database/migrations/20261004040000_assets.sql`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/packages/database/migrations/20261004040000_assets.sql)                                   |   79 | 1–79                                                                                              | 已读；历史迁移保持不可变，保留原schema/identity/retained位置演进证据。                                                                 |
+| [`packages/database/migrations/20261004050000_native_sandbox.sql`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/packages/database/migrations/20261004050000_native_sandbox.sql)                   |   27 | 1–27                                                                                              | 已读；历史迁移保持不可变，保留原schema/identity/retained位置演进证据。                                                                 |
+| [`packages/database/migrations/20261005000000_receipt_publication.sql`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/packages/database/migrations/20261005000000_receipt_publication.sql)         |   20 | 1–20                                                                                              | 已读；历史迁移保持不可变，保留原schema/identity/retained位置演进证据。                                                                 |
+| [`packages/database/migrations/20261005010000_message_sources.sql`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/packages/database/migrations/20261005010000_message_sources.sql)                 |    7 | 1–7                                                                                               | 已读；历史迁移保持不可变，保留原schema/identity/retained位置演进证据。                                                                 |
+| [`packages/database/migrations/20261006000000_relational_integrity.sql`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/packages/database/migrations/20261006000000_relational_integrity.sql)       |   47 | 1–47                                                                                              | 已读；历史迁移保持不可变，保留原schema/identity/retained位置演进证据。                                                                 |
+| [`packages/database/package.json`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/packages/database/package.json)                                                                                   |   22 | 1–22                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`packages/database/src/connection.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/packages/database/src/connection.ts)                                                                         |   33 | 1–33                                                                                              | 已读；无独立改动建议。必要现有合同保留。 已记录具体保留理由。 保留native pg Pool/public hooks与当前max8，不加未经测量的新开关。        |
+| [`packages/object-storage/package.json`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/packages/object-storage/package.json)                                                                       |   11 | 1–11                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`packages/object-storage/src/index.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/packages/object-storage/src/index.ts)                                                                       |    1 | 1–1                                                                                               | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`packages/object-storage/src/objects.test.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/packages/object-storage/src/objects.test.ts)                                                         |   72 | 1–72                                                                                              | [F072](#f072)                                                                                                                          |
+| [`packages/object-storage/src/objects.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/packages/object-storage/src/objects.ts)                                                                   |  102 | 1–102                                                                                             | 已读；无独立改动建议。必要现有合同保留。 保留assigned key、IfNoneMatch、maxAttempts:1与bounded stream owner。                          |
+| [`scripts/assign-legacy-threads.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/scripts/assign-legacy-threads.ts)                                                                               |   41 | 1–41                                                                                              | [F023](#f023)                                                                                                                          |
+| [`scripts/check-lifecycle.sh`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/scripts/check-lifecycle.sh)                                                                                           |   42 | 1–42                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`scripts/check.sh`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/scripts/check.sh)                                                                                                               |   36 | 1–36                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`scripts/database-check.sh`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/scripts/database-check.sh)                                                                                             |  141 | 1–141                                                                                             | [F024](#f024)                                                                                                                          |
+| [`scripts/generate-api.test.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/scripts/generate-api.test.ts)                                                                                       |   64 | 1–64                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`scripts/generate-api.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/scripts/generate-api.ts)                                                                                                 |   86 | 1–86                                                                                              | [F060](#f060)                                                                                                                          |
+| [`scripts/generate-database.sh`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/scripts/generate-database.sh)                                                                                       |   18 | 1–18                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`scripts/reconcile-deliveries.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/scripts/reconcile-deliveries.ts)                                                                                 |   85 | 1–85                                                                                              | 已读；无独立改动建议。必要现有合同保留。 已记录具体保留理由。                                                                          |
+| [`scripts/sandbox-check.sh`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/scripts/sandbox-check.sh)                                                                                               |  130 | 1–130                                                                                             | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`tests/integration/administration.test.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/integration/administration.test.ts)                                                               |  113 | 1–113                                                                                             | [F073](#f073)                                                                                                                          |
+| [`tests/integration/assets-migration.test.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/integration/assets-migration.test.ts)                                                           |  601 | 1–200, 201–400, 401–600, 601–601                                                                  | [F074](#f074)                                                                                                                          |
+| [`tests/integration/authentication-fixture.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/integration/authentication-fixture.ts)                                                         |   72 | 1–72                                                                                              | 已读；无独立改动建议。必要现有合同保留。 已记录具体保留理由。 保留官方Better Auth生成/签名真实session，不造cookie旁路。                |
+| [`tests/integration/command-publication.test.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/integration/command-publication.test.ts)                                                     |  352 | 1–200, 201–352                                                                                    | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`tests/integration/command-relay.test.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/integration/command-relay.test.ts)                                                                 |   92 | 1–92                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`tests/integration/connection.test.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/integration/connection.test.ts)                                                                       |  164 | 1–164                                                                                             | 已读；无独立改动建议。必要现有合同保留。 已记录具体保留理由。                                                                          |
+| [`tests/integration/conversation-http.test.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/integration/conversation-http.test.ts)                                                         | 1859 | 1–200, 201–400, 401–600, 601–800, 801–1000, 1001–1200, 1201–1400, 1401–1600, 1601–1800, 1801–1859 | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`tests/integration/database-fixture.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/integration/database-fixture.ts)                                                                     |   95 | 1–95                                                                                              | 已读；无独立改动建议。必要现有合同保留。 已记录具体保留理由。                                                                          |
+| [`tests/integration/database.test.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/integration/database.test.ts)                                                                           |  197 | 1–197                                                                                             | [F075](#f075)                                                                                                                          |
+| [`tests/integration/delivery-reconciliation.test.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/integration/delivery-reconciliation.test.ts)                                             |  235 | 1–200, 201–235                                                                                    | 已读；无独立改动建议。必要现有合同保留。 已记录具体保留理由。                                                                          |
+| [`tests/integration/execute-run.test.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/integration/execute-run.test.ts)                                                                     |  509 | 1–200, 201–400, 401–509                                                                           | [F076](#f076), [F077](#f077)                                                                                                           |
+| [`tests/integration/execution-events.test.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/integration/execution-events.test.ts)                                                           |  566 | 1–200, 201–400, 401–566                                                                           | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`tests/integration/execution-store.test.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/integration/execution-store.test.ts)                                                             |  865 | 1–200, 201–400, 401–600, 601–800, 801–865                                                         | [F078](#f078)                                                                                                                          |
+| [`tests/integration/execution-transport.test.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/integration/execution-transport.test.ts)                                                     |  817 | 1–200, 201–400, 401–600, 601–800, 801–817                                                         | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`tests/integration/fixture-ownership.test.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/integration/fixture-ownership.test.ts)                                                         |  123 | 1–123                                                                                             | 已读；无独立改动建议。必要现有合同保留。 已记录具体保留理由。                                                                          |
+| [`tests/integration/history-budget.test.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/integration/history-budget.test.ts)                                                               |  221 | 1–200, 201–221                                                                                    | 已读；无独立改动建议。必要现有合同保留。 已记录具体保留理由。                                                                          |
+| [`tests/integration/identity.test.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/integration/identity.test.ts)                                                                           |  351 | 1–200, 201–351                                                                                    | 已读；无独立改动建议。必要现有合同保留。 已记录具体保留理由。                                                                          |
+| [`tests/integration/postgres-proxy-fixture.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/integration/postgres-proxy-fixture.ts)                                                         |   76 | 1–76                                                                                              | [F079](#f079)                                                                                                                          |
+| [`tests/integration/public-sources.test.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/integration/public-sources.test.ts)                                                               |  298 | 1–200, 201–298                                                                                    | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`tests/integration/redis.test.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/integration/redis.test.ts)                                                                                 |  148 | 1–148                                                                                             | [F080](#f080)                                                                                                                          |
+| [`tests/integration/relational-integrity.test.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/integration/relational-integrity.test.ts)                                                   |  397 | 1–200, 201–397                                                                                    | [F061](#f061)                                                                                                                          |
+| [`tests/integration/run-scoped-observation.test.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/integration/run-scoped-observation.test.ts)                                               |  319 | 1–200, 201–319                                                                                    | [F081](#f081)                                                                                                                          |
+| [`tests/integration/runtime.test.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/integration/runtime.test.ts)                                                                             |  986 | 1–200, 201–400, 401–600, 601–800, 801–986                                                         | [F062](#f062), [F082](#f082), [F083](#f083)                                                                                            |
+| [`tests/integration/submission.test.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/integration/submission.test.ts)                                                                       |  541 | 1–200, 201–400, 401–541                                                                           | [F063](#f063)                                                                                                                          |
+| [`tests/integration/thread-lifecycle.test.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/integration/thread-lifecycle.test.ts)                                                           |  783 | 1–200, 201–400, 401–600, 601–783                                                                  | [F084](#f084), [F085](#f085)                                                                                                           |
+| [`tests/integration/worker-health.test.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/integration/worker-health.test.ts)                                                                 |  580 | 1–200, 201–400, 401–580                                                                           | 已读；无独立改动建议。必要现有合同保留。 已记录具体保留理由。                                                                          |
+| [`tests/sandbox/e2b.test.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/sandbox/e2b.test.ts)                                                                                             |  617 | 1–200, 201–400, 401–600, 601–617                                                                  | [F025](#f025)                                                                                                                          |
+| [`tests/sandbox/native-restart.test.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/sandbox/native-restart.test.ts)                                                                       |  127 | 1–127                                                                                             | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`tests/sandbox/restart-check.sh`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/sandbox/restart-check.sh)                                                                                   |   82 | 1–82                                                                                              | [F026](#f026)                                                                                                                          |
+| [`tests/scripts/architecture.test.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/scripts/architecture.test.ts)                                                                           |  200 | 1–200                                                                                             | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`tests/scripts/ci-policy.test.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/scripts/ci-policy.test.ts)                                                                                 |   58 | 1–58                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`tests/scripts/database-project.test.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/scripts/database-project.test.ts)                                                                   |   42 | 1–42                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`tests/scripts/deployment-boundaries.test.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/scripts/deployment-boundaries.test.ts)                                                         |  328 | 1–200, 201–328                                                                                    | [F080](#f080)                                                                                                                          |
+| [`tests/scripts/deployment-check.sh`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/scripts/deployment-check.sh)                                                                             |  178 | 1–178                                                                                             | [F064](#f064)                                                                                                                          |
+| [`tests/scripts/deployment-web.test.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/scripts/deployment-web.test.ts)                                                                       |   18 | 1–18                                                                                              | [F086](#f086)                                                                                                                          |
+| [`tests/scripts/process-diagnostics.test.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/scripts/process-diagnostics.test.ts)                                                             |   74 | 1–74                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`tests/scripts/production-runtime.test.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/scripts/production-runtime.test.ts)                                                               |  244 | 1–200, 201–244                                                                                    | [F065](#f065), [F087](#f087)                                                                                                           |
+| [`tests/scripts/proxy-deadline.test.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/scripts/proxy-deadline.test.ts)                                                                       |   21 | 1–21                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`tests/scripts/reconciliation-cli.test.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/scripts/reconciliation-cli.test.ts)                                                               |   31 | 1–31                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`tests/scripts/storage-initialization.test.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/scripts/storage-initialization.test.ts)                                                       |  225 | 1–200, 201–225                                                                                    | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`tests/storage/assets.test.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/storage/assets.test.ts)                                                                                       | 1083 | 1–200, 201–400, 401–600, 601–800, 801–1000, 1001–1083                                             | [F066](#f066), [F088](#f088)                                                                                                           |
+| [`tests/storage/objects.test.ts`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tests/storage/objects.test.ts)                                                                                     |   88 | 1–88                                                                                              | 已读；无独立改动建议。必要现有合同保留。                                                                                               |
+| [`tsconfig.json`](https://github.com/zihanyang-dev/video-agent-example/blob/01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb/tsconfig.json)                                                                                                                     |   38 | 1–38                                                                                              | [F089](#f089)                                                                                                                          |
 
 ### 7.1 实际参考读取范围
 

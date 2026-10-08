@@ -1,12 +1,27 @@
 import { expect, test } from 'bun:test'
-import { mkdtempSync, rmSync, symlinkSync } from 'node:fs'
+import {
+  mkdirSync,
+  mkdtempSync,
+  existsSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { parseSessionEntries, SessionManager } from '@earendil-works/pi-coding-agent'
-import type { SandboxTools } from '../execution/contract.ts'
-import { restorePiHistory } from './pi-history.ts'
-import type { WebSearchConfig } from './web-search'
-import { createPiHarness } from './pi.ts'
+import {
+  createAgentSession,
+  createExtensionRuntime,
+  ModelRuntime,
+  SessionManager,
+  SettingsManager,
+  type ResourceLoader,
+} from '@earendil-works/pi-coding-agent'
+import { InMemoryCredentialStore } from '@earendil-works/pi-ai'
+import type { SandboxTools } from '../../contract.ts'
+import type { WebSearchConfig } from '../web-search'
+import { createPiHarness } from './adapter.ts'
 
 const options = {
   key: 'fixture-only-key',
@@ -26,7 +41,10 @@ type RequestBody = {
   max_completion_tokens?: number
 }
 
-function fixture(responses: Record<string, unknown>[][]) {
+function fixture(responses: (Record<string, unknown>[] | Response)[]) {
+  const statePath = mkdtempSync(join(tmpdir(), 'owned-pi-adapter-'))
+  const threadID = crypto.randomUUID()
+  const nativeSessionID = crypto.randomUUID()
   const requests: RequestBody[] = []
   const server = Bun.serve({
     hostname: '127.0.0.1',
@@ -35,7 +53,8 @@ function fixture(responses: Record<string, unknown>[][]) {
       expect(request.headers.get('authorization')).toBe('Bearer fixture-only-key')
       requests.push((await request.json()) as RequestBody)
       const chunks = responses.shift()
-      if (!chunks) return new Response('unexpected request', { status: 500 })
+      if (!chunks) return new Response('unexpected request', { status: 401 })
+      if (chunks instanceof Response) return chunks
       return new Response(
         chunks
           .map(
@@ -49,9 +68,46 @@ function fixture(responses: Record<string, unknown>[][]) {
   })
   return {
     requests,
+    statePath,
+    threadID,
+    nativeSessionID,
+    nativeManager() {
+      const file = SessionManager.findById('/', nativeSessionID, join(statePath, 'pi', threadID))
+      if (!file) throw new Error('Expected persisted native Pi session')
+      return SessionManager.open(file)
+    },
+    nativeJSONL() {
+      const file = SessionManager.findById('/', nativeSessionID, join(statePath, 'pi', threadID))
+      if (!file) throw new Error('Expected persisted native Pi session')
+      return readFileSync(file, 'utf8')
+    },
     baseURL: `http://127.0.0.1:${server.port}/v1`,
-    close: () => server.stop(true),
+    async close() {
+      try {
+        await server.stop(true)
+      } finally {
+        rmSync(statePath, { recursive: true, force: true })
+      }
+    },
   }
+}
+
+function identity(provider: ReturnType<typeof fixture>) {
+  return {
+    engine: 'pi' as const,
+    threadID: provider.threadID,
+    nativeSessionID: provider.nativeSessionID,
+    runID: crypto.randomUUID(),
+    async beforeModel() {},
+    async checkpoint() {},
+  }
+}
+
+function failure(run: Promise<unknown>) {
+  return run.then(
+    () => undefined,
+    (error: unknown) => error,
+  )
 }
 
 const answer = (text: string) => [
@@ -165,18 +221,19 @@ test('canonical answer is the final native assistant message, not tool-turn narr
     const deltas: string[] = []
     const result = await createPiHarness({
       ...options,
+      statePath: provider.statePath,
       baseURL: provider.baseURL,
-    }).turn({
+    }).run({
       text: 'Answer after checking notes',
-      history: null,
+      ...identity(provider),
       tools: sandbox().tools,
       signal: AbortSignal.timeout(5000),
       onText: (delta) => deltas.push(delta),
     })
     expect(result.text).toBe(final)
     expect(deltas.join('')).toBe('Checking the assigned notes. ' + final)
-    expect(JSON.stringify(result.history)).toContain('Checking the assigned notes.')
-    expect(JSON.stringify(result.history)).toContain('PRIVATE READ')
+    expect(provider.nativeJSONL()).toContain('Checking the assigned notes.')
+    expect(provider.nativeJSONL()).toContain('PRIVATE READ')
     expect(result.text).not.toContain('PRIVATE THINKING')
     expect(provider.requests).toHaveLength(2)
   } finally {
@@ -184,52 +241,521 @@ test('canonical answer is the final native assistant message, not tool-turn narr
   }
 })
 
-test('streams only assistant text and restores canonical private history in a fresh harness', async () => {
+test('fresh harnesses keep the same native session across multiple turns and request the assigned model', async () => {
   const provider = fixture([answer('Hello'), answer('Again')])
+  const deltas: string[] = []
   try {
-    const deltas: string[] = []
     const input = {
+      ...identity(provider),
       text: 'first',
-      history: null,
       tools: sandbox().tools,
-      signal: new AbortController().signal,
+      signal: AbortSignal.timeout(5000),
       onText: (text: string) => deltas.push(text),
     }
-    const first = await createPiHarness({
-      ...options,
-      baseURL: provider.baseURL,
-    }).turn(input)
+    const configuration = { ...options, statePath: provider.statePath, baseURL: provider.baseURL }
+    const first = await createPiHarness(configuration).run(input)
     expect(first.text).toBe('Hello')
-    expect(deltas.join('')).toBe('Hello')
-    const restored = JSON.parse(JSON.stringify(first.history)) as {
-      header: { id: string }
-      entries: unknown[]
-      leafID: string
-    }
-    expect(restored.header.id).toBeString()
-    expect(restored.entries.length).toBeGreaterThan(0)
-    expect(restored.leafID).toBeString()
-    const second = await createPiHarness({
-      ...options,
-      baseURL: provider.baseURL,
-    }).turn({ ...input, text: 'second', history: restored })
+    expect(first).not.toHaveProperty('history')
+    const file = provider.nativeManager().getSessionFile()
+    const entries = provider.nativeManager().getEntries()
+    const second = await createPiHarness(configuration).run({
+      ...input,
+      runID: crypto.randomUUID(),
+      text: 'second',
+    })
     expect(second.text).toBe('Again')
-    const snapshot = second.history as typeof restored
-    expect(snapshot.header).toEqual(restored.header)
-    expect(snapshot.entries.slice(0, restored.entries.length)).toEqual(restored.entries)
+    const reopened = provider.nativeManager()
+    expect(reopened.getSessionId()).toBe(provider.nativeSessionID)
+    expect(reopened.getSessionFile()).toBe(file)
+    expect(reopened.getEntries().slice(0, entries.length)).toEqual(entries)
     const request = provider.requests[1]!
     expect(JSON.stringify(request.messages)).toContain('first')
     expect(JSON.stringify(request.messages)).toContain('Hello')
-    expect(request.model).toBe(options.modelID)
+    expect(JSON.stringify(request.messages)).toContain('second')
+    expect(request.model).toBe('fixture-model')
+    expect(provider.requests[0]!.max_tokens ?? provider.requests[0]!.max_completion_tokens).toBe(
+      512,
+    )
     expect(provider.requests[0]!.tools.map((tool) => tool.function.name).sort()).toEqual([
       'execute',
       'read',
       'write',
     ])
     expect(JSON.stringify(provider.requests[0]!.messages)).toContain(options.systemPrompt)
-    expect(deltas.join('')).not.toContain('PRIVATE')
+    expect(deltas.join('')).toBe('HelloAgain')
   } finally {
     await provider.close()
+  }
+})
+
+test('same accepted run resumes persisted input and completed tools after pure model failure without duplicating the user', async () => {
+  const provider = fixture([
+    calls([{ name: 'execute', args: { command: 'render once' } }]),
+    new Response('PRIVATE provider rejection', { status: 401 }),
+    answer('Recovered'),
+  ])
+  const assigned = sandbox()
+  const configuration = { ...options, statePath: provider.statePath, baseURL: provider.baseURL }
+  const input = {
+    ...identity(provider),
+    text: 'ORIGINAL_TASK_CANARY',
+    tools: assigned.tools,
+    signal: AbortSignal.timeout(5000),
+    onText() {},
+  }
+  try {
+    expect(await failure(createPiHarness(configuration).run(input))).toEqual(
+      new Error('Pi model execution failed'),
+    )
+    expect(assigned.commands).toEqual(['render once'])
+    const messages = provider.nativeManager().buildSessionContext().messages
+    expect(
+      messages.some(
+        (message) =>
+          message.role === 'user' &&
+          JSON.stringify(message.content).includes('ORIGINAL_TASK_CANARY'),
+      ),
+    ).toBe(true)
+    expect(
+      messages.some(
+        (message) =>
+          message.role === 'toolResult' &&
+          JSON.stringify(message.content).includes('PRIVATE STDOUT'),
+      ),
+    ).toBe(true)
+    const recovered = await createPiHarness(configuration).run(input)
+    expect(recovered.text).toBe('Recovered')
+    expect(provider.requests).toHaveLength(3)
+    expect(JSON.stringify(provider.requests[2]!.messages)).toContain('PRIVATE STDOUT')
+    const users = provider
+      .nativeManager()
+      .buildSessionContext()
+      .messages.filter(
+        (message) =>
+          message.role === 'user' &&
+          JSON.stringify(message.content).includes('ORIGINAL_TASK_CANARY'),
+      )
+    expect(users).toHaveLength(1)
+    expect(assigned.commands).toEqual(['render once'])
+  } finally {
+    await provider.close()
+  }
+})
+
+test('pure model failure retains the SDK input before any successful assistant exists', async () => {
+  const provider = fixture([new Response('PRIVATE failure', { status: 401 }), answer('Next turn')])
+  const configuration = { ...options, statePath: provider.statePath, baseURL: provider.baseURL }
+  const input = {
+    ...identity(provider),
+    text: 'failed original input',
+    tools: sandbox().tools,
+    signal: AbortSignal.timeout(5000),
+    onText() {},
+  }
+  try {
+    expect(await failure(createPiHarness(configuration).run(input))).toEqual(
+      new Error('Pi model execution failed'),
+    )
+    expect(provider.nativeJSONL()).toContain('failed original input')
+    const next = await createPiHarness(configuration).run({
+      ...input,
+      runID: crypto.randomUUID(),
+      text: 'continue',
+    })
+    expect(next.text).toBe('Next turn')
+    expect(JSON.stringify(provider.requests[1]!.messages)).toContain('failed original input')
+    expect(provider.nativeManager().getSessionId()).toBe(provider.nativeSessionID)
+  } finally {
+    await provider.close()
+  }
+})
+
+test('a current model failure cannot return a previous successful assistant', async () => {
+  const provider = fixture([answer('Previous success'), new Response('failure', { status: 401 })])
+  const configuration = { ...options, statePath: provider.statePath, baseURL: provider.baseURL }
+  const input = {
+    ...identity(provider),
+    text: 'first',
+    tools: sandbox().tools,
+    signal: AbortSignal.timeout(5000),
+    onText() {},
+  }
+  try {
+    await createPiHarness(configuration).run(input)
+    expect(
+      await failure(
+        createPiHarness(configuration).run({
+          ...input,
+          runID: crypto.randomUUID(),
+          text: 'fail now',
+        }),
+      ),
+    ).toEqual(new Error('Pi model execution failed'))
+    expect(provider.requests).toHaveLength(2)
+  } finally {
+    await provider.close()
+  }
+})
+
+test('durable final receipt survives acknowledgement loss without another model request or effect', async () => {
+  const provider = fixture([
+    calls([{ name: 'write', args: { path: '/receipt-output', content: 'once' } }]),
+    answer('  Exact completed answer.\n'),
+  ])
+  const assigned = sandbox()
+  let writes = 0
+  const write = assigned.tools.write
+  assigned.tools.write = async (input) => {
+    writes++
+    await write(input)
+  }
+  const configuration = { ...options, statePath: provider.statePath, baseURL: provider.baseURL }
+  const input = {
+    ...identity(provider),
+    text: 'finish once',
+    tools: assigned.tools,
+    signal: AbortSignal.timeout(5000),
+    onText() {},
+    async checkpoint() {
+      if (
+        provider
+          .nativeManager()
+          .getBranch()
+          .some((entry) => entry.type === 'custom' && entry.customType === 'platform-completed')
+      )
+        throw new Error('controlled receipt acknowledgement loss')
+    },
+  }
+  try {
+    expect(await failure(createPiHarness(configuration).run(input))).toEqual(
+      new Error('controlled receipt acknowledgement loss'),
+    )
+    expect(writes).toBe(1)
+    const recovered = await createPiHarness(configuration).run({
+      ...input,
+      tools: {
+        async execute() {
+          throw new Error('unexpected effect')
+        },
+        async write() {
+          throw new Error('unexpected effect')
+        },
+        async read() {
+          throw new Error('unexpected effect')
+        },
+      },
+      async beforeModel() {
+        throw new Error('unexpected model admission')
+      },
+      onText() {
+        throw new Error('unexpected streaming')
+      },
+    })
+    expect(recovered).toEqual({ text: '  Exact completed answer.\n', sources: [] })
+    expect(provider.requests).toHaveLength(2)
+    expect(writes).toBe(1)
+  } finally {
+    await provider.close()
+  }
+})
+
+test('model authority refusal prevents HTTP dispatch after native input checkpoint', async () => {
+  const provider = fixture([answer('must not run')])
+  const refusal = new Error('model authority lost')
+  const order: string[] = []
+  try {
+    expect(
+      await failure(
+        createPiHarness({
+          ...options,
+          statePath: provider.statePath,
+          baseURL: provider.baseURL,
+        }).run({
+          ...identity(provider),
+          text: 'accepted input',
+          tools: sandbox().tools,
+          signal: AbortSignal.timeout(5000),
+          onText() {},
+          async checkpoint() {
+            expect(provider.nativeJSONL()).toContain('accepted input')
+            order.push('checkpoint')
+          },
+          async beforeModel() {
+            order.push('beforeModel')
+            throw refusal
+          },
+        }),
+      ),
+    ).toBeInstanceOf(Error)
+    expect(order).toEqual(['checkpoint', 'beforeModel'])
+    expect(provider.requests).toHaveLength(0)
+  } finally {
+    await provider.close()
+  }
+})
+
+test('official SDK compaction persists a summary in the assigned native session for the next harness turn', async () => {
+  const provider = fixture([
+    answer('Original answer'),
+    answer('COMPACTED_TASK_SUMMARY'),
+    answer('Continued'),
+  ])
+  const configuration = { ...options, statePath: provider.statePath, baseURL: provider.baseURL }
+  const input = {
+    ...identity(provider),
+    text: 'Original task details',
+    tools: sandbox().tools,
+    signal: AbortSignal.timeout(5000),
+    onText() {},
+  }
+  let session: Awaited<ReturnType<typeof createAgentSession>>['session'] | undefined
+  try {
+    await createPiHarness(configuration).run(input)
+    const manager = provider.nativeManager()
+    const priorEntries = manager.getEntries()
+    const runtime = await ModelRuntime.create({
+      credentials: new InMemoryCredentialStore(),
+      modelsPath: null,
+      refreshOnCreate: false,
+      allowModelNetwork: false,
+    })
+    runtime.registerProvider('owned-compaction', {
+      baseUrl: provider.baseURL,
+      api: 'openai-completions',
+      authHeader: true,
+      models: [
+        {
+          id: options.modelID,
+          name: options.modelID,
+          reasoning: false,
+          input: ['text'],
+          contextWindow: 16384,
+          maxTokens: 512,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        },
+      ],
+    })
+    await runtime.setRuntimeApiKey('owned-compaction', options.key)
+    const resourceLoader: ResourceLoader = {
+      getExtensions: () => ({ extensions: [], errors: [], runtime: createExtensionRuntime() }),
+      getSkills: () => ({ skills: [], diagnostics: [] }),
+      getPrompts: () => ({ prompts: [], diagnostics: [] }),
+      getThemes: () => ({ themes: [], diagnostics: [] }),
+      getAgentsFiles: () => ({ agentsFiles: [] }),
+      getSystemPrompt: () => options.systemPrompt,
+      getSystemPromptSource: () => undefined,
+      getAppendSystemPrompt: () => [],
+      getAppendSystemPromptSources: () => [],
+      extendResources() {},
+      async reload() {},
+    }
+    ;({ session } = await createAgentSession({
+      sessionManager: manager,
+      modelRuntime: runtime,
+      model: runtime.getModel('owned-compaction', options.modelID)!,
+      thinkingLevel: 'off',
+      tools: [],
+      resourceLoader,
+      settingsManager: SettingsManager.inMemory({
+        cacheWarming: 'off',
+        compaction: { enabled: true, reserveTokens: 512, keepRecentTokens: 1 },
+        retry: { enabled: false, provider: { maxRetries: 0 } },
+      }),
+    }))
+    const compacted = await session.compact('Preserve the original task.')
+    expect(compacted.summary).toContain('COMPACTED_TASK_SUMMARY')
+    session.dispose()
+    session = undefined
+    const reopened = provider.nativeManager()
+    expect(reopened.getSessionId()).toBe(provider.nativeSessionID)
+    expect(reopened.getEntries().slice(0, priorEntries.length)).toEqual(priorEntries)
+    expect(
+      reopened
+        .getBranch()
+        .some(
+          (entry) =>
+            entry.type === 'compaction' && entry.summary.includes('COMPACTED_TASK_SUMMARY'),
+        ),
+    ).toBe(true)
+    const continued = await createPiHarness(configuration).run({
+      ...input,
+      runID: crypto.randomUUID(),
+      text: 'Continue after compaction',
+    })
+    expect(continued.text).toBe('Continued')
+    expect(provider.requests).toHaveLength(3)
+    expect(JSON.stringify(provider.requests[1]!.messages)).toContain('Original task details')
+    expect(JSON.stringify(provider.requests[2]!.messages)).toContain('COMPACTED_TASK_SUMMARY')
+  } finally {
+    session?.dispose()
+    await provider.close()
+  }
+})
+
+test('model shell and file requests cannot mutate or read corresponding host files', async () => {
+  const provider = fixture([])
+  const hostFile = join(provider.statePath, 'host-only.txt')
+  const hostEffect = join(provider.statePath, 'must-not-exist.txt')
+  writeFileSync(hostFile, 'HOST_SECRET_CANARY')
+  const command = `printf host-effect > ${hostEffect}`
+  // Use a second provider sharing no state with the host fixture; paths remain host-only.
+  const model = fixture([
+    calls([{ name: 'read', args: { path: hostFile } }]),
+    calls([{ name: 'write', args: { path: hostFile, content: 'guest-only' } }]),
+    calls([{ name: 'execute', args: { command } }]),
+    answer('Isolated'),
+  ])
+  const assigned = sandbox()
+  try {
+    const result = await createPiHarness({
+      ...options,
+      statePath: model.statePath,
+      baseURL: model.baseURL,
+    }).run({
+      ...identity(model),
+      text: 'Operate in the assigned guest only',
+      tools: assigned.tools,
+      signal: AbortSignal.timeout(5000),
+      onText() {},
+    })
+    expect(result.text).toBe('Isolated')
+    expect(readFileSync(hostFile, 'utf8')).toBe('HOST_SECRET_CANARY')
+    expect(existsSync(hostEffect)).toBe(false)
+    expect(assigned.files.get(hostFile)).toBe('guest-only')
+    expect(assigned.commands).toEqual([command])
+    expect(JSON.stringify(model.requests)).not.toContain('HOST_SECRET_CANARY')
+    expect(model.nativeJSONL()).not.toContain('HOST_SECRET_CANARY')
+  } finally {
+    await model.close()
+    await provider.close()
+  }
+})
+
+test('native skill discovery advertises metadata and loads full instructions through the assigned guest', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'vid-skills-'))
+  const skillPath = join(directory, 'render', 'SKILL.md')
+  const referencePath = join(directory, 'render', 'references', 'formats.md')
+  const scriptPath = join(directory, 'render', 'scripts', 'render.sh')
+  let provider: ReturnType<typeof fixture> | undefined
+  try {
+    mkdirSync(join(directory, 'render', 'references'), { recursive: true })
+    mkdirSync(join(directory, 'render', 'scripts'), { recursive: true })
+    writeFileSync(
+      skillPath,
+      '---\nname: render\ndescription: Render a fixture clip\n---\nBODY_ONLY_AFTER_READ\nRead references/formats.md and run scripts/render.sh.\n',
+    )
+    writeFileSync(referencePath, 'REFERENCE_ONLY_AFTER_READ')
+    writeFileSync(scriptPath, 'SCRIPT_ONLY_WHEN_EXECUTED')
+    provider = fixture([
+      calls([{ name: 'read', args: { path: skillPath } }]),
+      calls([{ name: 'read', args: { path: referencePath } }]),
+      calls([{ name: 'execute', args: { command: `sh ${scriptPath}` } }]),
+      answer('Rendered'),
+    ])
+    const assigned = sandbox()
+    assigned.files.set(
+      skillPath,
+      'GUEST_SKILL_BODY: Read references/formats.md and run scripts/render.sh.',
+    )
+    assigned.files.set(referencePath, 'GUEST_FORMAT_REFERENCE')
+    const result = await createPiHarness({
+      ...options,
+      statePath: provider.statePath,
+      baseURL: provider.baseURL,
+      skillsPath: directory,
+    }).run({
+      text: 'Render a clip using the available skill',
+      ...identity(provider),
+      tools: assigned.tools,
+      signal: AbortSignal.timeout(5000),
+      onText: () => {},
+    })
+    const initial = JSON.stringify(provider.requests[0]!.messages)
+    expect(initial).toContain('Render a fixture clip')
+    expect(initial).toContain(skillPath)
+    expect(initial).not.toContain('BODY_ONLY_AFTER_READ')
+    expect(initial).not.toContain('GUEST_SKILL_BODY')
+    expect(initial).not.toContain('REFERENCE_ONLY_AFTER_READ')
+    expect(initial).not.toContain('SCRIPT_ONLY_WHEN_EXECUTED')
+    expect(JSON.stringify(provider.requests[1]!.messages)).toContain('GUEST_SKILL_BODY')
+    expect(JSON.stringify(provider.requests[2]!.messages)).toContain('GUEST_FORMAT_REFERENCE')
+    expect(assigned.commands).toEqual([`sh ${scriptPath}`])
+    expect(result.text).toBe('Rendered')
+  } finally {
+    try {
+      await provider?.close()
+    } finally {
+      rmSync(directory, { recursive: true, force: true })
+    }
+  }
+})
+
+test('an invalid configured skill bundle fails before inference without exposing its diagnostics', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'vid-invalid-skills-'))
+  const provider = fixture([answer('must not run')])
+  try {
+    mkdirSync(join(directory, 'broken'))
+    writeFileSync(
+      join(directory, 'broken', 'SKILL.md'),
+      '---\nname: broken\n---\nPRIVATE_INVALID_BODY',
+    )
+    const failure = await createPiHarness({
+      ...options,
+      statePath: provider.statePath,
+      baseURL: provider.baseURL,
+      skillsPath: directory,
+    })
+      .run({
+        text: 'do not infer',
+        ...identity(provider),
+        tools: sandbox().tools,
+        signal: AbortSignal.timeout(5000),
+        onText: () => {},
+      })
+      .catch((error: unknown) => error)
+    expect(failure).toEqual(new Error('Invalid assigned skill bundle'))
+    expect(provider.requests).toHaveLength(0)
+  } finally {
+    try {
+      await provider.close()
+    } finally {
+      rmSync(directory, { recursive: true, force: true })
+    }
+  }
+})
+
+test('explicit skill commands use native expansion without exposing supporting files eagerly', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'vid-explicit-skills-'))
+  const provider = fixture([answer('Selected')])
+  try {
+    mkdirSync(join(directory, 'render'))
+    writeFileSync(
+      join(directory, 'render', 'SKILL.md'),
+      '---\nname: render\ndescription: Render a fixture clip\ndisable-model-invocation: true\n---\nEXPLICIT_INSTRUCTIONS\n',
+    )
+    const harness = createPiHarness({
+      ...options,
+      statePath: provider.statePath,
+      baseURL: provider.baseURL,
+      skillsPath: directory,
+    })
+    const input = {
+      ...identity(provider),
+      tools: sandbox().tools,
+      signal: AbortSignal.timeout(5000),
+      onText: () => {},
+    }
+    await harness.run({ ...input, text: '/skill:render chosen arguments' })
+    const messages = JSON.stringify(provider.requests[0]!.messages)
+    expect(messages).toContain('EXPLICIT_INSTRUCTIONS')
+    expect(messages).toContain('chosen arguments')
+    expect(messages).not.toContain('<available_skills>')
+  } finally {
+    try {
+      await provider.close()
+    } finally {
+      rmSync(directory, { recursive: true, force: true })
+    }
   }
 })
 
@@ -246,17 +772,18 @@ test('host symlink errors cannot prevent a write to the assigned guest path', as
     const assigned = sandbox()
     const result = await createPiHarness({
       ...options,
+      statePath: provider.statePath,
       baseURL: provider.baseURL,
-    }).turn({
+    }).run({
       text: 'Write in the assigned guest',
-      history: null,
+      ...identity(provider),
       tools: assigned.tools,
       signal: AbortSignal.timeout(5000),
       onText: () => {},
     })
     expect(result.text).toBe('Done')
     expect(assigned.files.get(guestPath)).toBe('guest bytes')
-    expect(JSON.stringify(result.history)).not.toContain('ELOOP')
+    expect(provider.nativeJSONL()).not.toContain('ELOOP')
   } finally {
     try {
       await provider?.close()
@@ -280,10 +807,11 @@ test('executes only assigned sandbox tools with private results and meaningful s
   try {
     const result = await createPiHarness({
       ...options,
+      statePath: provider.statePath,
       baseURL: provider.baseURL,
-    }).turn({
+    }).run({
       text: 'render',
-      history: null,
+      ...identity(provider),
       tools: assigned.tools,
       signal: new AbortController().signal,
       onText: (text) => deltas.push(text),
@@ -295,7 +823,7 @@ test('executes only assigned sandbox tools with private results and meaningful s
     expect(result.text).toBe('Rendered')
     expect(deltas.join('')).toBe('Rendered')
     expect(JSON.stringify(provider.requests[2]!.messages)).toContain('PRIVATE STDOUT')
-    expect(JSON.stringify(result.history)).toContain('PRIVATE STDOUT')
+    expect(provider.nativeJSONL()).toContain('PRIVATE STDOUT')
   } finally {
     await provider.close()
   }
@@ -307,13 +835,15 @@ test('pre-aborted turns do not contact the provider', async () => {
     const controller = new AbortController()
     controller.abort()
     expect(
-      createPiHarness({ ...options, baseURL: provider.baseURL }).turn({
-        text: 'no',
-        history: null,
-        tools: sandbox().tools,
-        signal: controller.signal,
-        onText: () => {},
-      }),
+      createPiHarness({ ...options, statePath: provider.statePath, baseURL: provider.baseURL }).run(
+        {
+          text: 'no',
+          ...identity(provider),
+          tools: sandbox().tools,
+          signal: controller.signal,
+          onText: () => {},
+        },
+      ),
     ).rejects.toThrow()
     expect(provider.requests).toHaveLength(0)
   } finally {
@@ -331,10 +861,11 @@ test('cancellation waits for the sandbox tool to settle before returning', async
     let returned = false
     const turn = createPiHarness({
       ...options,
+      statePath: provider.statePath,
       baseURL: provider.baseURL,
-    }).turn({
+    }).run({
       text: 'render',
-      history: null,
+      ...identity(provider),
       tools: pending.assigned.tools,
       signal: controller.signal,
       onText: (text) => deltas.push(text),
@@ -367,299 +898,12 @@ test('cancellation waits for the sandbox tool to settle before returning', async
   }
 })
 
-async function seededHistory() {
-  const provider = fixture([answer('Previous')])
-  try {
-    const result = await createPiHarness({
-      ...options,
-      baseURL: provider.baseURL,
-    }).turn({
-      text: 'previous request',
-      history: null,
-      tools: sandbox().tools,
-      signal: new AbortController().signal,
-      onText: () => {},
-    })
-    return JSON.parse(JSON.stringify(result.history)) as {
-      header: Record<string, unknown>
-      entries: Record<string, unknown>[]
-      leafID: string | null
-    }
-  } finally {
-    await provider.close()
-  }
-}
-
-for (const stopReason of ['aborted', 'error']) {
-  test(`a successful current invocation ignores a historical ${stopReason} assistant`, async () => {
-    const history = await seededHistory()
-    const assistant = history.entries.find(
-      (entry) =>
-        entry.type === 'message' && (entry.message as { role: string }).role === 'assistant',
-    )!
-    Object.assign(assistant.message as object, {
-      stopReason,
-      errorMessage: 'old failure',
-    })
-    const provider = fixture([answer('Current success')])
-    try {
-      const result = await createPiHarness({
-        ...options,
-        baseURL: provider.baseURL,
-      }).turn({
-        text: 'retry',
-        history,
-        tools: sandbox().tools,
-        signal: new AbortController().signal,
-        onText: () => {},
-      })
-      expect(result.text).toBe('Current success')
-      expect(JSON.stringify(result.history)).toContain('old failure')
-    } finally {
-      await provider.close()
-    }
-  })
-}
-
-test('restores an empty SQL history array as a fresh session', () => {
-  const manager = restorePiHistory([])
-  expect(manager.getEntries()).toEqual([])
-  expect(manager.getLeafId()).toBeNull()
-  expect(manager.buildSessionContext().messages).toEqual([])
-})
-
-for (const history of [[null], [{ type: 'session' }]]) {
-  test(`rejects nonempty history array ${JSON.stringify(history)} before SDK traversal`, () => {
-    expect(() => restorePiHistory(history)).toThrow('Invalid private Pi history')
-  })
-}
-
-test('restores SDK context without imposing provider metadata requirements', () => {
-  const manager = SessionManager.inMemory()
-  manager.appendMessage({ role: 'user', content: 'request', timestamp: 1 })
-  const history = {
-    header: manager.getHeader(),
-    entries: [
-      ...manager.getEntries(),
-      {
-        type: 'message',
-        id: 'assistant',
-        parentId: manager.getLeafId(),
-        timestamp: new Date().toISOString(),
-        message: { role: 'assistant', content: null },
-      },
-    ],
-    leafID: 'assistant',
-  }
-  const restored = restorePiHistory(history)
-  expect(JSON.stringify(restored.getEntries())).toBe(JSON.stringify(history.entries))
-  expect(JSON.stringify(restored.buildSessionContext().messages.at(-1))).toBe(
-    JSON.stringify({ role: 'assistant', content: [] }),
-  )
-})
-
-const invalidHistories: Record<
-  string,
-  (history: Awaited<ReturnType<typeof seededHistory>>) => void
-> = {
-  'self cycle': (history) => {
-    history.entries.at(-1)!.parentId = history.entries.at(-1)!.id
-  },
-  'two-node cycle': (history) => {
-    history.entries.at(-1)!.parentId = history.entries.at(-2)!.id
-    history.entries.at(-2)!.parentId = history.entries.at(-1)!.id
-  },
-  'inactive cycle': (history) => {
-    history.entries.push({
-      type: 'session_info',
-      id: 'inactive',
-      parentId: 'inactive',
-      timestamp: new Date().toISOString(),
-    })
-  },
-  'duplicate ID': (history) => {
-    history.entries.push(structuredClone(history.entries[0]!))
-  },
-  'missing parent': (history) => {
-    history.entries.at(-1)!.parentId = 'absent'
-  },
-  'missing leaf': (history) => {
-    history.leafID = 'absent'
-  },
-  'bad header': (history) => {
-    history.header.cwd = 42
-  },
-  'missing message': (history) => {
-    delete history.entries.at(-1)!.message
-  },
-  'null entry': (history) => {
-    history.entries.push(null as unknown as Record<string, unknown>)
-  },
-  'bad system sections': (history) => {
-    const entry = history.entries.find(
-      (entry) => entry.type === 'message' && (entry.message as { role: string }).role === 'system',
-    )!
-    Object.assign(entry.message as object, { sections: { broken: 42 } })
-  },
-  'bad content': (history) => {
-    ;(history.entries.at(-1)!.message as { content: unknown }).content = 42
-  },
-}
-
-for (const [name, corrupt] of Object.entries(invalidHistories)) {
-  test(`rejects ${name} before SDK traversal or provider access (bounded subprocess)`, async () => {
-    const history = await seededHistory()
-    corrupt(history)
-    const provider = fixture([answer('must not run')])
-    try {
-      const script = `
-        import { createPiHarness } from ${JSON.stringify(new URL('./pi.ts', import.meta.url).pathname)};
-        try {
-          await createPiHarness(${JSON.stringify({ ...options, baseURL: provider.baseURL })}).turn({
-            history: ${JSON.stringify(history)}, text: 'invalid',
-            signal: AbortSignal.timeout(100), onText() {},
-            tools: { async execute() { throw Error('unexpected tool') }, async read() { throw Error('unexpected tool') }, async write() { throw Error('unexpected tool') } }
-          });
-          console.log('ACCEPTED');
-        } catch (error) { console.log(error.message) }
-      `
-      const child = Bun.spawn([process.execPath, '--eval', script], {
-        stdout: 'pipe',
-        stderr: 'pipe',
-        timeout: 1500,
-        killSignal: 'SIGKILL',
-      })
-      const [stdout, stderr, exitCode] = await Promise.all([
-        new Response(child.stdout).text(),
-        new Response(child.stderr).text(),
-        child.exited,
-      ])
-      expect(stdout.trim()).toStartWith('Invalid private Pi history')
-      expect({ stderr, exitCode }).toEqual({ stderr: '', exitCode: 0 })
-      expect(provider.requests).toHaveLength(0)
-    } finally {
-      await provider.close()
-    }
-  }, 10000)
-}
-
-async function branchedHistory() {
-  const seed = await seededHistory()
-  const manager = SessionManager.inMemory(
-    '/fixture',
-    undefined,
-    parseSessionEntries(
-      [seed.header, ...seed.entries].map((entry) => JSON.stringify(entry)).join('\n'),
-    ),
-  )
-  const fork = manager.getLeafId()!
-  manager.appendMessage({
-    role: 'user',
-    content: 'ABANDONED REQUEST',
-    timestamp: 1,
-  })
-  manager.branch(fork)
-  const kept = manager.appendMessage({
-    role: 'user',
-    content: 'KEPT REQUEST',
-    timestamp: 2,
-  })
-  manager.appendCompaction('COMPACTED SUMMARY', kept, 123)
-  manager.appendCustomEntry('fixture', { private: 'metadata' })
-  manager.appendCustomMessageEntry('fixture-context', 'CUSTOM CONTEXT', false)
-  manager.appendLabelChange(kept, 'bookmark')
-  manager.appendContextEdit(kept, { content: 'EDITED REQUEST' })
-  const selected = manager.getLeafId()!
-  manager.resetLeaf()
-  manager.appendMessage({ role: 'user', content: 'OTHER ROOT', timestamp: 3 })
-  manager.branch(selected)
-  return {
-    header: manager.getHeader(),
-    entries: manager.getEntries(),
-    leafID: manager.getLeafId(),
-  }
-}
-
-test('preserves the full canonical branched tree while projecting only the selected compacted branch', async () => {
-  const history = await branchedHistory()
-  const provider = fixture([answer('Branch answer')])
-  try {
-    const result = await createPiHarness({
-      ...options,
-      baseURL: provider.baseURL,
-    }).turn({
-      text: 'continue selected',
-      history: JSON.parse(JSON.stringify(history)),
-      tools: sandbox().tools,
-      signal: new AbortController().signal,
-      onText: () => {},
-    })
-    expect(result.text).toBe('Branch answer')
-    const restored = result.history as typeof history
-    expect(restored.header).toEqual(history.header)
-    expect(restored.entries.slice(0, history.entries.length)).toEqual(history.entries)
-    const messages = JSON.stringify(provider.requests[0]!.messages)
-    expect(messages).toContain('COMPACTED SUMMARY')
-    expect(messages).toContain('EDITED REQUEST')
-    expect(messages).toContain('CUSTOM CONTEXT')
-    expect(messages).not.toContain('ABANDONED REQUEST')
-    expect(messages).not.toContain('OTHER ROOT')
-    expect(messages).not.toContain('previous request')
-    expect(messages).not.toContain('KEPT REQUEST')
-  } finally {
-    await provider.close()
-  }
-})
-
-test('a null active leaf preserves existing entries but starts a new root', async () => {
-  const history = await seededHistory()
-  history.leafID = null
-  const provider = fixture([answer('New root')])
-  try {
-    const result = await createPiHarness({
-      ...options,
-      baseURL: provider.baseURL,
-    }).turn({
-      text: 'new root request',
-      history,
-      tools: sandbox().tools,
-      signal: new AbortController().signal,
-      onText: () => {},
-    })
-    expect(result.text).toBe('New root')
-    const restored = result.history as typeof history
-    expect(restored.entries.slice(0, history.entries.length)).toEqual(history.entries)
-    expect(restored.entries[history.entries.length]!.parentId).toBeNull()
-    expect(JSON.stringify(provider.requests[0]!.messages)).not.toContain('previous request')
-  } finally {
-    await provider.close()
-  }
-})
-
-test('a current provider failure is rejected even when history has a successful assistant', async () => {
-  const history = await seededHistory()
-  const provider = fixture([])
-  try {
-    expect(
-      createPiHarness({ ...options, baseURL: provider.baseURL }).turn({
-        text: 'fail now',
-        history,
-        tools: sandbox().tools,
-        signal: new AbortController().signal,
-        onText: () => {},
-      }),
-    ).rejects.toThrow('Pi model execution failed')
-    expect(provider.requests).toHaveLength(1)
-  } finally {
-    await provider.close()
-  }
-})
-
 test('combined assigned tools send only ordered public asset metadata and preserve canonical answer whitespace', async () => {
   const provider = fixture([answer(' \nExact 🎬 answer  \n')])
   try {
     const result = await createPiHarness({
       ...options,
+      statePath: provider.statePath,
       baseURL: provider.baseURL,
       webSearch: {
         authMode: 'keyless',
@@ -667,9 +911,9 @@ test('combined assigned tools send only ordered public asset metadata and preser
           throw new Error('Unexpected search dispatch')
         },
       },
-    }).turn({
+    }).run({
       text: 'Inspect these assets in order.',
-      history: null,
+      ...identity(provider),
       tools: sandbox().tools,
       signal: AbortSignal.timeout(5000),
       onText: () => {},
@@ -693,7 +937,6 @@ test('combined assigned tools send only ordered public asset metadata and preser
           },
         ],
         prepared: [],
-        hasUnknownOutcome: () => false,
         importFile: async () => {
           throw new Error('Unexpected import')
         },
@@ -744,14 +987,13 @@ test('assigned image bytes reach the official model HTTP image payload and priva
   )
   const input = {
     text: 'Inspect',
-    history: null,
+    ...identity(provider),
     tools: sandbox().tools,
     signal: AbortSignal.timeout(5000),
     onText: () => {},
     fileTools: {
       assigned: [],
       prepared: [],
-      hasUnknownOutcome: () => false,
       importFile: async () => ({ bytes, mimeType: 'image/png' }),
       exportFile: async () => {
         throw new Error('Unexpected export')
@@ -761,17 +1003,18 @@ test('assigned image bytes reach the official model HTTP image payload and priva
   try {
     const harness = createPiHarness({
       ...options,
+      statePath: provider.statePath,
       input: ['text', 'image'],
       baseURL: provider.baseURL,
     })
-    const first = await harness.turn(input)
+    await harness.run(input)
     expect(JSON.stringify(provider.requests[1]?.messages)).toContain(
       `data:image/png;base64,${Buffer.from(bytes).toString('base64')}`,
     )
-    await harness.turn({
+    await harness.run({
       ...input,
       text: 'Continue',
-      history: JSON.parse(JSON.stringify(first.history)),
+      runID: crypto.randomUUID(),
     })
     expect(JSON.stringify(provider.requests[2]?.messages)).toContain(
       `data:image/png;base64,${Buffer.from(bytes).toString('base64')}`,
@@ -784,9 +1027,13 @@ test('assigned image bytes reach the official model HTTP image payload and priva
 test('text-only assigned models receive staged-file instructions without an image modality', async () => {
   const provider = fixture([answer('Use tools')])
   try {
-    await createPiHarness({ ...options, baseURL: provider.baseURL }).turn({
+    await createPiHarness({
+      ...options,
+      statePath: provider.statePath,
+      baseURL: provider.baseURL,
+    }).run({
       text: 'Inspect assigned file /home/user/materials/photo.png with tools',
-      history: null,
+      ...identity(provider),
       tools: sandbox().tools,
       signal: AbortSignal.timeout(5000),
       onText: () => {},
@@ -820,18 +1067,18 @@ test('explicit assigned image import delivers official image content only for a 
   try {
     const result = await createPiHarness({
       ...options,
+      statePath: provider.statePath,
       input: ['text', 'image'],
       baseURL: provider.baseURL,
-    }).turn({
+    }).run({
       text: 'Import the assigned photo',
-      history: null,
+      ...identity(provider),
       tools: sandbox().tools,
       signal: AbortSignal.timeout(5000),
       onText: () => {},
       fileTools: {
         assigned: [],
         prepared: [],
-        hasUnknownOutcome: () => false,
         importFile: async ({ assetID, path }) => {
           expect({ assetID, path }).toEqual({
             assetID: '11111111-1111-4111-8111-111111111111',
@@ -874,18 +1121,18 @@ for (const [mimeType, input] of [
     try {
       const result = await createPiHarness({
         ...options,
+        statePath: provider.statePath,
         input,
         baseURL: provider.baseURL,
-      }).turn({
+      }).run({
         text: 'Import',
-        history: null,
+        ...identity(provider),
         tools: sandbox().tools,
         signal: AbortSignal.timeout(5000),
         onText: () => {},
         fileTools: {
           assigned: [],
           prepared: [],
-          hasUnknownOutcome: () => false,
           importFile: async () => ({
             get bytes() {
               byteReads++
@@ -946,7 +1193,7 @@ test('native web_search loopback HTTP evidence is canonical and restored without
   }
   const input = {
     text: 'research',
-    history: null,
+    ...identity(provider),
     tools: sandbox().tools,
     signal: AbortSignal.timeout(5000),
     onText: (_text: string) => {},
@@ -954,9 +1201,10 @@ test('native web_search loopback HTTP evidence is canonical and restored without
   try {
     const first = await createPiHarness({
       ...options,
+      statePath: provider.statePath,
       baseURL: provider.baseURL,
       webSearch,
-    }).turn(input)
+    }).run(input)
     expect(first.text).toBe('Source: https://example.org/source')
     expect(first.sources).toEqual([{ title: 'Public source', url: 'https://example.org/source' }])
     expect(JSON.stringify(first.sources)).not.toContain('Quoted evidence')
@@ -967,15 +1215,16 @@ test('native web_search loopback HTTP evidence is canonical and restored without
       'write',
     ])
     expect(JSON.stringify(provider.requests[1]!.messages)).toContain('Quoted evidence')
-    expect(JSON.stringify(first.history)).toContain('web_search')
+    expect(provider.nativeJSONL()).toContain('web_search')
     const second = await createPiHarness({
       ...options,
+      statePath: provider.statePath,
       baseURL: provider.baseURL,
       webSearch,
-    }).turn({
+    }).run({
       ...input,
       text: 'continue',
-      history: JSON.parse(JSON.stringify(first.history)),
+      runID: crypto.randomUUID(),
     })
     expect(JSON.stringify(provider.requests[2]!.messages)).toContain('Quoted evidence')
     expect(searches).toBe(1)
@@ -995,6 +1244,7 @@ test('native search TypeBox rejects malformed input without provider dispatch', 
   try {
     await createPiHarness({
       ...options,
+      statePath: provider.statePath,
       baseURL: provider.baseURL,
       webSearch: {
         authMode: 'keyless',
@@ -1003,9 +1253,9 @@ test('native search TypeBox rejects malformed input without provider dispatch', 
           return Response.json({ results: [] })
         }) as NonNullable<WebSearchConfig['transport']>,
       },
-    }).turn({
+    }).run({
       text: 'search',
-      history: null,
+      ...identity(provider),
       tools: sandbox().tools,
       signal: AbortSignal.timeout(5000),
       onText: () => {},
@@ -1041,6 +1291,7 @@ test('owner cancellation waits for native web_search body cleanup without publis
   try {
     const turn = createPiHarness({
       ...options,
+      statePath: provider.statePath,
       baseURL: provider.baseURL,
       webSearch: {
         authMode: 'keyless',
@@ -1065,9 +1316,9 @@ test('owner cancellation waits for native web_search body cleanup without publis
           )
         }) as NonNullable<WebSearchConfig['transport']>,
       },
-    }).turn({
+    }).run({
       text: 'research',
-      history: null,
+      ...identity(provider),
       tools: sandbox().tools,
       signal: owner.signal,
       onText: (text) => deltas.push(text),
@@ -1111,6 +1362,7 @@ test('ordinary remote search failure is sanitized tool evidence, not a failed sa
   try {
     const result = await createPiHarness({
       ...options,
+      statePath: provider.statePath,
       baseURL: provider.baseURL,
       webSearch: {
         authMode: 'key',
@@ -1120,9 +1372,9 @@ test('ordinary remote search failure is sanitized tool evidence, not a failed sa
           throw new Error('PRIVATE provider body fixture-search-key')
         }) as NonNullable<WebSearchConfig['transport']>,
       },
-    }).turn({
+    }).run({
       text: 'research',
-      history: null,
+      ...identity(provider),
       tools: assigned.tools,
       signal: AbortSignal.timeout(5000),
       onText: (text) => deltas.push(text),
@@ -1131,7 +1383,7 @@ test('ordinary remote search failure is sanitized tool evidence, not a failed sa
     expect(deltas.join('')).toBe('Search unavailable')
     expect(assigned.commands).toEqual([])
     expect(searches).toBe(1)
-    const replay = JSON.stringify(result.history)
+    const replay = provider.nativeJSONL()
     expect(replay).toContain('Web search unavailable.')
     expect(replay).not.toContain('fixture-search-key')
     expect(replay).not.toContain('PRIVATE provider body')
@@ -1156,6 +1408,7 @@ test('native search loop enforces three dispatched calls and renews quota only n
   let searches = 0
   const harness = createPiHarness({
     ...options,
+    statePath: provider.statePath,
     baseURL: provider.baseURL,
     webSearch: {
       authMode: 'keyless',
@@ -1167,21 +1420,21 @@ test('native search loop enforces three dispatched calls and renews quota only n
   })
   const input = {
     text: 'research',
-    history: null,
+    ...identity(provider),
     tools: sandbox().tools,
     signal: AbortSignal.timeout(5000),
     onText: () => {},
   }
   try {
-    const first = await harness.turn(input)
+    await harness.run(input)
     expect(searches).toBe(3)
     expect(JSON.stringify(provider.requests[1]!.messages)).toContain(
       'Search limit reached for this turn.',
     )
-    await harness.turn({
+    await harness.run({
       ...input,
       text: 'new turn',
-      history: JSON.parse(JSON.stringify(first.history)),
+      runID: crypto.randomUUID(),
     })
     expect(searches).toBe(4)
   } finally {
@@ -1203,6 +1456,7 @@ test('native turn source collection is bounded to fifteen actual results, not fi
   try {
     const result = await createPiHarness({
       ...options,
+      statePath: provider.statePath,
       baseURL: provider.baseURL,
       webSearch: {
         authMode: 'keyless',
@@ -1217,9 +1471,9 @@ test('native turn source collection is bounded to fifteen actual results, not fi
           })
         },
       },
-    }).turn({
+    }).run({
       text: 'research',
-      history: null,
+      ...identity(provider),
       tools: sandbox().tools,
       signal: AbortSignal.timeout(5000),
       onText: () => {},
@@ -1253,6 +1507,7 @@ test('native turn deduplicates normalized found URLs without retaining snippets'
   try {
     const result = await createPiHarness({
       ...options,
+      statePath: provider.statePath,
       baseURL: provider.baseURL,
       webSearch: {
         authMode: 'keyless',
@@ -1267,9 +1522,9 @@ test('native turn deduplicates normalized found URLs without retaining snippets'
             ],
           }),
       },
-    }).turn({
+    }).run({
       text: 'research',
-      history: null,
+      ...identity(provider),
       tools: sandbox().tools,
       signal: AbortSignal.timeout(5000),
       onText: () => {},
@@ -1280,7 +1535,7 @@ test('native turn deduplicates normalized found URLs without retaining snippets'
   }
 })
 
-type BudgetScenario = 'iterations' | 'thinking' | 'arguments' | 'write'
+type BudgetScenario = 'iterations' | 'text' | 'thinking' | 'arguments' | 'write'
 
 function budgetResponses(scenario: BudgetScenario) {
   const call = (name: string, args: unknown) => calls([{ name, args }])
@@ -1290,6 +1545,8 @@ function budgetResponses(scenario: BudgetScenario) {
         ...Array.from({ length: 17 }, () => call('read', { path: '/fixture' })),
         answer('unexpected'),
       ]
+    case 'text':
+      return [answer('x'.repeat(2 * 1024 * 1024 + 1)), answer('unexpected')]
     case 'thinking':
       return [
         [
@@ -1325,11 +1582,12 @@ async function expectBudgetFailure(turn: Promise<unknown>, message = 'Pi turn bu
   expect(error).toMatchObject({ message })
 }
 
-for (const scenario of ['iterations', 'thinking', 'arguments', 'write'] as const) {
+for (const scenario of ['iterations', 'text', 'thinking', 'arguments', 'write'] as const) {
   test(`native logical admission refuses ${scenario} without subsequent HTTP dispatch`, async () => {
     const responses = budgetResponses(scenario)
     const provider = fixture(responses)
     const assigned = sandbox()
+    const deltas: string[] = []
     let writes = 0
     const write = assigned.tools.write
     assigned.tools.write = async (input) => {
@@ -1339,14 +1597,17 @@ for (const scenario of ['iterations', 'thinking', 'arguments', 'write'] as const
     try {
       const refusal = await createPiHarness({
         ...options,
+        statePath: provider.statePath,
         baseURL: provider.baseURL,
       })
-        .turn({
+        .run({
           text: 'fixture',
-          history: null,
+          ...identity(provider),
           tools: assigned.tools,
           signal: AbortSignal.timeout(10000),
-          onText() {},
+          onText(delta) {
+            deltas.push(delta)
+          },
         })
         .then(
           () => undefined,
@@ -1356,39 +1617,12 @@ for (const scenario of ['iterations', 'thinking', 'arguments', 'write'] as const
       expect(refusal).toEqual(new Error('Pi turn budget exceeded'))
       expect(assigned.signals).toHaveLength(scenario === 'iterations' ? 16 : 0)
       expect(writes).toBe(0)
+      expect(deltas).toEqual([])
     } finally {
       await provider.close()
     }
   })
 }
-
-test('canonical history admission includes unselected metadata before HTTP dispatch', async () => {
-  const manager = SessionManager.inMemory()
-  manager.appendCustomEntry('private-fixture', {
-    opaque: 'x'.repeat(4 * 1024 * 1024),
-  })
-  const history = {
-    header: manager.getHeader(),
-    entries: manager.getEntries(),
-    leafID: manager.getLeafId(),
-  }
-  const provider = fixture([answer('unexpected')])
-  try {
-    await expectBudgetFailure(
-      createPiHarness({ ...options, baseURL: provider.baseURL }).turn({
-        text: 'fixture',
-        history,
-        tools: sandbox().tools,
-        signal: AbortSignal.timeout(5000),
-        onText() {},
-      }),
-      'Private history size limit exceeded',
-    )
-    expect(provider.requests).toHaveLength(0)
-  } finally {
-    await provider.close()
-  }
-})
 
 test('imported model image admission refuses raw bytes before a subsequent HTTP dispatch', async () => {
   const provider = fixture([
@@ -1407,15 +1641,15 @@ test('imported model image admission refuses raw bytes before a subsequent HTTP 
     await expectBudgetFailure(
       createPiHarness({
         ...options,
+        statePath: provider.statePath,
         input: ['text', 'image'],
         baseURL: provider.baseURL,
-      }).turn({
+      }).run({
         text: 'fixture',
-        history: null,
+        ...identity(provider),
         fileTools: {
           assigned: [],
           prepared: [],
-          hasUnknownOutcome: () => false,
           importFile: async () => ({
             bytes: new Uint8Array(1024 * 1024 + 1),
             mimeType: 'image/png',
@@ -1449,9 +1683,13 @@ test('fatal tool admission aborts parallel siblings but joins an already started
     answer('unexpected'),
   ])
   let returned = false
-  const turn = createPiHarness({ ...options, baseURL: provider.baseURL }).turn({
+  const turn = createPiHarness({
+    ...options,
+    statePath: provider.statePath,
+    baseURL: provider.baseURL,
+  }).run({
     text: 'fixture',
-    history: null,
+    ...identity(provider),
     tools: pending.assigned.tools,
     signal: AbortSignal.timeout(5000),
     onText() {},
@@ -1484,30 +1722,6 @@ test('fatal tool admission aborts parallel siblings but joins an already started
   }
 })
 
-test('final canonical history admission refuses cumulative private tool output rather than trimming it', async () => {
-  const provider = fixture([
-    calls([{ name: 'read', args: { path: '/large' } }]),
-    answer('exact final'),
-  ])
-  const assigned = sandbox()
-  assigned.tools.read = async () => 'private'.repeat(700000)
-  try {
-    await expectBudgetFailure(
-      createPiHarness({ ...options, baseURL: provider.baseURL }).turn({
-        text: 'fixture',
-        history: null,
-        tools: assigned.tools,
-        signal: AbortSignal.timeout(5000),
-        onText() {},
-      }),
-      'Private history size limit exceeded',
-    )
-    expect(provider.requests).toHaveLength(2)
-  } finally {
-    await provider.close()
-  }
-})
-
 test('native parameter limits reject a command without dispatching sandbox IO or aborting the turn', async () => {
   const provider = fixture([
     calls([{ name: 'execute', args: { command: 'x'.repeat(16 * 1024 + 1) } }]),
@@ -1517,10 +1731,11 @@ test('native parameter limits reject a command without dispatching sandbox IO or
   try {
     const result = await createPiHarness({
       ...options,
+      statePath: provider.statePath,
       baseURL: provider.baseURL,
-    }).turn({
+    }).run({
       text: 'fixture',
-      history: null,
+      ...identity(provider),
       tools: assigned.tools,
       signal: AbortSignal.timeout(5000),
       onText() {},

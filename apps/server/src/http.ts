@@ -1,4 +1,9 @@
-import { readBody, requestBodyRejection, type BodyCollectionPolicy } from './request-body'
+import {
+  collectRequestBody,
+  readBody,
+  requestBodyRejection,
+  type BodyCollectionPolicy,
+} from './request-body'
 import type { DB } from '@vid/database/types'
 import type { Kysely } from 'kysely'
 import { Hono, type Context } from 'hono'
@@ -37,7 +42,7 @@ const unavailable = () => Response.json({ error: 'Not found' }, { status: 404 })
 const invalid = () => Response.json({ error: 'Invalid input' }, { status: 400 })
 const conflict = () => Response.json({ error: 'Conflict' }, { status: 409 })
 
-export type HTTPResources = ConversationOptions & {
+type HTTPResources = ConversationOptions & {
   db: Kysely<DB>
   bodyCollection: BodyCollectionPolicy
   maxAssetBytes: number
@@ -71,9 +76,21 @@ export function createRouter() {
     throw cause
   })
   app.notFound(unavailable)
-  app.all('/api/auth/*', describeRoute({ hide: true }), (c) =>
-    c.env.authentication.handler(c.req.raw),
-  )
+  app.all('/api/auth/*', describeRoute({ hide: true }), async (c) => {
+    const request = c.req.raw
+    if (!request.body) return await c.env.authentication.handler(request)
+    // Bound native SDK parsing too, without changing OAuth JSON/form semantics.
+    const policy = c.env.bodyCollection
+    const signal = AbortSignal.any([
+      request.signal,
+      policy.signal,
+      AbortSignal.timeout(policy.timeoutMs),
+    ])
+    const bytes = await collectRequestBody(request.body, 65536, signal)
+    return await c.env.authentication.handler(
+      new Request(request, { method: request.method, body: Buffer.from(bytes) }),
+    )
+  })
   app.post(
     '/api/logout',
     describeRoute({
@@ -349,7 +366,7 @@ export function createRouter() {
         description: 'Official protocol schema package',
       },
       description:
-        'Official AG-UI RunAgentInput (https://docs.ag-ui.com/sdk/js/core). Runtime validation uses the official SDK. JSON metadata cannot faithfully describe its custom values; no replacement DTO is generated. Cursor precedence: Last-Event-ID, forwardedProps.after, then 0. Cursors are decimal signed-int64 ordinals authorized against persisted public events.',
+        'Official AG-UI RunAgentInput (https://docs.ag-ui.com/sdk/js/core). Runtime validation uses the official SDK. JSON metadata cannot faithfully describe its custom values; no replacement DTO is generated. Cursor precedence: Last-Event-ID, forwardedProps.after, then 0. Cursors are decimal signed-int64 public cursors authorized against persisted public events; return received cursors unchanged, never increment them.',
       requestBody: {
         required: true,
         description:
@@ -361,7 +378,7 @@ export function createRouter() {
           in: 'header',
           name: 'Last-Event-ID',
           schema: { type: 'string', pattern: '^(0|[1-9][0-9]*)$' },
-          description: 'Decimal ordinal at most 9223372036854775807',
+          description: 'Decimal public cursor at most 9223372036854775807',
         },
       ],
       responses: {

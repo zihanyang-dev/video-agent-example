@@ -1,11 +1,11 @@
 # Handover 对照报告的复审与逐条重构记录
 
-## 当前状态
+## 历史实施批次状态
 
-这是实施记录，不替代原报告的冻结 BEFORE。原报告首次交付时的 AFTER 只做过语法检查，不能直接作为补丁。
+这是基于 `01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb` 的历史实施记录，不是当前运行合同或最新源码验收。原生替换后的实现与验收边界见 [原生 runtime](native-agent-runtime.md) 和 [原生改动审查](native-agent-code-review.md)；文档分类见 [文档索引](README.md)。本记录不替代原报告的冻结 BEFORE；原报告首次交付时的 AFTER 只做过语法检查，不能直接作为补丁。
 
 - 89 项提案已逐项阅读；F001–F026 另做了独立实际源码、类型和调用者风险复核。
-- 十四个已验收批次完成全部 **89 项**处置：**84 项已实施并验证，5 项经实际证据拒绝政策性 AFTER 或记录生成物约束，0 项待处理**。最新合并源码重新捕获并通过全部八条 owning gates；历史候选失败未冒充最终验收。另完成 Agent execution 目录整理、Pi remote tool 调查及用户授权的 retention 合并，不虚增报告编号。
+- 十四个已验收批次完成全部 **89 项**处置：**84 项已实施并验证，5 项经实际证据拒绝政策性 AFTER 或记录生成物约束，0 项待处理**。该历史批次的最终合并源码重新捕获并通过全部八条 owning gates；历史候选失败未冒充最终验收。另完成 Agent execution 目录整理、Pi remote tool 调查及用户授权的 retention 合并，不虚增报告编号。
 - 原始基线：`01b1f17760a8fd12c7cb18ac4100ac6721d6c6bb`。本地验收阶段未提交或推送；随后用户追加授权提交、推送并检查 GitHub CI。远端结果独立核对，不以前述本地验收冒充。
 - 用户自行调整的 `docs/*.html` 不读取、不修改、不放入验证镜像。历史迁移、API 生成物、DB 类型、lockfile 和 prompt 保持；唯一生成物例外是用户明确授权的 retention schema 合并，采用实际 native generator 输出，并新增独立迁移，不手改 schema、不重写旧迁移。
 
@@ -87,7 +87,7 @@ F009、F013、F015、F019、F021–F024、F026 涉及不同程度的可观察合
 
 总计 **15 个文件**移动；**63 个静态 import** 和 **1 个动态 import** 修正，保留 Pi 的 `.ts` 后缀。所有消费者直接指向实际模块，旧文件/空 db 目录移除，无 compatibility re-export、barrel、额外调度层。`main/worker/worker-health` 保留进程资源所有权，harness/sandbox 保留 SDK 行为；prompt 不动。目录说明更新到 [directory-structure.md](directory-structure.md)。
 
-独立最终 diff 复核证明，归一化路径后只有 F068 测试和目录文档变化：SQL 锁、post-lock 时钟、inbox→ACK、fenced 终态/outbox、未知 VM/COMMIT 隔离正文不变。原报告 BEFORE/旧文件路径属于冻结基线；不把历史示例重写成新源码，当前定位使用上表和 `/tmp/handover-refactor-layout-moves.json`。此前 F001 的合同现在位于 `execution/contract.ts`。
+独立最终 diff 复核证明，归一化路径后只有 F068 测试和目录文档变化：SQL 锁、post-lock 时钟、inbox→ACK、fenced 终态/outbox、未知 VM/COMMIT 隔离正文不变。原报告 BEFORE/旧文件路径属于冻结基线；不把历史示例重写成新源码。上表和 `/tmp/handover-refactor-layout-moves.json` 记录第五批当时的迁移位置，表格保持不变；F001 的合同在该批次位于 `execution/contract.ts`，原生替换后现行消费合同位于 `apps/agent/src/contract.ts`，当前导航见 [目录说明](directory-structure.md)。
 
 **F068** 新测试使用真实 WorkerProcess 与未发起请求的 native owners，blocked owned task 在释放前阻止 object close，释放后要求 literal task-finished → objects-closed 顺序；finally 无条件释放 gate 并 join。owned 副本中仅删掉 `await Promise.all(this.tasks)` 的 mutation **0 pass / 1 fail**，准确暴露 premature object-close；真实 checkout 没有被临时改坏。正常实现 characterization 通过，随后新镜像单元 suite **373 pass**。不把该对照冒充外部存储/部署持久性。
 

@@ -1,3 +1,6 @@
+import { mkdtemp, rm, readdir, readFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { afterAll, expect, test } from 'bun:test'
 import { executionEventSchema } from '@vid/contract/execution'
 import { publicMessageSchema } from '@vid/contract/http'
@@ -5,7 +8,7 @@ import { acceptExecutionCommand } from '../../apps/agent/src/execution/db/comman
 import { claimExecutionRun } from '../../apps/agent/src/execution/db/execution-leases'
 import { bindExecutionWrites } from '../../apps/agent/src/execution/db/run-writes'
 import { executeRun } from '../../apps/agent/src/execution/execute-run'
-import { createPiHarness } from '../../apps/agent/src/harness/pi'
+import { createPiHarness } from '../../apps/agent/src/harness/pi/adapter'
 import { acceptExecutionEvent } from '../../apps/server/src/db/execution-events'
 import { snapshotOwnedMessages } from '../../apps/server/src/db/conversations'
 import { acceptMessageIntent } from '../../apps/server/src/db/submissions'
@@ -60,6 +63,7 @@ async function fixture() {
 // Real native Pi tool/model HTTP loopback -> execution SQL outbox -> canonical
 // server receipt/message transaction -> whitelist snapshot. No external API.
 test('actual native sources survive canonical completion SQL and immutable snapshot without private evidence', async () => {
+  const statePath = await mkdtemp(join(tmpdir(), 'sources-native-'))
   const intent = await fixture()
   const command = {
     version: 1,
@@ -125,6 +129,7 @@ test('actual native sources survive canonical completion SQL and immutable snaps
       {
         writes: bindExecutionWrites(db),
         harness: createPiHarness({
+          statePath,
           baseURL: `http://127.0.0.1:${model.port}/v1`,
           key: 'PRIVATE MODEL KEY',
           modelID: 'fixture',
@@ -223,14 +228,21 @@ test('actual native sources survive canonical completion SQL and immutable snaps
           .executeTakeFirstOrThrow()
       ).sources,
     ).toEqual(sources)
-    const history = await db
+    const conversation = await db
       .selectFrom('execution.conversations')
-      .select('history')
+      .select(['harness_engine', 'native_session_id'])
       .where('thread_id', '=', intent.threadID)
       .executeTakeFirstOrThrow()
-    expect(JSON.stringify(history.history)).toContain('PRIVATE SNIPPET CANARY')
+    expect(conversation).toEqual({ harness_engine: 'pi', native_session_id: lease.nativeSessionID })
+    const directory = join(statePath, 'pi', intent.threadID)
+    const files = (await readdir(directory)).filter((name) => name.endsWith('.jsonl'))
+    expect(files).toHaveLength(1)
+    const nativeState = await readFile(join(directory, files[0]!), 'utf8')
+    expect(nativeState).toContain('PRIVATE SNIPPET CANARY')
+    expect(nativeState).toContain(lease.nativeSessionID)
   } finally {
     await model.stop(true)
+    await rm(statePath, { recursive: true, force: true })
   }
 }, 15000)
 

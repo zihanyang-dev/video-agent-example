@@ -1,5 +1,6 @@
 import { expect, test } from 'bun:test'
 import { openE2BSandbox } from './e2b'
+import { CapabilityRejectedError } from '../contract'
 
 function fixture() {
   const paths: string[] = []
@@ -16,6 +17,8 @@ function fixture() {
           envdAccessToken: 'fixture',
         })
       if (url.pathname === '/files') {
+        if (request.method === 'POST')
+          return Response.json([{ path: '/owned', name: 'owned', type: 'file' }])
         if (url.searchParams.get('path') === '/missing')
           return Response.json({ message: 'missing' }, { status: 404 })
         return new Response('native HTTP file bytes')
@@ -34,16 +37,7 @@ function fixture() {
       apiKey: 'owned-fixture',
       template: 'fixture',
       timeoutMs: 120000,
-      lease: {
-        runID: 'owned',
-        threadID: 'owned',
-        commandID: 'owned',
-        messageID: 'owned',
-        text: 'fixture',
-        history: [],
-        fence: 1,
-        ownerID: 'owned',
-      },
+      assignment: { runID: 'owned', threadID: 'owned', fence: 1 },
     },
   }
 }
@@ -74,3 +68,27 @@ for (const scenario of ['success', 'absence', 'quota']) {
     }
   })
 }
+
+test('local write admission rejects without IO or poisoning the assigned environment', async () => {
+  const native = fixture()
+  try {
+    const signal = AbortSignal.timeout(5000)
+    const session = await openE2BSandbox(native.options, signal)
+    for (const path of ['', '\0', 'x'.repeat(4097)]) {
+      expect(
+        await session.write({ path, content: 'no IO', signal }).catch((error: unknown) => error),
+      ).toBeInstanceOf(CapabilityRejectedError)
+    }
+    for (let i = 0; i < 32; i++) await session.write({ path: '/owned', content: 'ok', signal })
+    expect(
+      await session
+        .writeBytes('/owned', new Uint8Array([1]), signal)
+        .catch((error: unknown) => error),
+    ).toBeInstanceOf(CapabilityRejectedError)
+    expect(native.paths.filter((path) => path === '/files')).toHaveLength(32)
+    expect(await session.read({ path: '/owned', signal })).toBe('native HTTP file bytes')
+    await session.close()
+  } finally {
+    await native.stop()
+  }
+})

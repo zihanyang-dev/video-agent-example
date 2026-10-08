@@ -44,6 +44,9 @@ COPY --from=runtime-source /app/packages/object-storage/src ./packages/object-st
 USER bun
 
 FROM runtime AS worker
+USER root
+RUN mkdir -p /state/native && chown -R bun:bun /state && chmod 700 /state/native
+USER bun
 COPY apps/agent/prompt.md ./apps/agent/prompt.md
 COPY --from=runtime-source /app/apps/agent/src ./apps/agent/src
 CMD ["bun", "apps/agent/src/main.ts"]
@@ -54,3 +57,9 @@ CMD ["bun", "apps/server/src/main.ts"]
 
 FROM caddy:2.11.6-alpine@sha256:c776e0c6413b544d0459665e54ec7b8b2a15000c0cbee8b254da0067b1d184ff AS web
 COPY deploy/Caddyfile /etc/caddy/Caddyfile
+
+# Package the exact reviewed policy sources; remote daemons cannot bind the checkout.
+FROM pgsty/silo:RELEASE.2026-09-16T00-00-00Z@sha256:635197cb9f36d01bee221d34d1c7d7960f6a95c48b0b6c01d99cd13bdae51a46 AS storage-init
+COPY deploy/storage /policies
+ENTRYPOINT ["bash"]
+CMD ["/policies/initialize.sh"]

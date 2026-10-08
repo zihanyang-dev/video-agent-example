@@ -5,7 +5,8 @@
   "exports": {
     "./web-source": "./src/web-source.ts",
     "./http": "./src/http.ts",
-    "./execution": "./src/execution.ts"
+    "./execution": "./src/execution.ts",
+    "./conversation-context": "./src/conversation-context.ts"
   },
   "dependencies": {
     "zod": "4.6.5"

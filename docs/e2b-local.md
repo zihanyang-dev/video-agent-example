@@ -33,11 +33,13 @@ sh scripts/sandbox-check.sh --restart
 
 ## Agent 环境语义
 
-环境属于 thread，不每轮 kill、不复制目录、不规定 materials/workspace/output 路径。数据库持有不透明 `{provider,id}`，新身份必须 fenced 持久化后才能开始模型/工具。私有 Pi history 保留在 execution SQL，不进入 VM。
+环境属于 thread，不每轮 kill、不复制目录、不规定 materials/workspace/output 路径。持久化针对 filesystem-backed 工作文件，而非所有 guest 路径：本地 `base` 的真实 filesystem-only pause / reboot 实验保留了 `/home/user` 文件，却清除了 `/tmp` 文件。跨轮工作应由 Agent 选择 `/home/user` 或经验证的持久目录，`/tmp` 只作临时空间；不能把同一 sandboxID 当成 RAM、进程或临时目录保留的证明。此行为需要在 Cloud 目标和不同 template 分别验证。数据库持有不透明 `{provider,id}`，新身份必须 fenced 持久化后才能开始模型/工具。私有 Pi / OpenAI 原生 state 保留在 worker native-state 卷，不进入 SQL 或 VM。
+
+成功取得 session 后有一条生命周期 TTL heartbeat，覆盖模型/compaction 空档，而非只在 foreground command 内续租。owner abort 停止新增续租，已发控制请求有界 join 后才 pause；续租失败不重试，通知 worker 停止新 spending，并保留物理不确定性。
 
 等待模型、工具、S3 上传、foreground command 与原生暂停后才发布终态；进程最后关闭 S3/SQL/Redis。取消通过官方 PID kill 等待 foreground 结束，再 filesystem-only pause 丢弃 RAM。**PID kill 不是 process-group kill**；filesystem-only pause 不能证明外部 TCP 或付费 jobs 已取消。失败/取消不回滚环境文件。
 
-租约过期/失去、未知创建/连接/命令/暂停/提交 ACK 会标记 `sandbox_recovery_required`，即使 native reference 仍为 null。原生操作未知时可以尝试暂停，但不能据此自动解除隔离。SQL fence 不能阻止失联旧 worker 操作同一 VM。后续 accepted queued runs 明确 durable failed `sandbox-recovery-required`，不连接环境、不花模型费用。
+未知创建/命令/暂停，以及无法证明 guest writer 已停止的 ownership loss 会保留 `sandbox_recovery_required`，即使 native reference 仍为 null。SQL lease expiry 单独不授权 takeover，也不证明 physical corruption；未知 terminal COMMIT ACK 单独不标记 quarantine。原生操作未知时可以尝试暂停，但不能据此自动解除隔离。SQL fence 不能阻止失联旧 worker 操作同一 VM。后续 accepted queued runs 明确 durable failed `sandbox-recovery-required`，不连接环境、不花模型费用。
 
 恢复 crash 后 TTL kill 可能丢失 live 状态；不能默默新建环境。`pause` 返回 false 只能表示已经暂停，不能证明既存 RAM snapshot 被转换成 filesystem-only，因此拒绝并隔离。已部署团队允许 filesystem-only snapshot 恢复，但 **RAM snapshot + `onResume:reboot` 实测返回 HTTP 400**（`Resuming without memory ... is not enabled for this team`），不能用于旧 RAM archive 的自动迁移。生产 provider 必须实际验证上述语义；不支持就明确 unavailable/recovery，不回退到 RAM 或每轮空 VM。
 

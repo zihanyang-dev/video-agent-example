@@ -56,7 +56,7 @@ export const threadCreationSchema = z.strictObject({ threadID: uuid, title })
 export const threadUpdateSchema = z.strictObject({ title })
 export const runCancellationSchema = z.strictObject({ commandID: uuid })
 
-export const publicThreadSchema = z.strictObject({
+const publicThreadSchema = z.strictObject({
   threadID: uuid,
   title,
   createdAt: timestamp,
@@ -94,7 +94,7 @@ export const publicAssetSchema = z.discriminatedUnion('source', [
   }),
 ])
 export const assetResponseSchema = z.strictObject({ asset: publicAssetSchema })
-export const assetsResponseSchema = z.strictObject({
+const assetsResponseSchema = z.strictObject({
   assets: z.array(publicAssetSchema),
 })
 export const publicMessageSchema = z.strictObject({
@@ -112,7 +112,7 @@ export const publicMessageSchema = z.strictObject({
     .optional(),
   createdAt: timestamp,
 })
-export const activeRunSchema = z.strictObject({
+const activeRunSchema = z.strictObject({
   runID: uuid,
   messageID: uuid,
   status: z.enum(['accepted', 'running', 'stopping']),
@@ -127,7 +127,7 @@ export const sessionResponseSchema = z.strictObject({
     })
     .nullable(),
 })
-export const threadsResponseSchema = z.strictObject({
+const threadsResponseSchema = z.strictObject({
   threads: z.array(publicThreadSchema),
 })
 export const threadResponseSchema = z.strictObject({
@@ -183,10 +183,7 @@ export const publicSchemas = {
 export type PublicThread = z.output<typeof publicThreadSchema>
 export type PublicMessage = z.output<typeof publicMessageSchema>
 export type ActiveRun = z.output<typeof activeRunSchema>
-export type FailedRun = z.output<typeof failedRunSchema>
 export type SessionResponse = z.output<typeof sessionResponseSchema>
-export type ThreadsResponse = z.output<typeof threadsResponseSchema>
-export type ThreadResponse = z.output<typeof threadResponseSchema>
 export type MessagesResponse = z.output<typeof messagesResponseSchema>
 export type MessageAccepted = z.output<typeof messageAcceptedSchema>
 export type CancellationAccepted = z.output<typeof cancellationAcceptedSchema>

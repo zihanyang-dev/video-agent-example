@@ -79,7 +79,7 @@ const identities = {
   runID: z.uuid().toLowerCase(),
 }
 
-const completedEventSchema = z
+export const completedEventSchema = z
   .strictObject({
     ...identities,
     kind: z.literal('run-completed'),

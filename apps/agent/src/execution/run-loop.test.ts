@@ -1,6 +1,11 @@
 import { expect, test } from 'bun:test'
 import { runWorker } from './run-loop'
-import type { AgentHarness, ExecutionLease, ExecutionWrites, SandboxSessionPort } from './contract'
+import type {
+  AgentHarness,
+  ExecutionLease,
+  ExecutionWrites,
+  SandboxSessionPort,
+} from '../contract.ts'
 
 function controlledHarness() {
   const release = Promise.withResolvers<void>()
@@ -8,14 +13,14 @@ function controlledHarness() {
   let active = 0
   let peak = 0
   const harness: AgentHarness = {
-    async turn({ signal }) {
+    async run({ signal }) {
       active += 1
       peak = Math.max(peak, active)
       if (active === 2) saturated.resolve()
       await release.promise
       active -= 1
       signal.throwIfAborted()
-      return { text: 'answer', history: [] }
+      return { text: 'answer' }
     },
   }
   return { harness, release, saturated, peak: () => peak }
@@ -24,7 +29,14 @@ function controlledHarness() {
 function recordingWrites() {
   const completed: string[] = []
   const interrupted: string[] = []
+  const failed: string[] = []
   const writes: ExecutionWrites = {
+    beginWorkspaceTransition: async () => true,
+    settleWorkspaceTransition: async () => true,
+    reserveModel: async () => 'allowed',
+    beginEffect: async () => 'allowed',
+    checkpoint: async () => true,
+    rejectEffect: async () => true,
     saveSandbox: async () => true,
     quarantine: async () => {},
     renew: async () => 'renewed',
@@ -33,25 +45,28 @@ function recordingWrites() {
       completed.push(lease.runID)
       return 'completed'
     },
-    fail: async (lease) => {
-      interrupted.push(lease.runID)
+    fail: async (lease, reason) => {
+      if (reason === 'interrupted') interrupted.push(lease.runID)
+      else failed.push(lease.runID)
       return 'failed'
     },
     cancel: async () => 'cancelled',
   }
-  return { writes, completed, interrupted }
+  return { writes, completed, interrupted, failed }
 }
 
 function queuedClaims() {
   const leases: ExecutionLease[] = Array.from({ length: 3 }, (_, index) => ({
     runID: `run-${index}`,
     threadID: `thread-${index}`,
-    commandID: `command-${index}`,
-    messageID: `user-${index}`,
     text: 'hello',
     fence: 1,
     ownerID: 'worker',
-    history: [],
+    engine: 'pi',
+    nativeSessionID: crypto.randomUUID(),
+    deadlineAt: new Date(Date.now() + 60000),
+    restoring: false,
+    restoreWorkspace: false,
   }))
   const accepted: string[] = []
   async function claim(options: { ownerID: string; leaseMs: number }) {
@@ -85,7 +100,7 @@ function unusedTools(): SandboxSessionPort {
 function fixture() {
   const controller = new AbortController()
   const { harness, release, saturated, peak } = controlledHarness()
-  const { writes, completed, interrupted } = recordingWrites()
+  const { writes, completed, interrupted, failed } = recordingWrites()
   const { claim, accepted } = queuedClaims()
   const deps = {
     writes,
@@ -109,6 +124,7 @@ function fixture() {
     accepted,
     completed,
     interrupted,
+    failed,
     peak,
   }
 }
@@ -202,7 +218,7 @@ test('each claimed run reads its current timeout without changing an active run'
   const options = { ...f.options, concurrency: 1, runTimeoutMs: 10000 }
   let turns = 0
   f.deps.harness = {
-    async turn({ signal }) {
+    async run({ signal }) {
       turns += 1
       if (turns === 1) {
         firstStarted.resolve(signal)
@@ -218,7 +234,7 @@ test('each claimed run reads its current timeout without changing an active run'
         })
       }
       signal.throwIfAborted()
-      return { text: 'answer', history: [] }
+      return { text: 'answer' }
     },
   }
   const claim = f.deps.claim
@@ -250,6 +266,7 @@ test('each claimed run reads its current timeout without changing an active run'
     await worker
   }
   expect(f.completed).toEqual(['run-0'])
+  expect(f.failed).toEqual(['run-1'])
   expect(f.interrupted).toEqual([])
 }, 1000)
 
@@ -277,3 +294,42 @@ test('a claim returning after shutdown is settled without inference', async () =
   expect(f.completed).toEqual([])
   expect(f.interrupted).toEqual(['run-0'])
 })
+
+test('a claimed total deadline aborts inference even with a longer local timeout', async () => {
+  const f = fixture()
+  const started = Promise.withResolvers<AbortSignal>()
+  f.options.concurrency = 1
+  const claim = f.deps.claim
+  f.deps.claim = async (options) => {
+    if (f.accepted.length === 1) {
+      f.controller.abort()
+      return null
+    }
+    const lease = await claim(options)
+    return lease && { ...lease, deadlineAt: new Date(Date.now() + 30) }
+  }
+  f.deps.harness = {
+    async run({ signal }) {
+      started.resolve(signal)
+      await new Promise<void>((resolve) => {
+        if (signal.aborted) resolve()
+        else signal.addEventListener('abort', () => resolve(), { once: true })
+      })
+      signal.throwIfAborted()
+      return { text: 'must not complete' }
+    },
+  }
+  const worker = runWorker(f.deps, { ...f.options, runTimeoutMs: 60000 })
+  try {
+    const signal = await started.promise
+    await worker
+    expect(signal.aborted).toBe(true)
+    expect(f.completed).toEqual([])
+    expect(f.failed).toEqual(['run-0'])
+    expect(f.interrupted).toEqual([])
+  } finally {
+    f.controller.abort()
+    f.release.resolve()
+    await worker
+  }
+}, 1000)

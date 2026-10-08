@@ -9,12 +9,14 @@ import type { DB } from '@vid/database/types'
 import { connectObjects, type ObjectStore } from '@vid/object-storage'
 
 import { acceptCommands, initializeCommands } from './execution/commands'
-import { claimExecutionRun } from './execution/db/execution-leases'
+import { claimExecutionRun, recoverNativeRequests } from './execution/db/execution-leases'
 import { bindExecutionWrites } from './execution/db/run-writes'
 import { relayEvents } from './execution/events'
-import type { ExecuteRunDependencies } from './execution/contract'
+import type { ExecuteRunDependencies } from './contract.ts'
 import { assignFileTools } from './harness/files'
-import { createPiHarness } from './harness/pi'
+import { createPiHarness } from './harness/pi/adapter'
+import { createOpenAIHarness } from './harness/openai/adapter'
+import { acquireNativeStateLock } from './native-state-lock'
 import { runWorker } from './execution/run-loop'
 import { openE2BSandbox } from './sandbox/e2b'
 import type { WorkerHealth } from './worker-health'
@@ -27,13 +29,12 @@ type WorkerAssignment = {
 
 type WorkerConnections = Pick<WorkerEnv, 'DATABASE_URL' | 'REDIS_URL' | 'IO_TIMEOUT_MS'> & {
   POLL_MS?: WorkerEnv['POLL_MS']
+  AGENT_ENGINE?: WorkerEnv['AGENT_ENGINE']
+  RUN_TIMEOUT_MS?: WorkerEnv['RUN_TIMEOUT_MS']
 }
 
 /** Test DI is restricted to an explicit trusted library caller, never environment input. */
 export async function startWorker(env: WorkerEnv, assignment: WorkerAssignment = {}) {
-  // Destructuring defaults are lazy and apply only to undefined, not null.
-  const { harness = await loadConfiguredHarness(env), openSandbox = bindConfiguredSandbox(env) } =
-    assignment
   // Only a caller supplying both execution capabilities bypasses SDK/storage.
   const needsStorage = assignment.harness === undefined || assignment.openSandbox === undefined
   const { objects, fileTools } = connectWorkerStorage(env, needsStorage)
@@ -42,10 +43,23 @@ export async function startWorker(env: WorkerEnv, assignment: WorkerAssignment =
     REDIS_URL: env.REDIS_URL,
     IO_TIMEOUT_MS: env.IO_TIMEOUT_MS,
     POLL_MS: env.POLL_MS,
+    AGENT_ENGINE: env.AGENT_ENGINE,
+    RUN_TIMEOUT_MS: env.RUN_TIMEOUT_MS,
   }
   const worker = allocateWorkerProcess(connections, assignment.signal, objects)
   try {
-    await worker.connect()
+    // Resource-owned setup belongs inside the same cleanup scope as connections.
+    // Defaults apply only to undefined, preserving trusted capability injection.
+    const {
+      harness = await loadConfiguredHarness(env),
+      openSandbox = bindConfiguredSandbox(env, worker.fail),
+    } = assignment
+    await worker.connect(needsStorage ? env.NATIVE_STATE_PATH : undefined)
+    if (needsStorage) {
+      const recovering = recoverNativeRequests(worker.db, harness.completed)
+      worker.own(recovering)
+      await recovering
+    }
     const consumer = {
       commands: worker.commands,
       blockingReader: worker.blockingReader,
@@ -58,9 +72,11 @@ export async function startWorker(env: WorkerEnv, assignment: WorkerAssignment =
 
     const execution = {
       writes: bindExecutionWrites(worker.db),
-      claim: worker.claim,
+      claim: (options: Readonly<{ ownerID: string; leaseMs: number }>) =>
+        worker.claim(options, harness.completed),
       harness,
       openSandbox,
+      onNativeUnsettled: worker.fail,
       ...(fileTools === undefined ? {} : { fileTools }),
     }
     const scheduling = {
@@ -69,7 +85,7 @@ export async function startWorker(env: WorkerEnv, assignment: WorkerAssignment =
       leaseMs: env.LEASE_MS,
       pollMs: env.POLL_MS,
       signal: worker.signal,
-      runTimeoutMs: Math.max(1000, env.SANDBOX_TIMEOUT_MS - 20000),
+      runTimeoutMs: env.RUN_TIMEOUT_MS,
     }
     worker.own(acceptCommands(worker.db, consumer, worker.signal))
     worker.own(runWorker(execution, scheduling))
@@ -94,23 +110,47 @@ export async function startWorker(env: WorkerEnv, assignment: WorkerAssignment =
 
 async function loadConfiguredHarness(env: WorkerEnv) {
   const systemPrompt = await readFile(env.MODEL_PROMPT_PATH, 'utf8')
-  return createPiHarness({
+  const options = {
+    statePath: env.NATIVE_STATE_PATH,
     baseURL: env.MODEL_BASE_URL,
     key: env.MODEL_API_KEY,
     modelID: env.MODEL_ID,
     contextWindow: env.MODEL_CONTEXT_WINDOW,
     maxOutputTokens: env.MODEL_MAX_OUTPUT_TOKENS,
-    reasoning: env.MODEL_REASONING,
-    input: env.MODEL_INPUT === 'text' ? ['text'] : ['text', 'image'],
+    input: env.MODEL_INPUT === 'text' ? (['text'] as const) : (['text', 'image'] as const),
     systemPrompt,
     webSearch: {
       authMode: env.WEB_SEARCH_AUTH_MODE,
       ...(env.TAVILY_API_KEY === undefined ? {} : { apiKey: env.TAVILY_API_KEY }),
     },
+  }
+  const pi = createPiHarness({
+    ...options,
+    reasoning: env.MODEL_REASONING,
+    ...(env.AGENT_SKILLS_PATH === undefined ? {} : { skillsPath: env.AGENT_SKILLS_PATH }),
   })
+  const openai = createOpenAIHarness({ ...options, reasoning: env.MODEL_REASONING ? 'low' : null })
+  return {
+    completed: async (
+      identity: Parameters<NonNullable<ExecuteRunDependencies['harness']['completed']>>[0],
+    ) =>
+      identity.engine === 'pi' ? await pi.completed!(identity) : await openai.completed!(identity),
+    run: async (input: Parameters<ExecuteRunDependencies['harness']['run']>[0]) => {
+      if (input.engine === 'pi') return await pi.run(input)
+      if (env.AGENT_SKILLS_PATH !== undefined)
+        throw new Error('Assigned skill bundle is unsupported by OpenAI harness')
+      return await openai.run(input)
+    },
+  }
 }
 
-function bindConfiguredSandbox(env: WorkerEnv): ExecuteRunDependencies['openSandbox'] {
+export function bindConfiguredSandbox(
+  env: Pick<
+    WorkerEnv,
+    'E2B_API_URL' | 'E2B_API_KEY' | 'E2B_SANDBOX_URL' | 'E2B_TEMPLATE' | 'SANDBOX_TIMEOUT_MS'
+  >,
+  onFailure: (error: unknown) => void,
+): ExecuteRunDependencies['openSandbox'] {
   const connection = {
     apiURL: env.E2B_API_URL,
     apiKey: env.E2B_API_KEY,
@@ -118,9 +158,9 @@ function bindConfiguredSandbox(env: WorkerEnv): ExecuteRunDependencies['openSand
     template: env.E2B_TEMPLATE,
     timeoutMs: env.SANDBOX_TIMEOUT_MS,
   }
-  // Bind credentials here; execution can only allocate the lease's assigned run.
-  return async function allocate(lease, signal) {
-    return await openE2BSandbox({ ...connection, lease }, signal)
+  // Bind credentials here; allocation receives correlation, not SQL authority.
+  return async function allocate(assignment, signal) {
+    return await openE2BSandbox({ ...connection, assignment, onFailure }, signal)
   }
 }
 
@@ -171,6 +211,7 @@ export class WorkerProcess {
   private readonly failures: unknown[] = []
   private closing?: Promise<void>
   private started = false
+  private nativeStateLock?: Awaited<ReturnType<typeof acquireNativeStateLock>>
 
   markReady() {
     this.started = true
@@ -187,8 +228,18 @@ export class WorkerProcess {
     return { live: true, ready: false, phase: 'starting' }
   }
 
-  readonly claim = (options: Readonly<{ ownerID: string; leaseMs: number }>) =>
-    claimExecutionRun(this.db, options)
+  readonly claim = (
+    options: Readonly<{ ownerID: string; leaseMs: number }>,
+    getCompleted?: ExecuteRunDependencies['harness']['completed'],
+  ) => {
+    this.signal.throwIfAborted()
+    return claimExecutionRun(this.db, {
+      ...options,
+      defaultEngine: this.connections.AGENT_ENGINE ?? 'pi',
+      getCompleted,
+      requestTimeoutMs: this.connections.RUN_TIMEOUT_MS ?? 1800000,
+    })
+  }
 
   constructor(
     private readonly connections: WorkerConnections,
@@ -223,19 +274,21 @@ export class WorkerProcess {
 
   private readonly abort = () => this.shutdown.abort()
 
-  private readonly fail = (error: unknown) => {
+  readonly fail = (error: unknown) => {
     this.failures.push(error)
     this.abort()
   }
 
-  async connect() {
+  async connect(statePath?: string) {
     this.signal.throwIfAborted()
-    const connecting = this.connectRedis()
+    const connecting = this.connectResources(statePath)
     this.own(connecting)
     await connecting
   }
 
-  private async connectRedis() {
+  private async connectResources(statePath?: string) {
+    if (statePath !== undefined) this.nativeStateLock = await acquireNativeStateLock(statePath)
+    this.signal.throwIfAborted()
     const connected = await Promise.allSettled([
       connectBounded(this.commands, this.connections.IO_TIMEOUT_MS),
       connectBounded(this.blockingReader, this.connections.IO_TIMEOUT_MS),
@@ -286,11 +339,14 @@ export class WorkerProcess {
       if (connection.status === 'rejected') this.failures.push(connection.reason)
     }
     if (this.failures.length) {
+      // Failed bounded cleanup is not proof a detached SDK callback stopped.
+      // Keep the kernel lock until the entrypoint physically exits the process.
       throw new AggregateError(
         this.failures,
         'Worker process failed; unaccepted deliveries remain pending',
       )
     }
+    await this.nativeStateLock?.close()
   }
 }
 

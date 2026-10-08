@@ -1,9 +1,12 @@
-import type { ExecutionLease } from '../../apps/agent/src/execution/contract'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import type { ExecutionLease } from '../../apps/agent/src/contract.ts'
 import { acceptExecutionCommand } from '../../apps/agent/src/execution/db/command-acceptance'
 import { claimExecutionRun } from '../../apps/agent/src/execution/db/execution-leases'
 import { bindExecutionWrites } from '../../apps/agent/src/execution/db/run-writes'
 import { executeRun } from '../../apps/agent/src/execution/execute-run'
-import { createPiHarness } from '../../apps/agent/src/harness/pi'
+import { createPiHarness } from '../../apps/agent/src/harness/pi/adapter'
 import { assignFileTools } from '../../apps/agent/src/harness/files'
 import { executionCommandSchema, executionEventSchema } from '@vid/contract/execution'
 import { afterAll, expect, test } from 'bun:test'
@@ -18,6 +21,7 @@ import { assetResponseSchema, messagesResponseSchema } from '@vid/contract/http'
 const endpoint = process.env.STORAGE_TEST_ENDPOINT
 if (!endpoint) throw new Error('Dedicated storage test endpoint required')
 const { db, close } = openTestDatabase()
+const nativeStatePath = await mkdtemp(join(tmpdir(), 'owned-storage-native-'))
 const objectConnection = {
   endpoint,
   region: storageSettings.OBJECT_STORAGE_REGION,
@@ -37,6 +41,7 @@ afterAll(async () => {
   objects.close()
   workerObjects.close()
   await close()
+  await rm(nativeStatePath, { recursive: true, force: true })
 })
 async function fixture() {
   const login = await signedTestIdentity(db)
@@ -282,6 +287,7 @@ test('uploaded asset traverses actual worker execution and official Pi tools to 
             timeoutMs: 5000,
           }),
           harness: createPiHarness({
+            statePath: nativeStatePath,
             baseURL: model.url,
             key: 'local-test',
             modelID: 'local',

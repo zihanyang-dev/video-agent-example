@@ -1,19 +1,19 @@
 import { expect, test } from 'bun:test'
 import { sha256, type ObjectStore } from '@vid/object-storage'
-import type { ExecutionLease, SandboxSessionPort } from '../execution/contract'
+import {
+  CapabilityRejectedError,
+  type FileAssignment,
+  type SandboxSessionPort,
+} from '../contract.ts'
 import { assignFileTools } from './files'
-import { fileToolDefinitions } from './file-tools'
 
 function fixture() {
   const bytes = new Uint8Array([0, 255, 128, 13, 10])
   const assetID = crypto.randomUUID()
-  const lease: ExecutionLease = {
+  const assignment: FileAssignment = {
     threadID: crypto.randomUUID(),
     runID: crypto.randomUUID(),
-    text: '',
     fence: 3,
-    ownerID: 'worker',
-    history: [],
     assets: [
       {
         assetID,
@@ -57,16 +57,88 @@ function fixture() {
     },
     close: () => {},
   }
-  return { bytes, assetID, lease, guest, stored, sandbox, objects }
+  return { bytes, assetID, assignment, guest, stored, sandbox, objects }
 }
+
+test('export reauthorizes after readonly guest IO and before the object PUT', async () => {
+  const f = fixture()
+  let stops = 0
+  let authority = true
+  let reads = 0
+  let puts = 0
+  f.sandbox.readBytes = async () => {
+    reads++
+    authority = false
+    return f.bytes
+  }
+  f.objects.put = async () => {
+    puts++
+    return { byteLength: f.bytes.byteLength, sha256: sha256(f.bytes) }
+  }
+  const files = assignFileTools(f.objects, { maxBytes: 10, maxFiles: 2, timeoutMs: 1000 })(
+    f.assignment,
+    f.sandbox,
+    () => {
+      stops++
+    },
+    async () => {
+      if (!authority) throw new CapabilityRejectedError('Current request authority rejected PUT')
+    },
+  )
+  expect(
+    await files
+      .exportFile({
+        path: '/output',
+        name: 'output.bin',
+        mimeType: 'application/octet-stream',
+        signal: new AbortController().signal,
+      })
+      .catch((error: unknown) => error),
+  ).toBeInstanceOf(CapabilityRejectedError)
+  expect(reads).toBe(1)
+  expect(puts).toBe(0)
+  expect(files.prepared).toEqual([])
+  expect(stops).toBe(0)
+})
+
+test('a confirmed local import rejection does not imply an unknown guest write', async () => {
+  const f = fixture()
+  let stops = 0
+  f.sandbox.writeBytes = async () => {
+    throw new CapabilityRejectedError('Native mutative admission rejected')
+  }
+  const files = assignFileTools(f.objects, { maxBytes: 10, maxFiles: 2, timeoutMs: 1000 })(
+    f.assignment,
+    f.sandbox,
+    () => {
+      stops++
+    },
+    async () => {},
+  )
+  expect(
+    await files
+      .importFile({ assetID: f.assetID, path: '/input', signal: new AbortController().signal })
+      .catch((error: unknown) => error),
+  ).toBeInstanceOf(CapabilityRejectedError)
+  expect(f.guest.size).toBe(0)
+  expect(stops).toBe(0)
+})
 
 test('assigned binary import uses Agent path and explicit export prepares immutable allocated bytes', async () => {
   const f = fixture()
+  let stops = 0
   const files = assignFileTools(f.objects, {
     maxBytes: 10,
     maxFiles: 2,
     timeoutMs: 1000,
-  })(f.lease, f.sandbox, () => {})
+  })(
+    f.assignment,
+    f.sandbox,
+    () => {
+      stops++
+    },
+    async () => {},
+  )
   const signal = AbortSignal.timeout(1000)
   await files.importFile({
     assetID: f.assetID,
@@ -81,11 +153,11 @@ test('assigned binary import uses Agent path and explicit export prepares immuta
     signal,
   })
   expect(output.objectKey).toBe(
-    `assets/generated/${f.lease.threadID}/${f.lease.runID}/3/${output.assetID}`,
+    `assets/generated/${f.assignment.threadID}/${f.assignment.runID}/3/${output.assetID}`,
   )
   expect(f.stored.get(output.objectKey)).toEqual(f.bytes)
   expect(files.prepared).toEqual([output])
-  expect(files.hasUnknownOutcome()).toBe(false)
+  expect(stops).toBe(0)
 })
 
 test('unassigned asset and digest mismatch never write guest bytes', async () => {
@@ -94,7 +166,12 @@ test('unassigned asset and digest mismatch never write guest bytes', async () =>
     maxBytes: 16,
     maxFiles: 4,
     timeoutMs: 1000,
-  })(f.lease, f.sandbox, () => {})
+  })(
+    f.assignment,
+    f.sandbox,
+    () => {},
+    async () => {},
+  )
   const signal = AbortSignal.timeout(1000)
   expect(
     files.importFile({ assetID: crypto.randomUUID(), path: '/chosen', signal }),
@@ -119,9 +196,14 @@ test('lost upload ACK keeps possibly committed bytes and aborts spending without
     maxBytes: 16,
     maxFiles: 4,
     timeoutMs: 1000,
-  })(f.lease, f.sandbox, () => {
-    stopped = true
-  })
+  })(
+    f.assignment,
+    f.sandbox,
+    () => {
+      stopped = true
+    },
+    async () => {},
+  )
   expect(
     files.exportFile({
       path: '/chosen',
@@ -132,27 +214,7 @@ test('lost upload ACK keeps possibly committed bytes and aborts spending without
   ).rejects.toThrow('acknowledgement lost')
   await Bun.sleep(5)
   expect(stopped).toBe(true)
-  expect(files.hasUnknownOutcome()).toBe(true)
   expect(files.prepared).toEqual([])
-  expect(f.stored.size).toBe(2)
-})
-
-test('file and aggregate byte budgets reject exports before object upload', async () => {
-  const f = fixture()
-  f.guest.set('/chosen', f.bytes)
-  const files = assignFileTools(f.objects, {
-    maxBytes: 5,
-    maxFiles: 1,
-    timeoutMs: 1000,
-  })(f.lease, f.sandbox, () => {})
-  const request = {
-    path: '/chosen',
-    name: 'delivery.bin',
-    mimeType: 'application/octet-stream',
-    signal: AbortSignal.timeout(1000),
-  }
-  await files.exportFile(request)
-  expect(files.exportFile(request)).rejects.toThrow()
   expect(f.stored.size).toBe(2)
 })
 
@@ -171,9 +233,14 @@ for (const budget of ['count', 'bytes'] as const) {
       maxBytes: budget === 'count' ? 100 : 5,
       maxFiles: budget === 'count' ? 1 : 10,
       timeoutMs: 1000,
-    })(f.lease, f.sandbox, () => {
-      stops++
-    })
+    })(
+      f.assignment,
+      f.sandbox,
+      () => {
+        stops++
+      },
+      async () => {},
+    )
     const request = {
       path: '/chosen',
       name: 'out.bin',
@@ -187,7 +254,6 @@ for (const budget of ['count', 'bytes'] as const) {
     expect(reads).toBe(1)
     expect(f.stored.size).toBe(2)
     expect(stops).toBe(0)
-    expect(files.hasUnknownOutcome()).toBe(false)
   })
 }
 
@@ -197,6 +263,7 @@ for (const action of ['import', 'export'] as const) {
     const started = Promise.withResolvers<AbortSignal>()
     const release = Promise.withResolvers<void>()
     let mutations = 0
+    let stops = 0
     if (action === 'import') {
       f.objects.read = async (_key, _max, signal) => {
         started.resolve(signal)
@@ -221,7 +288,14 @@ for (const action of ['import', 'export'] as const) {
       maxBytes: 100,
       maxFiles: 10,
       timeoutMs: 10,
-    })(f.lease, f.sandbox, () => {})
+    })(
+      f.assignment,
+      f.sandbox,
+      () => {
+        stops++
+      },
+      async () => {},
+    )
     const signal = new AbortController().signal
     const operation =
       action === 'import'
@@ -248,87 +322,42 @@ for (const action of ['import', 'export'] as const) {
     }
     expect(await outcome.catch((cause: unknown) => cause)).toBeInstanceOf(Error)
     expect(mutations).toBe(0)
-    expect(files.hasUnknownOutcome()).toBe(false)
+    expect(stops).toBe(0)
   })
 }
 
-test('file import retains owner cancellation while an independent SDK signal is active', async () => {
-  const owner = new AbortController()
-  const sdk = new AbortController()
-  const started = Promise.withResolvers<AbortSignal>()
-  const files = {
-    assigned: [],
-    prepared: [],
-    hasUnknownOutcome: () => false,
-    importFile: async ({ signal }: { signal: AbortSignal }) => {
-      started.resolve(signal)
-      await new Promise<void>((resolve) => {
-        signal.addEventListener('abort', () => resolve(), { once: true })
-        if (signal.aborted) resolve()
-      })
-      signal.throwIfAborted()
-      return { bytes: new Uint8Array(), mimeType: 'text/plain' }
-    },
-    exportFile: async () => {
-      throw new Error('Unexpected export')
-    },
+test('invoked PUT AbortError is unknown and cannot use the no-dispatch receipt', async () => {
+  const f = fixture()
+  f.guest.set('/out', f.bytes)
+  let puts = 0
+  let corrections = 0
+  let stops = 0
+  const rejection = new DOMException('Provider aborted after dispatch', 'AbortError')
+  f.objects.put = async () => {
+    puts++
+    throw rejection
   }
-  const tool = fileToolDefinitions(files, owner.signal, false, () => {
-    throw new Error('Unexpected budget refusal')
-  })[0]!
-  const context = {} as Parameters<typeof tool.execute>[4]
-  const reason = new Error('assigned owner cancellation')
-  const pending = tool.execute(
-    'fixture',
-    { assetID: crypto.randomUUID(), path: '/chosen' },
-    sdk.signal,
-    undefined,
-    context,
+  const files = assignFileTools(f.objects, { maxBytes: 10, maxFiles: 2, timeoutMs: 1000 })(
+    f.assignment,
+    f.sandbox,
+    () => {
+      stops++
+    },
+    async () => async () => {
+      corrections++
+    },
   )
-  void pending.catch(() => {})
-  try {
-    const cancellation = await started.promise
-    owner.abort(reason)
-    expect(cancellation.aborted).toBe(true)
-    expect(cancellation.reason).toBe(reason)
-    expect(await pending.catch((cause: unknown) => cause)).toBe(reason)
-  } finally {
-    sdk.abort(reason)
-    await pending.catch(() => {})
-  }
-})
-
-test('native file definitions guard SDK cancellation before capabilities', async () => {
-  let invoked = 0
-  const files = {
-    assigned: [],
-    prepared: [],
-    hasUnknownOutcome: () => false,
-    importFile: async () => {
-      invoked++
-      return { bytes: new Uint8Array(), mimeType: 'image/png' }
-    },
-    exportFile: async () => {
-      invoked++
-      throw new Error('unexpected')
-    },
-  }
-  const definitions = fileToolDefinitions(files, new AbortController().signal, true, () => {
-    throw new Error('Unexpected byte limit')
-  })
-  const importTool = definitions[0]!
-  const context = {} as Parameters<typeof importTool.execute>[4]
-  const reason = new Error('owner cancellation')
-  const aborted = AbortSignal.abort(reason)
-  const rejected = await importTool
-    .execute(
-      'fixture',
-      { assetID: crypto.randomUUID(), path: '/chosen' },
-      aborted,
-      undefined,
-      context,
-    )
-    .catch((error: unknown) => error)
-  expect(rejected).toBe(reason)
-  expect(invoked).toBe(0)
+  const failure = await files
+    .exportFile({
+      path: '/out',
+      name: 'out',
+      mimeType: 'application/octet-stream',
+      signal: new AbortController().signal,
+    })
+    .catch((cause: unknown) => cause)
+  expect(failure).toBe(rejection)
+  expect(puts).toBe(1)
+  expect(corrections).toBe(0)
+  expect(stops).toBe(1)
+  expect(files.prepared).toEqual([])
 })

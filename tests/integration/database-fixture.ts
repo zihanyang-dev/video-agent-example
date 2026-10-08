@@ -59,6 +59,22 @@ export function openTestDatabase(max = 4, connectionString = readMigrationEnv().
   return { db, close }
 }
 
+/** Caller tracks this thread in a launcher-verified test database and joins its
+ * writers first. Product/auth/object cleanup remains with each fixture owner. */
+export async function clearOwnedExecutionThread(db: Kysely<DB>, threadID: string) {
+  await db.transaction().execute(async (tx) => {
+    await tx
+      .updateTable('execution.conversations')
+      .set({ active_run_id: null, lease_owner: null, lease_until: null })
+      .where('thread_id', '=', threadID)
+      .execute()
+    await tx.deleteFrom('execution.event_outbox').where('thread_id', '=', threadID).execute()
+    await tx.deleteFrom('execution.runs').where('thread_id', '=', threadID).execute()
+    await tx.deleteFrom('execution.command_inbox').where('thread_id', '=', threadID).execute()
+    await tx.deleteFrom('execution.conversations').where('thread_id', '=', threadID).execute()
+  })
+}
+
 /** Attempt every owned cleanup even when an earlier SQL deletion fails. */
 export async function settleTestCleanup(cleanups: (() => Promise<unknown>)[]) {
   const failures: unknown[] = []

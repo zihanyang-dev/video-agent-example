@@ -93,13 +93,20 @@ export interface ExecutionCommandInbox {
 export interface ExecutionConversations {
   active_run_id: string | null
   fence: Generated<number>
-  history: Generated<Json>
+  harness_engine: string | null
   lease_owner: string | null
   lease_until: Timestamp | null
+  legacy_history: Generated<Json>
+  legacy_import_required: Generated<boolean>
   legacy_workspace_checkpoint: Json | null
   native_sandbox: Json | null
+  native_session_id: Generated<string>
+  native_state_initialized: Generated<boolean>
+  requested_engine: string | null
   sandbox_recovery_required: Generated<boolean>
   thread_id: string
+  workspace_reset_required: Generated<boolean>
+  workspace_transition_pending: Generated<boolean>
 }
 
 export interface ExecutionEventOutbox {
@@ -112,16 +119,31 @@ export interface ExecutionEventOutbox {
   thread_id: string
 }
 
+export interface ExecutionNativeSessions {
+  harness_engine: string
+  initial_context: Json | null
+  initialized: Generated<boolean>
+  native_session_id: string
+  storage: string
+  thread_id: string
+}
+
 export interface ExecutionRuns {
   assistant_message_id: string | null
   cancel_requested: Generated<boolean>
   command_id: string
+  completion: Json | null
   created_at: Generated<Timestamp>
+  deadline_at: Timestamp | null
   message_id: string
+  model_call_count: Generated<number>
+  native_session_id: string | null
+  resume_count: Generated<number>
   run_id: string
   status: Generated<ExecutionRunStatus>
   text: string
   thread_id: string
+  uncheckpointed_effects: Generated<number>
 }
 
 export interface ProductAssets {
@@ -194,6 +216,7 @@ export interface DB {
   'execution.command_inbox': ExecutionCommandInbox
   'execution.conversations': ExecutionConversations
   'execution.event_outbox': ExecutionEventOutbox
+  'execution.native_sessions': ExecutionNativeSessions
   'execution.runs': ExecutionRuns
   'product.assets': ProductAssets
   'product.command_outbox': ProductCommandOutbox

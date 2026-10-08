@@ -6,7 +6,7 @@ import { revokeSession } from '../db/sessions'
 import { readBody, requestBodyRejection, type BodyCollectionPolicy } from '../request-body'
 import { publicSchemas } from '@vid/contract/http'
 
-export type AuthenticationSettings = Readonly<{
+type AuthenticationSettings = Readonly<{
   baseURL: string
   secret: string
   githubClientID: string

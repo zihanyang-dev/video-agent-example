@@ -26,15 +26,26 @@ apps/agent/src/
   main.ts                   读取配置和进程信号
   worker.ts                 连接、后台循环、活跃任务与关闭
   worker-health.ts          进程存活与就绪探针
+  contract.ts               三层协作的进程内消费契约，不是 wire 协议
   execution/                持久执行路径，相邻测试随 owner 放置
-    contract.ts             进程内执行能力与 SQL-issued lease
     commands.ts             Redis 命令接收、inbox 接受后 ACK
     run-loop.ts             并发预算、领取与 owned run 收尾
     execute-run.ts          一轮执行、取消、暂停与未知结果隔离
     events.ts               execution outbox 的 Redis 投递
     wait-for-poll.ts         调度与续租共用的有界等待
-    db/                     inbox、租约、fenced 写入、历史与 outbox
-  harness/                  官方 pi、历史与明确工具
+    db/                     inbox、权威/预算、fenced terminal 与 outbox
+  harness/                  引擎无关能力与具体 harness 适配
+    files.ts                已分配资产导入与交付准备
+    web-search.ts           有界搜索、净化与每轮预算
+    pi/
+      adapter.ts            实现 AgentHarness，拥有原生 session 与资源
+      session.ts            SDK JSONL、可信资产/最终回执与 durable checkpoint
+      tools.ts              六个工具的原生 schema、描述与结果包装
+    openai/
+      adapter.ts            独立 Agent/Runner/RunState loop 与 compaction
+      session.ts            公开 Session items 与 atomic native saves
+      tools.ts              本轮 capability 的公开 SDK 工具
+  native-state-lock.ts      持久目录的单 host kernel ownership
   sandbox/                  环境操作及具体 E2B 实现
 ```
 
@@ -42,7 +53,9 @@ agent 没有用户侧 conversation 或资产领域。`execution/` 聚合完整�
 
 `worker.ts` 仍拥有连接、能力绑定、后台任务和停机生命周期，不移进 execution；harness/sandbox 仍拥有具体 SDK 行为。模块直接导入实际文件，旧路径没有 compatibility re-export，目录没有 barrel。`contract.ts` 是能力声明而非转发入口，与共享 wire schema 的归属不同。
 
-文件导入与交付是 harness 的工具行为：只使用已分配引用，guest 路径由 Agent 决定。没有独立 assets/workspace 模块。沙箱原生保存整个执行环境，数据库保存原生引用。
+`harness/` 根目录放共享业务能力，`pi/` 和 `openai/` 各自拥有独立 SDK 状态/loop；不创建跨 engine transcript、通用恢复协议或空引擎实现。文件能力只使用已分配引用并准备输出，guest 路径由 Agent 决定；execution 在 fenced 成功终态提交资产引用，不实现搜索或资产字节搬运。沙箱供应商保存执行环境，数据库保存原生引用与效果事实；私有模型状态位于 worker native-state 卷，不进入 SQL/guest。独立 workspace 备份仍未验收，见 [原生 runtime](native-agent-runtime.md)。
+
+execution 不导入具体 harness、sandbox adapter 或 agent SDK。根目录 `contract.ts` 声明 `AgentHarness` 等实际消费契约，具体 adapter 同时承担防腐职责；不再叠加 manager/service。沙箱只收到运行关联字段和不透明原生引用，不收到用户文本、历史或 SQL owner。`harness/web-search.ts` 实现搜索能力，`harness/pi/tools.ts` 只将它暴露为 Pi 工具，不再实现另一套搜索。技能加载与部署见 [Agent Skills](agent-skills.md)。
 
 worker 与 server 只共享协议，不共享产品权限代码。私有执行数据库的权限边界不等于产品目录必须出现 execution。
 
@@ -70,10 +83,10 @@ Redis 直接使用官方 SDK；不维护另一套 messaging SDK。存储包不�
 
 ## 部署、测试与文档
 
-- `deploy/`：原生 PostgreSQL SQL/psql、Redis config/ACL、Caddy 与固定镜像。
+- `deploy/`：原生 PostgreSQL SQL/psql、Redis config/ACL、Caddy 与固定镜像；`deploy/storage/{server,worker}-policy.json` 是公开的两角色权限政策，不是私有凭据，保留各自的权限边界。
 - `config/.env`：唯一运维输入，各进程显式选择字段。
 - `scripts/`：可信、有界、有资源所有权的验证/生成控制器。
 - 相邻单元测试与 SQL/Redis、对象存储、VM 和部署测试各自保护实际行为。
-- 文档描述使用方式与稳定设计，不保存重构过程；generated 核对来源与复现，不手改。
+- 现行手册描述使用方式与稳定设计；重构过程、研究与验收 receipts 以显式历史标签保留为证据，不当作现行运行合同，分类见 [文档索引](README.md)。generated 核对来源与复现，不手改。
 
 小行为保持内聚，有明确边界才拆文件；没有消费者不建 barrel、空占位或备用实现。

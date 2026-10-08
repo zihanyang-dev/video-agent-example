@@ -1,11 +1,14 @@
 import { expect, test } from 'bun:test'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { openE2BSandbox } from './e2b'
 import { E2B } from 'e2b'
 import { executeRun } from '../execution/execute-run'
-import type { ExecutionWrites } from '../execution/contract'
+import type { ExecutionWrites } from '../contract.ts'
 import { assignFileTools } from '../harness/files'
 import { sha256 } from '@vid/object-storage'
-import { createPiHarness } from '../harness/pi'
+import { createPiHarness } from '../harness/pi/adapter'
 
 test('assigned native identity cannot be mutated before durable persistence', async () => {
   const requests: string[] = []
@@ -35,13 +38,10 @@ test('assigned native identity cannot be mutated before durable persistence', as
         apiKey: 'fixture',
         template: 'fixture',
         timeoutMs: 120000,
-        lease: {
+        assignment: {
           threadID: crypto.randomUUID(),
           runID: crypto.randomUUID(),
-          text: 'identity',
           fence: 1,
-          ownerID: 'fixture',
-          history: [],
         },
       },
       AbortSignal.timeout(5000),
@@ -112,17 +112,26 @@ for (const rejection of [
       },
     })
     const endpoint = `http://127.0.0.1:${server.port}`
+    const statePath = await mkdtemp(join(tmpdir(), 'owned-e2b-read-'))
     const lease = {
       threadID: crypto.randomUUID(),
       runID: crypto.randomUUID(),
-      commandID: crypto.randomUUID(),
-      messageID: crypto.randomUUID(),
       text: 'Read assigned file',
       fence: 1,
       ownerID: 'fixture',
-      history: [],
+      engine: 'pi' as const,
+      nativeSessionID: crypto.randomUUID(),
+      deadlineAt: new Date(Date.now() + 60000),
+      restoring: false,
+      restoreWorkspace: false,
     }
     const writes: ExecutionWrites = {
+      beginWorkspaceTransition: async () => true,
+      settleWorkspaceTransition: async () => true,
+      reserveModel: async () => 'allowed',
+      beginEffect: async () => 'allowed',
+      rejectEffect: async () => true,
+      checkpoint: async () => true,
       saveSandbox: async () => true,
       renew: async () => 'renewed',
       quarantine: async () => {
@@ -139,6 +148,7 @@ for (const rejection of [
         {
           writes,
           harness: createPiHarness({
+            statePath,
             baseURL: `${endpoint}/v1`,
             key: 'fixture',
             modelID: 'fixture',
@@ -148,7 +158,7 @@ for (const rejection of [
             input: ['text'],
             systemPrompt: 'Use assigned tools',
           }),
-          openSandbox: (lease, signal) =>
+          openSandbox: (assignment, signal) =>
             openE2BSandbox(
               {
                 apiURL: endpoint,
@@ -156,7 +166,7 @@ for (const rejection of [
                 apiKey: 'fixture',
                 template: 'fixture',
                 timeoutMs: 120000,
-                lease,
+                assignment,
               },
               signal,
             ),
@@ -187,6 +197,7 @@ for (const rejection of [
       expect(requests.at(-1)).toBe('POST /sandboxes/owned-read/pause')
     } finally {
       await server.stop(true)
+      await rm(statePath, { recursive: true, force: true })
     }
   })
 }
@@ -364,13 +375,10 @@ for (const text of ['', 'é'.repeat(131070) + '🙂']) {
           apiKey: 'fixture',
           template: 'fixture',
           timeoutMs: 120000,
-          lease: {
+          assignment: {
             threadID: 'thread',
             runID: 'run',
-            text: 'read',
             fence: 1,
-            ownerID: 'fixture',
-            history: [],
           },
         },
         signal,
@@ -378,6 +386,111 @@ for (const text of ['', 'é'.repeat(131070) + '🙂']) {
       expect(await session.read({ path: '/text', signal })).toBe(text)
       await session.close()
       expect(requests.at(-1)).toBe('/sandboxes/owned-text/pause')
+    } finally {
+      await server.stop(true)
+    }
+  })
+}
+
+for (const scenario of [
+  'restore',
+  'next-turn',
+  'foreign',
+  'pause-unknown',
+  'connect-unknown',
+  'wrong-ref',
+  'running-next-turn',
+] as const) {
+  const state = scenario === 'next-turn' ? 'paused' : 'running'
+  const threadID = scenario === 'foreign' ? 'foreign' : 'thread'
+  const pauseStatus = scenario === 'pause-unknown' ? 502 : 204
+  const connectID = scenario === 'wrong-ref' ? 'foreign' : 'owned-prior'
+  test(`known guest cold continuation: ${scenario}`, async () => {
+    const requests: string[] = []
+    const bodies: unknown[] = []
+    let infoReads = 0
+    const server = Bun.serve({
+      hostname: '127.0.0.1',
+      port: 0,
+      async fetch(request) {
+        const path = new URL(request.url).pathname
+        requests.push(`${request.method} ${path}`)
+        if (request.method === 'POST') bodies.push(await request.json())
+        if (request.method === 'GET' && path === '/sandboxes/owned-prior')
+          return Response.json({
+            sandboxID: ++infoReads > 1 && scenario === 'wrong-ref' ? 'foreign' : 'owned-prior',
+            state,
+            metadata: {
+              platform: 'vid',
+              threadID,
+              runID: 'previous',
+              fence: '1',
+            },
+          })
+        if (path.endsWith('/pause')) return new Response(null, { status: pauseStatus })
+        if (path.endsWith('/connect')) {
+          if (scenario === 'connect-unknown') return new Response(null, { status: 502 })
+          return Response.json({
+            sandboxID: connectID,
+            envdVersion: '0.6.2',
+            envdAccessToken: 'fixture',
+          })
+        }
+        return new Response(null, { status: 500 })
+      },
+    })
+    const endpoint = `http://127.0.0.1:${server.port}`
+    try {
+      const pending = openE2BSandbox(
+        {
+          apiURL: endpoint,
+          sandboxURL: endpoint,
+          apiKey: 'fixture',
+          template: 'fixture',
+          timeoutMs: 120000,
+          assignment: {
+            threadID: 'thread',
+            runID: 'next',
+            fence: 2,
+            restoring: scenario !== 'next-turn' && scenario !== 'running-next-turn',
+            nativeRef: { provider: 'e2b', id: 'owned-prior' },
+          },
+        },
+        AbortSignal.timeout(5000),
+      )
+      if (scenario === 'restore' || scenario === 'next-turn') {
+        const session = await pending
+        expect(session.nativeRef.id).toBe('owned-prior')
+        expect(requests).toEqual(
+          scenario === 'restore'
+            ? [
+                'GET /sandboxes/owned-prior',
+                'POST /sandboxes/owned-prior/pause',
+                'POST /v2/sandboxes/owned-prior/connect',
+                'GET /sandboxes/owned-prior',
+              ]
+            : [
+                'GET /sandboxes/owned-prior',
+                'POST /v2/sandboxes/owned-prior/connect',
+                'GET /sandboxes/owned-prior',
+              ],
+        )
+        expect(bodies).toEqual(
+          scenario === 'restore'
+            ? [{ memory: false }, { timeout: 120, memory: false }]
+            : [{ timeout: 120, memory: false }],
+        )
+        await session.close()
+      } else {
+        expect(await pending.catch((error: unknown) => error)).toBeInstanceOf(Error)
+        expect(requests.filter((path) => path.includes('/connect'))).toHaveLength(
+          scenario === 'connect-unknown' || scenario === 'wrong-ref' ? 1 : 0,
+        )
+        expect(requests).not.toContain('POST /v2/sandboxes')
+        expect(requests.some((path) => path.includes('/foreign'))).toBe(false)
+      }
+      if (scenario === 'wrong-ref')
+        expect(requests.filter((path) => path.endsWith('/pause'))).toHaveLength(2)
     } finally {
       await server.stop(true)
     }

@@ -31,7 +31,7 @@ export function normalizeMessageIntent(intent: MessageIntent): MessageIntent | n
   }
 }
 
-export type AcceptedMessageFacts = Readonly<{
+type AcceptedMessageFacts = Readonly<{
   threadID: string
   role: string
   assetIDs?: readonly string[]

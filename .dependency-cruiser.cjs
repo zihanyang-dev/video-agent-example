@@ -1,4 +1,5 @@
 const apps = ['server', 'agent']
+const executionContracts = '^apps/agent/src/(execution/|contract\\.ts$)'
 
 module.exports = {
   forbidden: [
@@ -13,6 +14,24 @@ module.exports = {
       severity: 'error',
       from: { path: '^packages/' },
       to: { path: '^apps/' },
+    },
+    {
+      name: 'execution-no-harness',
+      severity: 'error',
+      from: { path: executionContracts, pathNot: '\\.test\\.ts$' },
+      to: { path: '^apps/agent/src/harness/' },
+    },
+    {
+      name: 'execution-no-sandbox-adapter',
+      severity: 'error',
+      from: { path: executionContracts, pathNot: '\\.test\\.ts$' },
+      to: { path: '^apps/agent/src/sandbox/', pathNot: '/reference\\.ts$' },
+    },
+    {
+      name: 'execution-no-agent-sdk',
+      severity: 'error',
+      from: { path: executionContracts, pathNot: '\\.test\\.ts$' },
+      to: { path: '(^|/)(e2b|@earendil-works/pi-[^/]+|@openai/agents[^/]*|openai)(/|$)' },
     },
     {
       name: 'no-cycles',
@@ -41,7 +60,8 @@ module.exports = {
     tsConfig: { fileName: 'tsconfig.json' },
     tsPreCompilationDeps: true,
     doNotFollow: { path: 'node_modules' },
-    exclude: '(^|/)(dist|coverage)/',
+    // SDK declarations commonly live in dist; retain their edges for boundary checks.
+    exclude: '^(apps|packages)/.*/(dist|coverage)/',
     enhancedResolveOptions: {
       exportsFields: ['exports'],
       conditionNames: ['types', 'import', 'default'],

@@ -1,56 +1,149 @@
 import type { DB } from '@vid/database/types'
 import { sql, type Kysely, type Transaction } from 'kysely'
-import type { ExecutionEvent } from '@vid/contract/execution'
 import type {
   ExecutionLease,
   ExecutionWrites,
   ExecutionCompletion,
   ExecutionFailure,
   ExecutionOutcome,
-} from '../contract'
+  SpendingDecision,
+} from '../../contract'
 import type { NativeSandboxReference } from '../../sandbox/reference'
-import {
-  lockLease,
-  releaseConversation,
-  renewExecutionLease,
-  historyByteLimit,
-} from './execution-leases'
+import { lockLease, renewExecutionLease } from './execution-leases'
+import { recordTerminal, type TerminalEvent } from './terminal-writes'
 import { enqueueEvent, eventIdentities } from './event-outbox'
 
-/** Only execution's actual writes are bound here. Intake and scheduling use named
- * DB operations directly, rather than a factory object that owns every query.
- */
+type LeaseState = Awaited<ReturnType<typeof lockLease>>
+
+/** Binding contains actual writes, never SDK history or an alternate scheduler. */
 export function bindExecutionWrites(db: Kysely<DB>): ExecutionWrites {
   return {
+    reserveModel: (lease) => reserveModel(db, lease),
+    beginEffect: (lease) => beginEffect(db, lease),
+    rejectEffect: (lease) => rejectEffect(db, lease),
+    checkpoint: (lease) => checkpointEffects(db, lease),
+    beginWorkspaceTransition: (lease) => workspaceTransition(db, lease, true),
+    settleWorkspaceTransition: (lease) => workspaceTransition(db, lease, false),
     saveSandbox: (lease, reference) => saveNativeSandbox(db, lease, reference),
     quarantine: (lease, reason) => quarantineSandbox(db, lease, reason),
     renew: (lease, leaseMs) => renewExecutionLease(db, lease, leaseMs),
     appendText: (lease, delta) => appendExecutionText(db, lease, delta),
-    complete: async (lease, completion) =>
-      terminalOutcome(await completeExecutionRun(db, lease, completion), 'completed'),
-    fail: async (lease, reason) =>
-      terminalOutcome(await failExecutionRun(db, lease, reason), 'failed'),
-    cancel: async (lease) => terminalOutcome(await cancelExecutionRun(db, lease), 'cancelled'),
+    complete: (lease, completion) => completeExecutionRun(db, lease, completion),
+    fail: (lease, reason) => failExecutionRun(db, lease, reason),
+    cancel: (lease) => cancelExecutionRun(db, lease),
   }
 }
 
-function terminalOutcome(
-  accepted: boolean | ExecutionOutcome,
-  requested: ExecutionOutcome,
-): ExecutionOutcome {
-  if (typeof accepted === 'string') return accepted
-  return accepted ? requested : 'lost'
+function spendingDenied(run: LeaseState): SpendingDecision | undefined {
+  if (run === undefined) return 'lost'
+  if (run.cancel_requested) return 'cancel'
+  if (run.sandbox_recovery_required || run.workspace_transition_pending) return 'recovery-required'
+  if (run.deadline_at === null || run.deadline_at.getTime() <= run.now.getTime()) return 'limit'
+  return undefined
 }
 
-export async function appendExecutionText(db: Kysely<DB>, lease: ExecutionLease, text: string) {
-  return await db.transaction().execute((tx) => appendText(tx, lease, text))
+async function reserveModel(db: Kysely<DB>, lease: ExecutionLease): Promise<SpendingDecision> {
+  return await db.transaction().execute(async (tx) => {
+    const run = await lockLease(tx, lease)
+    if (run === undefined) return 'lost'
+    const denied = spendingDenied(run)
+    if (denied !== undefined) return denied
+    if (run.model_call_count >= 16) return 'limit'
+    await tx
+      .updateTable('execution.runs')
+      .set({ model_call_count: sql`model_call_count + 1` })
+      .where('run_id', '=', lease.runID)
+      .execute()
+    return 'allowed'
+  })
+}
+
+/** Persist uncertainty before dispatch, not after an effect happens. */
+async function beginEffect(db: Kysely<DB>, lease: ExecutionLease): Promise<SpendingDecision> {
+  return await db.transaction().execute(async (tx) => {
+    const denied = spendingDenied(await lockLease(tx, lease))
+    if (denied !== undefined) return denied
+    await tx
+      .updateTable('execution.runs')
+      .set({ uncheckpointed_effects: sql`uncheckpointed_effects + 1` })
+      .where('run_id', '=', lease.runID)
+      .execute()
+    return 'allowed'
+  })
+}
+
+/** Confirmed no IO was dispatched. This never refunds a model reservation. */
+async function rejectEffect(db: Kysely<DB>, lease: ExecutionLease) {
+  return await db.transaction().execute(async (tx) => {
+    const run = await lockLease(tx, lease, true)
+    if (run === undefined || run.uncheckpointed_effects < 1) return false
+    await tx
+      .updateTable('execution.runs')
+      .set({ uncheckpointed_effects: sql`uncheckpointed_effects - 1` })
+      .where('run_id', '=', lease.runID)
+      .execute()
+    return true
+  })
+}
+
+/** Called only after durable native results, never at a tool-start callback. */
+async function checkpointEffects(db: Kysely<DB>, lease: ExecutionLease) {
+  return await db.transaction().execute(async (tx) => {
+    const run = await lockLease(tx, lease)
+    if (run === undefined || run.sandbox_recovery_required || run.workspace_transition_pending)
+      return false
+    await tx
+      .updateTable('execution.native_sessions')
+      .set({ initialized: true })
+      .where('thread_id', '=', lease.threadID)
+      .where('native_session_id', '=', lease.nativeSessionID)
+      .execute()
+    await tx
+      .updateTable('execution.conversations')
+      .set({ native_state_initialized: true })
+      .where('thread_id', '=', lease.threadID)
+      .execute()
+    await tx
+      .updateTable('execution.runs')
+      .set({ uncheckpointed_effects: 0 })
+      .where('run_id', '=', lease.runID)
+      .execute()
+    return true
+  })
+}
+
+/** Cleanup may settle the same expired owner, never a different fence. */
+async function workspaceTransition(db: Kysely<DB>, lease: ExecutionLease, pending: boolean) {
+  return await db.transaction().execute(async (tx) => {
+    if ((await lockLease(tx, lease, true)) === undefined) return false
+    await tx
+      .updateTable('execution.conversations')
+      .set({ workspace_transition_pending: pending })
+      .where('thread_id', '=', lease.threadID)
+      .execute()
+    return true
+  })
+}
+
+export async function appendExecutionText(db: Kysely<DB>, lease: ExecutionLease, delta: string) {
+  return await db.transaction().execute(async (tx) => {
+    const run = await lockLease(tx, lease)
+    if (run === undefined || run.cancel_requested || run.sandbox_recovery_required) return false
+    await enqueueEvent(tx, {
+      ...eventIdentities(lease),
+      kind: 'assistant-text',
+      messageID: run.assistant_message_id!,
+      delta,
+    })
+    return true
+  })
 }
 
 export async function completeExecutionRun(
   db: Kysely<DB>,
   lease: ExecutionLease,
   completion: ExecutionCompletion,
-) {
+): Promise<ExecutionOutcome> {
   return await db.transaction().execute((tx) => finishRun(tx, lease, { completion }))
 }
 
@@ -58,41 +151,23 @@ export async function failExecutionRun(
   db: Kysely<DB>,
   lease: ExecutionLease,
   reason: ExecutionFailure,
-) {
+): Promise<ExecutionOutcome> {
   return await db.transaction().execute((tx) =>
     finishRun(tx, lease, {
-      event: {
-        ...eventIdentities(lease),
-        kind: 'run-failed',
-        reason,
-      },
+      event: { ...eventIdentities(lease), kind: 'run-failed', reason },
     }),
   )
 }
 
-export async function cancelExecutionRun(db: Kysely<DB>, lease: ExecutionLease) {
-  const result = await db.transaction().execute((tx) =>
+export async function cancelExecutionRun(
+  db: Kysely<DB>,
+  lease: ExecutionLease,
+): Promise<ExecutionOutcome> {
+  return await db.transaction().execute((tx) =>
     finishRun(tx, lease, {
       event: { ...eventIdentities(lease), kind: 'run-cancelled' },
     }),
   )
-  return result === 'cancelled' ? true : result
-}
-
-async function appendText(tx: Transaction<DB>, lease: ExecutionLease, delta: string) {
-  const run = await lockLease(tx, lease)
-  if (run === undefined || run.cancel_requested || run.sandbox_recovery_required) {
-    return false
-  }
-  await enqueueEvent(tx, {
-    ...eventIdentities(lease),
-    kind: 'assistant-text',
-    // Claim assigns this identity atomically with running status. It is read
-    // under lease authority, never supplied by a streaming or terminal caller.
-    messageID: run.assistant_message_id!,
-    delta,
-  })
-  return true
 }
 
 async function finishRun(
@@ -100,89 +175,42 @@ async function finishRun(
   lease: ExecutionLease,
   decision:
     | { completion: ExecutionCompletion }
-    | {
-        event: Extract<ExecutionEvent, { kind: 'run-failed' | 'run-cancelled' }>
-      },
-) {
-  // One locked decision owns cancellation, terminal state, history and outbox.
-  // lockLease checks owner/run/fence and post-lock database time.
+    | { event: Exclude<TerminalEvent, { kind: 'run-completed' }> },
+): Promise<ExecutionOutcome> {
   const run = await lockLease(tx, lease)
-  if (run === undefined) return false
-  const failure =
-    'event' in decision &&
-    decision.event.kind === 'run-failed' &&
-    decision.event.reason === 'execution-error'
-  if (run.sandbox_recovery_required && !failure) return false
-  if (run.cancel_requested && !failure) {
-    await recordTerminal(tx, {
-      ...eventIdentities(lease),
-      kind: 'run-cancelled',
-    })
-    return 'cancelled' as const
-  }
-  if ('event' in decision) {
-    await recordTerminal(tx, decision.event)
-    return true
-  }
-  return await persistCompletion(tx, lease, decision.completion, run.assistant_message_id!)
-}
-
-async function persistCompletion(
-  tx: Transaction<DB>,
-  lease: ExecutionLease,
-  input: ExecutionCompletion,
-  messageID: string,
-) {
-  // Keep history private and unchanged if it exceeds the reasonable input limit.
-  const stored = await tx
-    .with('completed_history', (query) =>
-      query.selectNoFrom(sql`${JSON.stringify(input.history)}::jsonb`.as('value')),
-    )
-    .updateTable('execution.conversations')
-    .from('completed_history')
-    .set({ history: sql`completed_history.value` })
-    .where('thread_id', '=', lease.threadID)
-    .where(sql<boolean>`octet_length(completed_history.value::text) <= ${historyByteLimit}`)
-    .returning('thread_id')
-    .executeTakeFirst()
-  if (stored === undefined) {
-    await recordTerminal(tx, {
+  if (run === undefined) return 'lost'
+  // Durable cancellation wins every terminal race, including model/config failure.
+  if (run.cancel_requested)
+    return await recordTerminal(tx, { ...eventIdentities(lease), kind: 'run-cancelled' })
+  if ('event' in decision) return await recordTerminal(tx, decision.event)
+  if (
+    run.sandbox_recovery_required ||
+    run.workspace_transition_pending ||
+    run.uncheckpointed_effects > 0
+  ) {
+    await tx
+      .updateTable('execution.conversations')
+      .set({ sandbox_recovery_required: true })
+      .where('thread_id', '=', lease.threadID)
+      .execute()
+    return await recordTerminal(tx, {
       ...eventIdentities(lease),
       kind: 'run-failed',
-      reason: 'execution-error',
+      reason: 'sandbox-recovery-required',
     })
-    return 'failed' as const
   }
-  await recordTerminal(tx, {
+  const completion = decision.completion
+  return await recordTerminal(tx, {
     ...eventIdentities(lease),
     kind: 'run-completed',
-    messageID,
-    text: input.text,
-    ...(input.sources === undefined ? {} : { sources: input.sources }),
-    ...(input.assets === undefined ? {} : { assets: [...input.assets] }),
+    messageID: run.assistant_message_id!,
+    text: completion.text,
+    ...(completion.sources === undefined ? {} : { sources: completion.sources }),
+    ...(completion.assets === undefined ? {} : { assets: [...completion.assets] }),
   })
-  return true
 }
 
-async function recordTerminal(
-  tx: Transaction<DB>,
-  event: Extract<ExecutionEvent, { kind: 'run-completed' | 'run-failed' | 'run-cancelled' }>,
-) {
-  const status = {
-    'run-completed': 'completed',
-    'run-failed': 'failed',
-    'run-cancelled': 'cancelled',
-  } as const
-  await tx
-    .updateTable('execution.runs')
-    .set({ status: status[event.kind] })
-    .where('run_id', '=', event.runID)
-    .execute()
-  await enqueueEvent(tx, event)
-  await releaseConversation(tx, event.threadID)
-}
-
-/** Persist allocation before inference. A stale capability can never replace an identity. */
+/** Known allocation replaces its pending lifecycle fact before inference. */
 export async function saveNativeSandbox(
   db: Kysely<DB>,
   lease: ExecutionLease,
@@ -193,25 +221,28 @@ export async function saveNativeSandbox(
     if (run === undefined || run.sandbox_recovery_required) return false
     await tx
       .updateTable('execution.conversations')
-      .set({ native_sandbox: sql`${JSON.stringify(reference)}::jsonb` })
+      .set({
+        native_sandbox: sql`${JSON.stringify(reference)}::jsonb`,
+        workspace_transition_pending: false,
+        workspace_reset_required: false,
+      })
       .where('thread_id', '=', lease.threadID)
       .execute()
     return true
   })
 }
 
-/** SQL cannot fence a VM. Even a late old worker may quarantine, but must not
- * overwrite a newer fence's run/history/reference. The flag and interruption
- * are atomic when this is still the active run; expiry uses the same policy. */
+/** A stale physical writer may flag uncertainty, but never overwrite the new
+ * native identity, fence, result, or active request. SQL alone cannot stop a VM. */
 export async function quarantineSandbox(
   db: Kysely<DB>,
   lease: ExecutionLease,
-  reason: 'execution-error' | 'interrupted' = 'interrupted',
+  reason: ExecutionFailure = 'interrupted',
 ) {
   await db.transaction().execute(async (tx) => {
-    const conversation = await tx
+    await tx
       .selectFrom('execution.conversations')
-      .select(['active_run_id', 'fence'])
+      .select('thread_id')
       .where('thread_id', '=', lease.threadID)
       .forUpdate()
       .executeTakeFirstOrThrow()
@@ -220,11 +251,8 @@ export async function quarantineSandbox(
       .set({ sandbox_recovery_required: true })
       .where('thread_id', '=', lease.threadID)
       .execute()
-    if (conversation.active_run_id !== lease.runID || conversation.fence !== lease.fence) return
-    await recordTerminal(tx, {
-      ...eventIdentities(lease),
-      kind: 'run-failed',
-      reason,
-    })
+    // Keep ownership through actual cleanup. The current owner's normal
+    // terminal transaction alone chooses failed/cancelled and releases it.
+    console.error({ stage: 'workspace-quarantine', runID: lease.runID, fence: lease.fence, reason })
   })
 }

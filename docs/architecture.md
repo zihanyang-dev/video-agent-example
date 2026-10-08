@@ -11,7 +11,7 @@ API 客户端 → Caddy → server → Redis Streams → agent → sandbox
 thread 是持续对话的唯一身份，执行是一轮会话，资产与可恢复环境属于会话。没有 UI、project、第二套 Chat 标识或共享权限体系。
 
 - **server**：认证、归属、消息/资产事实、请求接受与公开结果。
-- **agent**：执行租约、官方 pi、沙箱工具与环境保存。
+- **agent**：执行租约、独立的官方 Pi / OpenAI Agents SDK 原生 loop、沙箱工具与环境保存。
 - **Caddy**：认证和 SSE 的 `/api` 代理。
 
 server 使用 auth/product，agent 使用 execution；SQL 权限隔离不改变执行属于会话的关系。
@@ -23,7 +23,7 @@ HTTP 身份与输入验证
 → 产品事务：锁 thread、裁决重放、写消息与命令 outbox
 → Redis 投递，agent 持久接受后 ACK
 → 领取 thread 租约、分配或恢复 sandbox
-→ pi 与工具执行、取消/暂停与收尾
+→ SQL 绑定的原生 engine 与本轮新授权工具执行、取消/暂停与收尾
 → fenced 终态事务与事件 outbox
 → server 持久接受后 ACK
 → 产品快照与 AG-UI SSE
@@ -31,9 +31,9 @@ HTTP 身份与输入验证
 
 PostgreSQL 是权威，Redis 至少一次投递。稳定身份、精确重放、冲突拒绝、持久接收后 ACK 和 retained inbox/outbox 保护丢失回执，不宣称跨系统 exactly-once。公开事件按 ordinal、缺口与重连游标发布。
 
-SSE reconnect cursor 是已经持久发布的公共事实标识，不是 run 内的 execution ordinal，也不是客户端可自行加一的序号。它由全局 sequence 分配、按当前 thread 授权验证，可以存在缺口；观察仍按指定 run 重建。`Last-Event-ID` 优先于 `forwardedProps.after`，二者缺省为 `0`（从头开始的 sentinel，不是实际发布事实）。客户端应回传收到的完整 cursor，不推算下一值。当前生成 OpenAPI 中的旧 ordinal 描述尚未调整：本次保持 API 生成物不可变，不修改比较器以隐藏差异。
+SSE reconnect cursor 是已经持久发布的公共事实标识，不是 run 内的 execution ordinal，也不是客户端可自行加一的序号。它由全局 sequence 分配、按当前 thread 授权验证，可以存在缺口；观察仍按指定 run 重建。`Last-Event-ID` 优先于 `forwardedProps.after`，二者缺省为 `0`（从头开始的 sentinel，不是实际发布事实）。客户端应回传收到的完整 cursor，不推算下一值。公开 OpenAPI 描述与这一 cursor 语义一致，由路由元数据正规生成；不会把 run ordinal 当作重连 cursor。
 
-同一 thread 的执行由 SQL 租约串行化。锁后数据库时间、owner/run/fence 决定写入权威。过期付费运行中断，不自动重新推理。取消是持久请求，不等于真实远端终止；客户端断线不取消已接受工作。终态事务依据最新锁内事实裁决，不在调用方多次续租猜测。
+同一 thread 的执行由 SQL 权威串行化。锁后数据库时间、owner/run/fence 决定写入权威；租约过期不授权接管。worker 持有同一持久 native-state 目录的内核 flock，取得物理所有权且旧 writer 已收尾后才进行启动恢复；正常收尾可在全部 writer joined 后关闭 fd，未知收尾则必须确认旧进程真正退出：先核对原生最终回执，否则仅在无未知效果且原始期限/预算仍有效时进行有限 continuation。最多 16 次模型请求预留、2 次恢复，未知推理也消耗原额度，不退款或重置期限；这不是精确恢复被中断的 HTTP 调用。取消是持久请求，不等于真实远端终止；客户端断线不取消已接受工作。终态事务依据最新锁内事实裁决；取消优先，清理未知另留 workspace quarantine，不由 quarantine 提前释放当前 owner。
 
 ## 身份与资产
 
@@ -51,13 +51,15 @@ S3 保存字节，SQL 保存归属、摘要、不可变对象键与完成事实�
 
 ## 执行环境与边界
 
-每个 thread 关联原生持久环境引用。首次创建，后续连接/恢复，空闲 filesystem-only pause；不每轮复制目录、kill 或创建空环境。文件系统/COW/缓存由供应商负责，私有模型历史留在 execution SQL。
+每个 thread 关联独立的原生持久环境引用。首次创建，后续连接/恢复，空闲 filesystem-only pause；不每轮复制目录或创建空环境。中断后的已知 guest 必须先 cold-settle 旧 writer，再 reboot 接续。文件系统/COW/缓存的持久性依赖供应商；同 ID pause/reboot 不等于独立备份、销毁重建或 backing-node loss 恢复。
+
+SQL 不传输通用原生 transcript。每个 accepted run 在首次领取时绑定不可变 engine/native session；conversation 保存当前指针，配置变化不重新解释旧 run。平台可显式准备下一新任务的 harness：只投影已完成业务上下文，创建独立 native 段，不恢复另一 SDK 的中断状态。Pi 用原生 SessionManager JSONL；OpenAI 用公开 Session / AgentInputItem 与 opaque RunState。worker 专属 `/state/native` 持久卷保存原生状态，所有段共享原 root lifetime flock。工具/模型每轮重新授权，旧资产描述不赋予能力；SDK 仍自行管理 loop/compaction。SQL completion 不结算未知 effects、不补造丢失的 initialized 历史。旧 `legacy_history` 保留并要求显式 offline import。合同、一次初始化与受信选择入口见 [harness-context.md](harness-context.md)。
 
 只使用官方 SDK 和公开 API。`SandboxSessionPort` 只表达实际消费的执行、文件、引用与关闭能力，不复制全部供应商 API、不建 registry 或兼容框架。VM 使用有限任务生命周期，SQL lease 仍独立续租。
 
-保留必要的并发、运行时间/步骤、文件与缓冲限制，不维护每条消息/delta/工具类的多层精确计账。历史过长与 VM 损坏分别处理：保留历史和引用，不自动删除或付费整理。只读失败作为工具错误；变更结果未知则停止该环境后续操作并隔离。
+保留必要的并发、原始期限、持久请求次数、文件与缓冲限制，不做供应商 token/dollar 精确计账。原生状态问题与 VM 损坏分别处理，不以重建空 history 作为恢复。只读/模型配置失败不等于 workspace corruption；变更结果未知则停止该环境后续操作并隔离。shell/write/PUT 在 IO 前持久预留，只有已 durable 的原生结果或已确认未 dispatch 的本地 rejection 才能结算对应 effect；不是退款模型预算。
 
-SQL fence 不阻止旧 worker 操作 VM。abort、PID kill、pause 或 TTL 不证明进程树/外部付费任务停止，也不意味着退款。创建、变更、暂停或 COMMIT 结果未知时保留证据，未经人工确认不交给下一轮、不重放 spending。
+SQL fence 不阻止旧 worker 操作 VM。abort、PID kill、pause 或 TTL 不证明外部付费任务停止，也不意味着退款。创建、变更、暂停未知时保留物理不确定性，不盲目重放。未知 terminal COMMIT 保留原身份并核对 SQL/native receipt，单独的 SQL ACK 丢失不污染 workspace，也不重试整个执行。
 
 环境文件、内存快照和外部连接不是同一事实。filesystem-only pause 不保证所有 artifact 已复制；实际部署须验证暂停、恢复、重启、容量与保留策略。Embed 不提供 Cloud 的副本或 HA 保证。
 
@@ -71,4 +73,4 @@ Zod 描述公开 HTTP 与私有执行合同，DTO 从 schema 推导；离线生�
 
 `config/.env` 是唯一运维输入，Compose 逐字段投影。应用不拿管理员身份，沙箱不拿长期模型/数据库/存储凭据、宿主 home、仓库或 Docker socket。
 
-源码按实际行为聚合。HTTP 直接调用具名事务函数；不为分层拆事务，不建纯转发 service、空目录、备用实现或通用生命周期系统。检查与生产验收见 [verification.md](verification.md)。
+源码按实际行为聚合。HTTP 直接调用具名事务函数；不为分层拆事务，不建纯转发 service、空目录、备用实现或通用生命周期系统。原生恢复与验收边界见 [native-agent-runtime.md](native-agent-runtime.md)，检查与生产验收见 [verification.md](verification.md)。

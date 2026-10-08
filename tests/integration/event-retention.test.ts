@@ -56,7 +56,7 @@ async function claimedThread() {
 async function completedThread() {
   const { threadID, lease, writes } = await claimedThread()
   expect(await writes.appendText(lease, 'answer')).toBe(true)
-  expect(await writes.complete(lease, { text: 'answer', history: ['answer'] })).toBe('completed')
+  expect(await writes.complete(lease, { text: 'answer' })).toBe('completed')
   return threadID
 }
 

@@ -16,6 +16,7 @@ import {
 import {
   appendExecutionText,
   completeExecutionRun,
+  failExecutionRun,
   quarantineSandbox,
   saveNativeSandbox,
 } from '../../apps/agent/src/execution/db/run-writes'
@@ -305,7 +306,7 @@ test('actual execution admission, replay, claim, renewal, completion and quarant
         }),
       ).toBe(true)
       expect(await appendExecutionText(db, lease, 'done')).toBe(true)
-      expect(await completeExecutionRun(db, lease, { text: 'done', history: [] })).toBe(true)
+      expect(await completeExecutionRun(db, lease, { text: 'done' })).toBe('completed')
       const next = { ...command, commandID: id(), runID: id() }
       expect(await acceptExecutionCommand(db, next)).toBe('accepted')
       const unknown = await claimExecutionRun(db, {
@@ -326,10 +327,24 @@ test('actual execution admission, replay, claim, renewal, completion and quarant
         .where('thread_id', '=', ids.a)
         .executeTakeFirstOrThrow()
       expect(retained).toEqual({
+        active_run_id: unknown.runID,
+        lease_owner: unknown.ownerID,
+        lease_until: expect.any(Date),
+        native_sandbox: { provider: 'e2b', id: 'Native/UPPER' },
+        sandbox_recovery_required: true,
+      })
+      // Quarantine revokes spending, not fenced ownership of remote settlement.
+      expect(await renewExecutionLease(db, unknown, 30000)).toBe('recovery-required')
+      expect(await failExecutionRun(db, unknown, 'execution-error')).toBe('failed')
+      const settled = await db
+        .selectFrom('execution.conversations')
+        .select(['active_run_id', 'lease_owner', 'lease_until', 'sandbox_recovery_required'])
+        .where('thread_id', '=', ids.a)
+        .executeTakeFirstOrThrow()
+      expect(settled).toEqual({
         active_run_id: null,
         lease_owner: null,
         lease_until: null,
-        native_sandbox: { provider: 'e2b', id: 'Native/UPPER' },
         sandbox_recovery_required: true,
       })
     })

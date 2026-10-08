@@ -7,7 +7,7 @@ import {
 
 // Explicit administrator input only. No DDL, user creation, deletion, or first
 // login claim. Run against the reviewed database with an administrative role.
-export async function assignReviewedLegacyThreads(path: string, connections: AdministrationEnv) {
+async function assignReviewedLegacyThreads(path: string, connections: AdministrationEnv) {
   const assignments = legacyAssignmentsSchema.parse(await Bun.file(path).json())
   const failures: unknown[] = []
   const db = openDatabase(connections, (cause) => failures.push(cause))

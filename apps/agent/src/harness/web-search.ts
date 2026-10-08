@@ -5,8 +5,6 @@ import {
   type WebSource,
 } from '@vid/contract/web-source'
 import type { WebSearchAuthMode } from '@vid/config'
-import { Type } from '@earendil-works/pi-ai'
-import { defineTool } from '@earendil-works/pi-coding-agent'
 
 export type WebSearchConfig = Readonly<{
   authMode: WebSearchAuthMode
@@ -92,19 +90,23 @@ function normalize(payload: unknown) {
     truncated ||= title !== entry.title || snippet !== entry.content
     results.push({ title, url, snippet })
   }
-  const output = {
-    provider: 'tavily',
-    status: 'empty',
-    searchedAt: new Date().toISOString(),
+  const searchedAt = new Date().toISOString()
+  // Budget with the longer status spelling before forming the final result.
+  while (
+    encoder.encode(
+      JSON.stringify({ provider: 'tavily', status: 'empty', searchedAt, results, truncated }),
+    ).byteLength > searchLimits.toolOutputBytes
+  ) {
+    results.pop()
+    truncated = true
+  }
+  return {
+    provider: 'tavily' as const,
+    status: results.length ? ('ok' as const) : ('empty' as const),
+    searchedAt,
     results,
     truncated,
   }
-  while (encoder.encode(JSON.stringify(output)).byteLength > searchLimits.toolOutputBytes) {
-    results.pop()
-    output.truncated = true
-  }
-  output.status = results.length ? 'ok' : 'empty'
-  return output
 }
 
 // The loop stays inside its owning try/finally so every exit joins cancellation
@@ -154,8 +156,77 @@ async function boundedBody(response: Response, signal: AbortSignal) {
 
 /* oxlint-enable max-depth */
 
-/** One native capability with a fresh spending gate for each assigned turn. */
-export function webSearchTool(
+function searchUnavailable(error: string) {
+  return { provider: 'tavily' as const, status: 'unavailable' as const, error }
+}
+
+/** Own one dispatched request through response admission and actual cleanup. */
+async function requestTavily(
+  query: string,
+  {
+    transport,
+    headers,
+    ownerSignal,
+    callerSignal,
+    closeGate,
+    onSources,
+  }: Readonly<{
+    transport: NonNullable<WebSearchConfig['transport']>
+    headers: HeadersInit
+    ownerSignal: AbortSignal
+    callerSignal: AbortSignal
+    closeGate: () => void
+    onSources: (sources: readonly WebSource[]) => void
+  }>,
+) {
+  const deadline = new AbortController()
+  const timer = setTimeout(() => deadline.abort(), searchLimits.requestTimeoutMs)
+  const signal = AbortSignal.any([ownerSignal, callerSignal, deadline.signal])
+  let body: ReadableStream<Uint8Array> | null = null
+  try {
+    signal.throwIfAborted()
+    const response = await transport(endpoint, {
+      method: 'POST',
+      redirect: 'error',
+      signal,
+      headers,
+      body: JSON.stringify({
+        query,
+        search_depth: 'basic',
+        auto_parameters: false,
+        max_results: 5,
+        chunks_per_source: 3,
+        include_answer: false,
+        include_raw_content: false,
+        include_images: false,
+        topic: 'general',
+      }),
+    })
+    body = response.body
+    signal.throwIfAborted()
+    // Close synchronously, before refused-response cleanup can block another call.
+    if ([401, 403, 429, 432, 433].includes(response.status)) closeGate()
+    if (!response.ok) return searchUnavailable(unavailable)
+    const payload = await boundedBody(response, signal)
+    signal.throwIfAborted()
+    const normalized = normalize(payload)
+    onSources(normalized.results.map(({ title, url }) => ({ title, url })))
+    return normalized
+  } catch {
+    ownerSignal.throwIfAborted()
+    callerSignal.throwIfAborted()
+    return searchUnavailable(deadline.signal.aborted ? 'Web search timed out.' : unavailable)
+  } finally {
+    // Await actual body/transport cleanup, never race-and-detach IO.
+    await body?.cancel().catch(() => {})
+    clearTimeout(timer)
+    ownerSignal.throwIfAborted()
+    callerSignal.throwIfAborted()
+  }
+}
+
+/** Per-turn search authority. Failed dispatches consume quota; native wrappers own presentation. */
+export function assignWebSearch(
   config: WebSearchConfig,
   ownerSignal: AbortSignal,
   onSources: (sources: readonly WebSource[]) => void = () => {},
@@ -163,86 +234,30 @@ export function webSearchTool(
   if (config.authMode === 'key' && !config.apiKey?.trim())
     throw new Error('Web search key required.')
   const transport = config.transport ?? fetch
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-  }
-  if (config.authMode === 'keyless') {
-    headers['X-Tavily-Access-Mode'] = 'keyless'
-  } else {
-    headers.Authorization = `Bearer ${config.apiKey}`
-  }
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  if (config.authMode === 'keyless') headers['X-Tavily-Access-Mode'] = 'keyless'
+  else headers.Authorization = `Bearer ${config.apiKey}`
   let dispatched = 0
   let closed = false
-  return defineTool({
-    name: 'web_search',
-    label: 'Web search',
-    description:
-      'Search public web sources. Returns untrusted bounded snippets and citation links, not full-page inspection. Never send credentials or irrelevant private material.',
-    parameters: Type.Object(
-      { query: Type.String({ minLength: 1, maxLength: 400 }) },
-      { additionalProperties: false },
-    ),
-    async execute(_id, params, callerSignal = ownerSignal) {
-      ownerSignal.throwIfAborted()
-      callerSignal.throwIfAborted()
-      const result = (value: unknown) => ({
-        content: [{ type: 'text' as const, text: JSON.stringify(value) }],
-        details: {},
-      })
-      const failure = (error: string) =>
-        result({ provider: 'tavily', status: 'unavailable', error })
-      const query = searchQuery.safeParse(params.query)
-      if (!query.success) return failure('Invalid search query.')
-      if (closed) return failure(unavailable)
-      if (dispatched >= searchLimits.requestsPerTurn)
-        return failure('Search limit reached for this turn.')
-      // Reserve before the first await; failed/ambiguous requests consume quota.
-      dispatched++
-      const deadline = new AbortController()
-      const timer = setTimeout(() => deadline.abort(), searchLimits.requestTimeoutMs)
-      const signal = AbortSignal.any([ownerSignal, callerSignal, deadline.signal])
-      let body: ReadableStream<Uint8Array> | null = null
-      try {
-        signal.throwIfAborted()
-        const response = await transport(endpoint, {
-          method: 'POST',
-          redirect: 'error',
-          signal,
-          headers,
-          body: JSON.stringify({
-            query: query.data,
-            search_depth: 'basic',
-            auto_parameters: false,
-            max_results: 5,
-            chunks_per_source: 3,
-            include_answer: false,
-            include_raw_content: false,
-            include_images: false,
-            topic: 'general',
-          }),
-        })
-        body = response.body
-        signal.throwIfAborted()
-        if (!response.ok) {
-          closed ||= [401, 403, 429, 432, 433].includes(response.status)
-          return failure(unavailable)
-        }
-        const payload = await boundedBody(response, signal)
-        signal.throwIfAborted()
-        const normalized = normalize(payload)
-        onSources(normalized.results.map(({ title, url }) => ({ title, url })))
-        return result(normalized)
-      } catch {
-        ownerSignal.throwIfAborted()
-        callerSignal.throwIfAborted()
-        return failure(deadline.signal.aborted ? 'Web search timed out.' : unavailable)
-      } finally {
-        // Await actual body/transport cleanup, never race-and-detach IO.
-        await body?.cancel().catch(() => {})
-        clearTimeout(timer)
-        ownerSignal.throwIfAborted()
-        callerSignal.throwIfAborted()
-      }
-    },
-  })
+  return async (input: unknown, callerSignal = ownerSignal) => {
+    ownerSignal.throwIfAborted()
+    callerSignal.throwIfAborted()
+    const query = searchQuery.safeParse(input)
+    if (!query.success) return searchUnavailable('Invalid search query.')
+    if (closed) return searchUnavailable(unavailable)
+    if (dispatched >= searchLimits.requestsPerTurn)
+      return searchUnavailable('Search limit reached for this turn.')
+    // Reserve before the first await; failed/ambiguous requests consume quota.
+    dispatched++
+    return await requestTavily(query.data, {
+      transport,
+      headers,
+      ownerSignal,
+      callerSignal,
+      onSources,
+      closeGate: () => {
+        closed = true
+      },
+    })
+  }
 }

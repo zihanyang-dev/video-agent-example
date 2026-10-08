@@ -22,6 +22,10 @@ async function fixture<T>(
       mkdir(join(directory, 'apps'), { recursive: true }),
       mkdir(join(directory, 'packages'), { recursive: true }),
     ])
+    // Workspace SDKs must resolve exactly as production, not fail as unresolved
+    // before the boundary rule gets to inspect the actual package edge.
+    await mkdir(join(directory, 'apps/agent'), { recursive: true })
+    await symlink(join(root, 'apps/agent/node_modules'), join(directory, 'apps/agent/node_modules'))
     for (const [path, source] of Object.entries(files)) {
       const destination = join(directory, path)
       await mkdir(dirname(destination), { recursive: true })
@@ -33,11 +37,25 @@ async function fixture<T>(
   }
 }
 
+const nativeSDKCases = ['@openai/agents', 'openai'].flatMap((sdk) =>
+  ['apps/agent/src/execution/run.ts', 'apps/agent/src/contract.ts'].map((path) => ({
+    name: `${path} cannot import the ${sdk} SDK`,
+    files: {
+      [path]:
+        sdk === 'openai'
+          ? 'export type { OpenAI } from "openai"'
+          : 'export type { Session } from "@openai/agents"',
+    },
+    rules: ['execution-no-agent-sdk'],
+  })),
+)
+
 const cases: {
   name: string
   files: Record<string, string>
   rules: string[]
 }[] = [
+  ...nativeSDKCases,
   {
     name: 'legal public type imports stay permitted',
     files: {
@@ -71,6 +89,50 @@ const cases: {
       'packages/contract/src/execution.ts': 'export type Private = { secret: string }',
     },
     rules: ['http-no-execution-contract'],
+  },
+  {
+    name: 'execution cannot import a concrete harness even through a type',
+    files: {
+      'apps/agent/src/execution/run.ts': 'export type { Session } from "../harness/pi/adapter"',
+      'apps/agent/src/harness/pi/adapter.ts': 'export type Session = { native: string }',
+    },
+    rules: ['execution-no-harness'],
+  },
+  {
+    name: 'execution cannot import a concrete sandbox adapter',
+    files: {
+      'apps/agent/src/execution/run.ts': 'export { open } from "../sandbox/e2b"',
+      'apps/agent/src/sandbox/e2b.ts': 'export const open = () => {}',
+    },
+    rules: ['execution-no-sandbox-adapter'],
+  },
+  {
+    name: 'execution cannot import the native harness SDK directly',
+    files: {
+      'apps/agent/src/execution/run.ts': 'export type { Sandbox } from "e2b"',
+    },
+    rules: ['execution-no-agent-sdk'],
+  },
+  {
+    name: 'root consumer contract cannot import a concrete harness',
+    files: {
+      'apps/agent/src/contract.ts': 'export type { Session } from "./harness/pi/adapter"',
+      'apps/agent/src/harness/pi/adapter.ts': 'export type Session = { native: string }',
+    },
+    rules: ['execution-no-harness'],
+  },
+  {
+    name: 'root consumer contract cannot import a concrete sandbox adapter',
+    files: {
+      'apps/agent/src/contract.ts': 'export { open } from "./sandbox/e2b"',
+      'apps/agent/src/sandbox/e2b.ts': 'export const open = () => {}',
+    },
+    rules: ['execution-no-sandbox-adapter'],
+  },
+  {
+    name: 'root consumer contract cannot import a native SDK',
+    files: { 'apps/agent/src/contract.ts': 'export type { Sandbox } from "e2b"' },
+    rules: ['execution-no-agent-sdk'],
   },
   {
     name: 'circular imports are rejected',
@@ -118,7 +180,7 @@ for (const scenario of cases) {
       const report = JSON.parse(output) as ICruiseResult
       expect(
         [...new Set(report.summary.violations.map((violation) => violation.rule.name))].sort(),
-        errors,
+        errors + JSON.stringify(report.modules),
       ).toEqual(scenario.rules)
       // The native JSON reporter always exits 0. Actual rule records, not a
       // generic CLI failure, prove that the production boundary rejected it.

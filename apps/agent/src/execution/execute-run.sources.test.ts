@@ -5,13 +5,17 @@ import type {
   ExecutionLease,
   ExecutionWrites,
   SandboxSessionPort,
-} from './contract'
+} from '../contract.ts'
 
 const lease: ExecutionLease = {
   runID: 'run',
   threadID: 'thread',
   text: 'input',
-  history: null,
+  engine: 'pi',
+  nativeSessionID: 'session',
+  deadlineAt: new Date(Date.now() + 120000),
+  restoring: false,
+  restoreWorkspace: false,
   fence: 1,
   ownerID: 'owner',
 }
@@ -22,6 +26,12 @@ for (const terminal of ['completed', 'cancelled', 'failed', 'unknown'] as const)
     const completed: ExecutionCompletion[] = []
     let cancelling = terminal === 'cancelled'
     const writes: ExecutionWrites = {
+      beginWorkspaceTransition: async () => true,
+      settleWorkspaceTransition: async () => true,
+      rejectEffect: async () => true,
+      reserveModel: async () => 'allowed',
+      beginEffect: async () => 'allowed',
+      checkpoint: async () => true,
       saveSandbox: async () => true,
       quarantine: async () => {},
       renew: async () => (cancelling ? 'cancel' : 'renewed'),
@@ -50,12 +60,11 @@ for (const terminal of ['completed', 'cancelled', 'failed', 'unknown'] as const)
         writes,
         openSandbox: async () => sandbox,
         harness: {
-          turn: async () => {
+          run: async () => {
             if (terminal === 'failed') throw new Error('Turn failed')
             cancelling = false
             return {
               text: 'Final',
-              history: { private: 'PRIVATE CANARY' },
               sources,
             }
           },

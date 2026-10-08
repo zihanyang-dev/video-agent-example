@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test'
 import { join, resolve } from 'node:path'
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 
 const root = resolve(import.meta.dir, '../..')
 type Step = {
@@ -36,6 +36,137 @@ test('PR checks never receive write permissions or persistent checkout credentia
     expect(step.run ?? '').not.toMatch(/secrets\.|id-token|ssh |retry/)
   }
 })
+
+test('storage initialization ships policy sources without daemon host binds', async () => {
+  const config = Bun.YAML.parse(await Bun.file(join(root, 'compose.yaml')).text()) as {
+    services: Record<string, { build?: { target?: string }; volumes?: unknown[] }>
+  }
+  const initialization = config.services['storage-init']
+  expect(initialization?.build?.target).toBe('storage-init')
+  expect(initialization?.volumes ?? []).toEqual([])
+})
+
+test('deployment Compose does not inherit operator service credentials', async () => {
+  const directory = await mkdtemp(join(root, 'vid-compose-environment-'))
+  try {
+    const source = await readFile(join(root, 'tests/scripts/deployment-check.sh'), 'utf8')
+    const start = source.indexOf('compose() {')
+    const end = source.indexOf('\ncleanup() {', start)
+    expect(start).toBeGreaterThan(0)
+    expect(end).toBeGreaterThan(start)
+    const docker = join(directory, 'docker')
+    await writeFile(docker, '#!/bin/sh\n[ -z "${OBJECT_STORAGE_URL:-}" ] || exit 71\n', {
+      mode: 0o700,
+    })
+    const child = Bun.spawn(
+      [
+        '/bin/sh',
+        '-ec',
+        `run_stage() { shift; "$@"; }\n${source.slice(start, end)}\ncompose config`,
+      ],
+      {
+        env: {
+          ...process.env,
+          PATH: `${directory}:${process.env.PATH}`,
+          OBJECT_STORAGE_URL: 'https://operator-storage.invalid',
+          root,
+          staging: directory,
+          project: 'owned-environment-probe',
+          run_timeout: '5',
+        },
+        stdout: 'pipe',
+        stderr: 'pipe',
+        timeout: 5000,
+        killSignal: 'SIGKILL',
+      },
+    )
+    const [status, , errors] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ])
+    expect(status, errors).toBe(0)
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('host Node is installed only for the integration Docker controller', async () => {
+  const config = await workflow()
+  const basic = config.jobs.basic
+  const integration = config.jobs.integration
+  if (!basic || !integration) throw new Error('Missing native CI jobs')
+  expect(basic.steps.filter((step) => step.uses?.startsWith('actions/setup-node@'))).toEqual([])
+  const nodeSteps = integration.steps.filter((step) => step.uses?.startsWith('actions/setup-node@'))
+  expect(nodeSteps).toHaveLength(1)
+  expect(nodeSteps[0]?.with?.['node-version']).toBe('24.21.0')
+})
+
+test('CI delegates the same complete deployment chain documented for local control', async () => {
+  const config = await workflow()
+  const commands = config.jobs.integration?.steps.map((step) => step.run ?? '').join('\n')
+  expect(commands).toContain('sh scripts/deployment-check.sh')
+  expect(commands).not.toContain('node --test tests/scripts/production-runtime.test.ts')
+  expect(commands).not.toContain('sh tests/scripts/deployment-check.sh')
+})
+
+for (const failure of ['', 'production', 'storage']) {
+  test(`the deployment entrypoint preserves prerequisite order and ${failure || 'successful'} exit`, async () => {
+    const directory = await mkdtemp(join(root, 'vid-deployment-entrypoint-'))
+    let child: Bun.Subprocess<'ignore', 'pipe', 'pipe'> | undefined
+    try {
+      await mkdir(join(directory, 'scripts'))
+      await mkdir(join(directory, 'bin'))
+      await mkdir(join(directory, 'tests/scripts'), { recursive: true })
+      await writeFile(
+        join(directory, 'scripts/deployment-check.sh'),
+        await readFile(join(root, 'scripts/deployment-check.sh')),
+      )
+      const log = join(directory, 'order')
+      const node = join(directory, 'bin/node')
+      await writeFile(
+        node,
+        `#!/bin/sh\ncase "$*" in\n  *production-runtime*) stage=production ;;\n  *storage-initialization*) stage=storage ;;\n  *) exit 9 ;;\nesac\nprintf '%s\\n' "$stage" >> "$OWNED_ORDER"\n[ "$stage" != "$OWNED_FAILURE" ] || exit 7\n`,
+      )
+      await chmod(node, 0o700)
+      await writeFile(
+        join(directory, 'tests/scripts/deployment-check.sh'),
+        '#!/bin/sh\nprintf "compose\\n" >> "$OWNED_ORDER"\n',
+      )
+      child = Bun.spawn(['/bin/sh', join(directory, 'scripts/deployment-check.sh')], {
+        cwd: root,
+        env: {
+          ...process.env,
+          PATH: `${join(directory, 'bin')}:${process.env.PATH}`,
+          OWNED_ORDER: log,
+          OWNED_FAILURE: failure,
+        },
+        stdin: 'ignore',
+        stdout: 'pipe',
+        stderr: 'pipe',
+        timeout: 5000,
+        killSignal: 'SIGKILL',
+      })
+      const [exit] = await Promise.all([
+        child.exited,
+        new Response(child.stdout).text(),
+        new Response(child.stderr).text(),
+      ])
+      expect(exit).toBe(failure ? 7 : 0)
+      expect((await readFile(log, 'utf8')).trim().split('\n')).toEqual(
+        failure === 'production'
+          ? ['production']
+          : failure === 'storage'
+            ? ['production', 'storage']
+            : ['production', 'storage', 'compose'],
+      )
+    } finally {
+      if (child?.exitCode === null) child.kill('SIGKILL')
+      await child?.exited
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+}
 
 for (const { gate, source } of [
   { gate: 'typecheck', source: 'export const invalid: string = 1\n' },
