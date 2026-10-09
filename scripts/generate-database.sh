@@ -9,8 +9,12 @@ trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
+# Never discover ambient codegen configuration outside this generation invocation.
+printf '{}\n' > "$staging/config.json"
+
 # scripts/database-check.sh supplies a fresh database containing only this checkout's migrations.
-bun x --no-install kysely-codegen --dialect postgres --default-schema public \
+bun x --no-install kysely-codegen --config-file "$staging/config.json" \
+  --dialect postgres --default-schema public \
   --env-file /dev/null --include-pattern '{auth,product,execution}.*' --out-file "$staging/db.ts"
 
 # Generated artifacts are formatted by their generator, not by the source formatter.

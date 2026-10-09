@@ -46,7 +46,7 @@ worker 在同一 root lifetime flock 下准备和消费意图。只有 FIFO 下�
 
 terminal、SQL expiry 或 idle 不证明 writer joined。所有段共享原 root flock；未知收尾的 fail-stop 保留到进程真正退出。切换不清除 workspace quarantine、pending transition 或 cold-reset 标记，不新建 thread workspace。未知 dispatch 不退款，不重置原请求的 16 次模型预留、2 次安全恢复或 deadline。
 
-历史前向 migration 从身份匹配且结果一致的 retained outbox/product receipts 回填业务 final；缺失/冲突保留缺口。后续 provenance 门禁重新核对数字 version、ledger/event/run/thread/message 身份与结果一致性，不将旧回填文本比较当作完整来源证明；验证失败不清空或自动修复数据。非空 completion 已无 retained ledger、或已经 seed 的 immutable context，即使原本合法也需要显式离线核对，边界见 [operations.md](operations.md)。旧 `legacy_history`、inbox/outbox 和 native 文件保留，状态迁移拒绝在线 down。查询索引迁移只改变访问路径并替换重叠 FIFO 索引；普通索引构建会取表锁，必须停止对应的 execution worker 或 product command publisher，再执行迁移。
+历史前向 migration 从身份匹配且结果一致的 retained outbox/product receipts 回填业务 final；缺失/冲突保留缺口。后续 provenance 门禁重新核对数字 version、ledger/event/run/thread/message 身份与结果一致性，不将旧回填文本比较当作完整来源证明；验证失败不清空或自动修复数据。修订后的检查不因 immutable context 已存在就拒绝，而核对其原始 accepted input 与 cutoff 内的完成事实；之后的完成不改写旧快照。非空 completion 已无 retained ledger、或快照与保留材料不一致时仍拒绝。SQL migration 不认证历史消费或 native freshness，也不替代现有原生文件/digest 校验；修订已发布验证 migration 与新增前向复核的发布边界见 [operations.md](operations.md)。旧 `legacy_history`、inbox/outbox 和 native 文件保留，状态迁移拒绝在线 down。查询索引迁移只改变访问路径并替换重叠 FIFO 索引；普通索引构建会取表锁，必须停止对应的 execution worker 或 product command publisher，再执行迁移。
 
 ## 验证层次
 

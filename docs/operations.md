@@ -24,7 +24,8 @@ Redis 发布成功不等于 receiver 持久接收。保留 outbox/inbox/receipt�
 - binding 的 `execution.native_sessions.initialized` 为 true 后，丢失 assigned native 文件必须 fail closed（conversation 的 `native_state_initialized` 是当前指针镜像）：保留 engine/session/run 身份和预算，恢复核对过的原生文件，不能清空初始化位、删除 SQL 绑定、准备另一 harness 或从公共消息重建空历史。初始化位不是 checkpoint revision digest；同 UUID 的陈旧 native 副本也不能证明与 SQL effect ACK 一致，未核实前禁止接续 active run。
 - 已完成 OpenAI request snapshots 和 Pi journal 的磁盘容量/retention 仍需监控与显式维护；当前没有已验收的自动 GC。不要删除 active state、Session history 或未知 ACK 的 final receipt 来腾空间。
 - 升级前备份，使用前向 migration；迁移或权限初始化失败不能启动新应用。禁止回滚历史 migration 或重置身份来修复错误。
-- `20261008030000_harness_completion_provenance.sql` 是停止 server/worker 后执行的验证门禁，不是数据修复。旧回填未保留完整 provenance，非空 completion 的 ledger 已裁剪时，即使原本合法也不能在线证明来源；已经 seed 的 immutable context 同样需要离线核对。门禁拒绝时保留 SQL/native/ledger 和原身份，取得外部权威与显式审查的离线部署方案；不能清空 completion、删除 ledger/context、禁用 immutable trigger 或制造回执来通过。没有自动 bypass、恢复 CLI 或 retroactive native 修复。
+- provenance migration 是停止 server/worker 后执行的验证，不是数据修复。保留 ledger 必须与 completion 身份、版本及结果一致；已存在 context 则核对其 cutoff 内的完成事实和原始 accepted input，不因快照存在就拒绝，也不将之后完成的任务加入旧快照。来源已裁剪而无法核对、或数据相互矛盾时仍拒绝；保留 SQL/native/ledger 和原身份，不清空、造回执或禁用 immutable trigger。
+- 本次经批准修正已发布的验证 migration `20261008030000_harness_completion_provenance.sql`，供尚未应用它的部署使用；已应用的部署通过新前向 `20261008040000_harness_context_provenance.sql` 复核。不手改 migration 执行记录，不回滚已应用版本；更早的 context backfill migration 保持原样。SQL 检查只证明保留材料一致，不证明历史消费或 native freshness；原生状态继续由现有 SDK 读取器校验，缺失 initialized 文件或 seed 不匹配不能用 SQL 快照补造。没有新的恢复 CLI、凭据体系或自动 replay。
 - 密码轮换后重跑迁移/权限和 storage-init，再重建相关应用。更换 S3 access key 时显式撤销旧用户；不猜测哪些历史用户可以删除。
 - `docker compose down` 保留卷。删除数据卷、供应商资源及全局缓存需独立授权；不使用 global prune 或 `down -v` 作为清理。
 

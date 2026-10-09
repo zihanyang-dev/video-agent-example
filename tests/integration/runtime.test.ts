@@ -1,7 +1,8 @@
 import { mkdtemp, rm, readdir, readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, expect, spyOn, test } from 'bun:test'
+import { expect, spyOn } from 'bun:test'
+import { runtimeTestFixture } from './runtime-test-fixture'
 import { S3Client } from '@aws-sdk/client-s3'
 import { createServer, type Socket } from 'node:net'
 import * as objectStorage from '@vid/object-storage'
@@ -90,10 +91,10 @@ function ownThread(threadID: string = crypto.randomUUID()) {
   ownedThreads.add(threadID.toLowerCase())
   return threadID
 }
-// Each test's finally joins its server, worker, model and sandbox tasks first.
+// Only a successful, settled body establishes the normal finally-join boundary.
 // Unknown SQL acknowledgements can leave a queued/active row even after stop;
 // remove only this test's rows before another global startup recovery runs.
-afterEach(async () => {
+const test = runtimeTestFixture(async () => {
   if (ownedThreads.size === 0) return
   const { db, close } = openTestDatabase()
   await settleTestCleanup([
@@ -165,6 +166,12 @@ async function answer(url: string, threadID: string) {
     const result = await response.text()
     expect(response.status).toBe(200)
     const snapshot = messagesResponseSchema.parse(JSON.parse(result))
+    const failure = snapshot.failedRuns[0]
+    if (failure) throw new Error(`Run ${failure.runID} failed: ${failure.reason}`)
+    const cancelled = snapshot.messages
+      .map((message) => message.runOutcome)
+      .find((outcome) => outcome?.status === 'cancelled')
+    if (cancelled) throw new Error(`Run ${cancelled.runID} cancelled`)
     if (
       snapshot.messages.some(
         (message) => message.role === 'assistant' && message.text === 'reply: hello',
@@ -239,6 +246,42 @@ for (const status of [401, 500]) {
     }
   })
 }
+
+test('answer polling rejects a public cancelled terminal without waiting for an answer', async () => {
+  const runID = crypto.randomUUID()
+  const server = Bun.serve({
+    hostname: '127.0.0.1',
+    port: 0,
+    fetch: () =>
+      Response.json({
+        messages: [
+          {
+            messageID: crypto.randomUUID(),
+            role: 'user',
+            text: 'hello',
+            createdAt: '2026-10-07T00:00:00.000Z',
+            runOutcome: { runID, status: 'cancelled' },
+          },
+        ],
+        activeRuns: [],
+        failedRuns: [],
+      }),
+  })
+  const threadID = crypto.randomUUID()
+  identities.set(threadID, new Headers())
+  try {
+    const started = performance.now()
+    const failure = await answer(`http://127.0.0.1:${server.port}`, threadID).then(
+      () => null,
+      (cause: unknown) => cause,
+    )
+    expect(String(failure)).toContain(`Run ${runID} cancelled`)
+    expect(performance.now() - started).toBeLessThan(1000)
+  } finally {
+    identities.delete(threadID)
+    await server.stop(true)
+  }
+}, 15000)
 
 async function removeOwnedPublication(command: string | undefined) {
   if (command === undefined) return
@@ -564,9 +607,8 @@ test('unsupported inherited MIME headers are rejected without stopping HTTP', as
   }
 })
 
-test.each(['hello\u0000world', '\ud800', '\udc00'])(
-  'unrepresentable input %j is rejected before PostgreSQL without stopping HTTP',
-  async (text) => {
+for (const text of ['hello\u0000world', '\ud800', '\udc00']) {
+  test(`unrepresentable input ${JSON.stringify(text)} is rejected before PostgreSQL without stopping HTTP`, async () => {
     const { db, close } = openTestDatabase()
     const login = await signedTestIdentity(db)
     const server = await startServer(serverTestEnv(), { port: 0 })
@@ -632,8 +674,8 @@ test.each(['hello\u0000world', '\ud800', '\udc00'])(
       await server.stop().catch(() => {})
       await close()
     }
-  },
-)
+  })
+}
 
 // Fresh database/Redis from scripts/database-check.sh; real Pi, no cloud or VM.
 test('HTTP -> command -> leased Pi -> private native session -> event -> stored public answer', async () => {
@@ -690,6 +732,91 @@ test('HTTP -> command -> leased Pi -> private native session -> event -> stored 
       () => worker.stop(),
       () => server.stop(),
       () => Promise.resolve(model.server.stop(true)),
+      close,
+      () => rm(statePath, { recursive: true, force: true }),
+    ])
+  }
+}, 15000)
+
+test('answer polling rejects a real Pi failure with its public terminal reason', async () => {
+  const statePath = await mkdtemp(join(tmpdir(), 'runtime-native-failure-'))
+  const requests: unknown[] = []
+  let model: ReturnType<typeof Bun.serve> | undefined
+  let server: Awaited<ReturnType<typeof startServer>> | undefined
+  let worker: Awaited<ReturnType<typeof startWorker>> | undefined
+  let closed = 0
+  const { db, close } = openTestDatabase()
+  try {
+    model = Bun.serve({
+      hostname: '127.0.0.1',
+      port: 0,
+      async fetch(request) {
+        expect(request.headers.get('authorization')).toBe('Bearer test')
+        requests.push(await request.json())
+        return Response.json(
+          { error: { message: 'fixture rejected request', type: 'invalid_request_error' } },
+          { status: 400 },
+        )
+      },
+    })
+    server = await startServer(serverTestEnv(), { port: 0 })
+    const env = workerEnv(`http://127.0.0.1:${model.port}/v1`)
+    const harness = createPiHarness({
+      statePath,
+      baseURL: env.MODEL_BASE_URL,
+      key: env.MODEL_API_KEY,
+      modelID: env.MODEL_ID,
+      contextWindow: env.MODEL_CONTEXT_WINDOW,
+      maxOutputTokens: env.MODEL_MAX_OUTPUT_TOKENS,
+      reasoning: env.MODEL_REASONING,
+      input: ['text'],
+      systemPrompt: await Bun.file(env.MODEL_PROMPT_PATH).text(),
+    })
+    worker = await startWorker(env, {
+      harness,
+      openSandbox: async () =>
+        sandbox(async () => {
+          closed++
+        }),
+    })
+    const threadID = await submit(server.url)
+    const headers = identities.get(threadID)
+    if (headers === undefined) throw new Error('Missing runtime test identity')
+    let snapshot: ReturnType<typeof messagesResponseSchema.parse> | undefined
+    const deadline = performance.now() + 5000
+    do {
+      const response = await fetch(`${server.url}/api/threads/${threadID}/messages`, { headers })
+      expect(response.status).toBe(200)
+      snapshot = messagesResponseSchema.parse(await response.json())
+      await Bun.sleep(20)
+    } while (performance.now() < deadline && snapshot.failedRuns.length === 0)
+    expect(requests).toHaveLength(1)
+    expect(snapshot?.activeRuns).toEqual([])
+    expect(snapshot?.failedRuns).toHaveLength(1)
+    expect(snapshot?.failedRuns[0]?.reason).toBe('execution-error')
+    const run = await db
+      .selectFrom('execution.runs')
+      .select(['status', 'native_session_id'])
+      .where('thread_id', '=', threadID)
+      .executeTakeFirstOrThrow()
+    expect(run.status).toBe('failed')
+    expect(run.native_session_id).toMatch(/^[0-9a-f-]{36}$/)
+    expect(
+      (await readdir(join(statePath, 'pi', threadID))).filter((name) => name.endsWith('.jsonl')),
+    ).toHaveLength(1)
+    expect(closed).toBe(1)
+    const started = performance.now()
+    const failure = await answer(server.url, threadID).then(
+      () => null,
+      (cause: unknown) => cause,
+    )
+    expect(String(failure)).toContain('execution-error')
+    expect(performance.now() - started).toBeLessThan(1000)
+  } finally {
+    await settleTestCleanup([
+      () => worker?.stop() ?? Promise.resolve(),
+      () => server?.stop() ?? Promise.resolve(),
+      () => Promise.resolve(model?.stop(true)),
       close,
       () => rm(statePath, { recursive: true, force: true }),
     ])

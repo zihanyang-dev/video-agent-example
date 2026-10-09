@@ -37,4 +37,8 @@ sh scripts/database-check.sh verify
 
 在一次性空 PostgreSQL 中应用全部前向 migration，再生成 Kysely 类型和 schema dump。核对完整输出，不从生产库反推结构、不修改历史 migration、不手改生成文件。类型更新失败不会改变业务库；无需为生成物维护事务恢复系统。
 
-当前 `kysely-codegen → micromatch → braces@3.0.3` 开发依赖链有未修补 HIGH advisory [GHSA-vfj7-8cjw-p6xm](https://github.com/advisories/GHSA-vfj7-8cjw-p6xm)：深度嵌套 pattern 可导致栈耗尽。官方尚无 patched version，不能宣称 `bun audit` 全绿。生成入口只传源码内固定的 `{auth,product,execution}.*` pattern，数据库表名是匹配目标而非 pattern；不开放外部 pattern 或在线生成。生产应用冻结依赖闭包不包含 codegen/braces，需在每次打包时继续核验；开发生成链的风险仍保留并跟踪上游，不用删除生成器或伪造 override 隐藏它。
+当前 `kysely-codegen → micromatch → braces@3.0.3` 开发依赖链有未修补 HIGH advisory [GHSA-vfj7-8cjw-p6xm](https://github.com/advisories/GHSA-vfj7-8cjw-p6xm)：braces 的递归编译接口可被深度嵌套 pattern 耗尽栈。官方仍无 patched version，不能宣称 `bun audit` 全绿。实际 pinned codegen 的 TableMatcher 调用 `micromatch.matcher → picomatch`，不是该 braces 编译接口；不能仅据依赖树推断入口已触发它。
+
+另一个实际入口缺陷已复现：仅固定 include pattern 不会阻止 CLI 搜索外部配置；ambient exclude pattern、typeMapping 和 url 原先能改变输出或重定向连接。生成现在显式指定自有临时 `{}` config，并固定 `{auth,product,execution}.*`、`/dev/null` env file 与输出 staging。真实生成回归从 sentinel 开始，核对三种 ambient 配置均不影响 canonical 类型且临时目录清理；不通过手改生成物修复。
+
+数据库表名只是匹配目标，不开放外部 pattern 或在线生成。生产应用冻结依赖闭包不包含 codegen/braces，每次打包继续核验。开发 dependency advisory 本身仍保留并跟踪上游，不用删除生成器、fork/patch 或伪造 override 隐藏它。

@@ -87,7 +87,9 @@ Compose 插值中宿主环境优先于 env 文件。旧控制器会传入操作�
 
 新增前向 `20261008030000_harness_completion_provenance.sql`，SHARE 锁内核对数字 version、ledger/event/run/thread/message 身份、所有 retained completed 结果一致及与 completion 相同。父级又复现了同 event ID 在另一 ledger 为 failed/started/null kind 的遗漏；现在 completed event 的身份比较检查对应的所有 retained facts，并保留 kind。47 项实际旧→新完整迁移回归通过，包含 uppercase UUID、合法重复、跨 kind 冲突、缺证明、矛盾和失败后所有数据不变；不重写旧迁移、删除、清空或造 completion。
 
-门禁刻意保守：ledger 已裁剪的非空 completion，即使曾合法，也要求离线恢复；已经 seed 的 immutable context 无论 retained output 是否相等，都要求核对来源与消费。这是一次性 migration-time deployment gate，不是自动历史修复或持续协议审计。不提供在线 bypass；旧部署可能因此被阻断，保留 SQL/native/evidence 后按 [operations.md](operations.md) 取得显式审查的离线方案。
+发布该 milestone 时，门禁拒绝所有已 seed 的 immutable context，即使 retained output 相等；ledger 已裁剪的非空 completion 也会被拒绝。这是一次性 migration-time deployment gate，不是自动历史修复或持续协议审计。
+
+后续调查确认“快照存在即拒绝”过严，用户批准最小发布修正：尚未应用的部署使用修订 `08030000`，已应用的部署执行新增前向 `08040000`。仅核对保留完成事实、原始 accepted input 与快照 cutoff/material 一致性，不新增恢复框架、历史消费推断或凭据表。来源已裁剪/矛盾仍拒绝；SQL 验证不替代 SDK native 校验，不改更早 backfill、immutable 数据或 migration 执行记录。当前操作规则见 [operations.md](operations.md)；本节的 47 项计数保留为原发布证据，不冒充后续源码验证。
 
 ### 9. OpenAI SDK AbortError 被补造为空的成功 final（P1）
 

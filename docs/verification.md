@@ -11,6 +11,14 @@ sh scripts/deployment-check.sh
 
 CI 分基本检查与必要集成两个 job，入口见 [development.md](development.md#检查与-ci)。API 文档离线核对；数据库入口覆盖 PG/Redis 与迁移生成，部署入口依次覆盖 production-runtime、storage-initialization、隔离 Compose 的 S3/角色轮换/API 代理及启动/TERM。入口声明覆盖范围，不代表这些层已在当前源码全部验收；部署所需公开 policy 随固定初始化镜像打包，不再使用用户主机源码 bind；合成部署输入也不继承操作员的 service 凭据。当前没有 UI 或浏览器验收。
 
+## Runtime fixture 的失败边界
+
+Bun test timeout 不取消或 join 原异步 body；hook timeout 也可能在原 hook 未结束时继续下一例。runtime fixture 因此在 body 未结束或失败时先非零退出专用测试进程，不清理 SQL，也不让下一例取得 intake。正常 body 仍先执行原 finally 收尾再清理自有行；异步 SQL 清理另有 4500ms fail-stop，早于保留的 5000ms hook deadline。
+
+`runtime-policy.test.ts` 通过实际 Bun 子进程覆盖超时、拒绝、部分启动、finally 失败、真实 SQL 拒绝/阻塞和正常完成。故障子进程必须退出 1，observer 通过不表示故障用例通过；observer 等待 PID 与双管道收尾后才返回。进程死亡加 launcher 的隔离资源处置只是有界 containment，不认证 SDK graceful join，也不能撤销此前已提交的清理。
+
+历史 Pi 15000ms 超时的慢点仍未定位；该失败边界只封堵后续跨例污染，不把重跑绿色冒称超时修复。poison 的精确 delivery counter 断言和原测试预算不变。
+
 ## 必须保护的行为
 
 - 身份：未登录、到期、撤销、Origin/CSRF、真实 cookie、跨用户拒绝和注销先持久撤销。

@@ -42,12 +42,19 @@ async function legacyFixture() {
         native_state_initialized boolean NOT NULL DEFAULT false,
         active_run_id uuid
       );
+      CREATE TABLE execution.command_inbox (
+        command_id uuid PRIMARY KEY, thread_id uuid NOT NULL, run_id uuid NOT NULL,
+        kind text NOT NULL, command jsonb NOT NULL,
+        created_at timestamptz NOT NULL DEFAULT now()
+      );
       CREATE TABLE execution.runs (
         run_id uuid PRIMARY KEY,
         thread_id uuid NOT NULL REFERENCES execution.conversations(thread_id),
         assistant_message_id uuid,
         status text NOT NULL,
-        created_at timestamptz NOT NULL DEFAULT now()
+        created_at timestamptz NOT NULL DEFAULT now(),
+        command_id uuid NOT NULL UNIQUE REFERENCES execution.command_inbox(command_id),
+        message_id uuid NOT NULL, text text NOT NULL
       );
       CREATE INDEX runs_thread_status_idx ON execution.runs(thread_id,status,created_at);
       CREATE TABLE product.command_outbox (
@@ -78,11 +85,8 @@ async function legacyFixture() {
         throw cause
       }
     }
-    const validate = async () => {
-      const source = await readFile(
-        'packages/database/migrations/20261008030000_harness_completion_provenance.sql',
-        'utf8',
-      )
+    const validate = async (name = '20261008030000_harness_completion_provenance') => {
+      const source = await readFile(`packages/database/migrations/${name}.sql`, 'utf8')
       const [validation] = source.split('-- migrate:down')
       if (!validation) throw new Error('Expected provenance migration up direction')
       await apply(validation)
@@ -135,13 +139,18 @@ async function seedRun(
   messageID: string | null = crypto.randomUUID(),
 ) {
   const runID = crypto.randomUUID()
-  await fixture.query('INSERT INTO execution.runs VALUES ($1,$2,$3,$4)', [
-    runID,
-    threadID,
-    messageID,
-    status,
-  ])
-  return { threadID, runID, messageID }
+  const commandID = crypto.randomUUID()
+  const input = { messageID: crypto.randomUUID(), text: 'Historical input' }
+  const command = { version: 1, kind: 'start', commandID, threadID, runID, input }
+  await fixture.query(
+    'INSERT INTO execution.command_inbox (command_id,thread_id,run_id,kind,command) VALUES ($1,$2,$3,$4,$5)',
+    [commandID, threadID, runID, 'start', command],
+  )
+  await fixture.query(
+    'INSERT INTO execution.runs (run_id,thread_id,assistant_message_id,status,command_id,message_id,text) VALUES ($1,$2,$3,$4,$5,$6,$7)',
+    [runID, threadID, messageID, status, commandID, input.messageID, input.text],
+  )
+  return { threadID, runID, messageID, commandID, input }
 }
 
 async function seedFinal(
@@ -392,7 +401,8 @@ async function retainedState(fixture: Fixture) {
       (SELECT jsonb_agg(to_jsonb(r) ORDER BY run_id) FROM execution.runs r) AS runs,
       (SELECT jsonb_agg(to_jsonb(s) ORDER BY native_session_id) FROM execution.native_sessions s) AS sessions,
       (SELECT jsonb_agg(to_jsonb(e) ORDER BY event_id) FROM execution.event_outbox e) AS outbox,
-      (SELECT jsonb_agg(to_jsonb(e) ORDER BY event_id) FROM product.execution_events e) AS receipts
+      (SELECT jsonb_agg(to_jsonb(e) ORDER BY event_id) FROM product.execution_events e) AS receipts,
+      (SELECT jsonb_agg(to_jsonb(c) ORDER BY command_id) FROM execution.command_inbox c) AS commands
   `)
   return result.rows
 }
@@ -498,7 +508,7 @@ test('forward provenance migration accepts missing history only when no completi
 })
 
 test.each([false, true])(
-  'forward provenance migration preserves already seeded immutable context and requires offline recovery (pruned=%s)',
+  'forward provenance migration rejects mismatched seeded input material (pruned=%s)',
   async (pruned) => {
     const fixture = await legacyFixture()
     try {
@@ -529,7 +539,11 @@ test.each([false, true])(
       if (pruned) await fixture.query('DELETE FROM execution.event_outbox')
       const before = await retainedState(fixture)
       await Promise.resolve(
-        expect(fixture.validate()).rejects.toThrow('requires explicit offline recovery'),
+        expect(fixture.validate()).rejects.toThrow(
+          pruned
+            ? 'missing, malformed or contradictory retained terminal proof'
+            : 'snapshot differs from retained accepted completed prefix',
+        ),
       )
       expect(await retainedState(fixture)).toEqual(before)
     } finally {
@@ -649,3 +663,251 @@ test('forward provenance migration does not audit other kinds with no completed 
     await fixture.close()
   }
 })
+
+const validationEntrypoints = [
+  '20261008030000_harness_completion_provenance',
+  '20261008040000_harness_context_provenance',
+] as const
+
+async function insertSnapshot(
+  fixture: Fixture,
+  threadID: string,
+  engine: 'pi' | 'openai',
+  context: unknown,
+) {
+  await fixture.query(
+    `INSERT INTO execution.native_sessions
+    (native_session_id,thread_id,harness_engine,storage,initial_context)
+    VALUES ($1,$2,$3,'session',$4)`,
+    [crypto.randomUUID(), threadID, engine, context],
+  )
+}
+
+function contextFor(runs: Awaited<ReturnType<typeof seedRun>>[]) {
+  return {
+    version: 1,
+    throughRunID: runs.at(-1)?.runID ?? null,
+    turns: runs.map((run) => ({
+      runID: run.runID,
+      input: run.input,
+      output: { messageID: run.messageID, text: 'Historical completed answer' },
+    })),
+  }
+}
+
+test.each(['pi', 'openai'] as const)(
+  'retained legitimate switched %s snapshot passes published validation without changes',
+  async (engine) => {
+    const fixture = await legacyFixture()
+    try {
+      const { threadID } = await seedConversation(fixture, engine === 'pi' ? 'openai' : 'pi', true)
+      const run = await seedRun(fixture, threadID)
+      await seedFinal(fixture, run, 'outbox')
+      await fixture.up()
+      await insertSnapshot(fixture, threadID, engine, contextFor([run]))
+      const before = await retainedState(fixture)
+      await fixture.validate()
+      expect(await retainedState(fixture)).toEqual(before)
+    } finally {
+      await fixture.close()
+    }
+  },
+)
+
+for (const entrypoint of validationEntrypoints) {
+  test(`${entrypoint} accepts runtime-canonical UUIDs from retained mixed-case material`, async () => {
+    const fixture = await legacyFixture()
+    try {
+      const { threadID } = await seedConversation(fixture, 'pi', true)
+      const run = await seedRun(fixture, threadID)
+      const messageID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+      const assets = [
+        { assetID: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', name: 'First.PNG' },
+        { assetID: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc', name: 'Second.PNG' },
+      ].map((asset) => ({
+        ...asset,
+        objectKey: `private/${asset.name}`,
+        mimeType: 'image/png',
+        byteLength: 2,
+        sha256: 'a'.repeat(64),
+      }))
+      const retainedAssets = assets.map((asset) => ({
+        ...asset,
+        assetID: asset.assetID.toUpperCase(),
+      }))
+      const sources = [{ title: 'Keep CASE', url: 'https://EXAMPLE.com/A%2Fb' }]
+      await fixture.query('UPDATE execution.runs SET message_id=$1 WHERE run_id=$2', [
+        messageID,
+        run.runID,
+      ])
+      await fixture.query(
+        'UPDATE execution.command_inbox SET command=command || $1 WHERE command_id=$2',
+        [
+          {
+            input: {
+              messageID: messageID.toUpperCase(),
+              text: run.input.text,
+              assets: retainedAssets,
+            },
+          },
+          run.commandID,
+        ],
+      )
+      await seedFinal(fixture, run, 'outbox', { assets: retainedAssets, sources })
+      await fixture.up()
+      await insertSnapshot(fixture, threadID, 'openai', {
+        version: 1,
+        throughRunID: run.runID,
+        turns: [
+          {
+            runID: run.runID,
+            input: { messageID, text: run.input.text, assets },
+            output: {
+              messageID: run.messageID,
+              text: 'Historical completed answer',
+              assets,
+              sources,
+            },
+          },
+        ],
+      })
+      const before = await retainedState(fixture)
+      await fixture.validate(entrypoint)
+      expect(await retainedState(fixture)).toEqual(before)
+    } finally {
+      await fixture.close()
+    }
+  })
+
+  test(`${entrypoint} accepts older retained prefix, empty and noncurrent segments`, async () => {
+    const fixture = await legacyFixture()
+    try {
+      const { threadID } = await seedConversation(fixture, 'pi', true)
+      const first = await seedRun(fixture, threadID)
+      const later = await seedRun(fixture, threadID)
+      await fixture.query("UPDATE execution.runs SET created_at='2026-01-01' WHERE run_id=$1", [
+        first.runID,
+      ])
+      await fixture.query("UPDATE execution.runs SET created_at='2026-01-02' WHERE run_id=$1", [
+        later.runID,
+      ])
+      await seedFinal(fixture, first, 'outbox')
+      await seedFinal(fixture, later, 'receipt')
+      await fixture.up()
+      // The old 300 accepted this pre-seed state; 400 must independently recheck it.
+      await fixture.validate()
+      await insertSnapshot(fixture, threadID, 'openai', contextFor([first]))
+      await insertSnapshot(fixture, threadID, 'pi', contextFor([]))
+      const before = await retainedState(fixture)
+      await fixture.validate(entrypoint)
+      expect(await retainedState(fixture)).toEqual(before)
+    } finally {
+      await fixture.close()
+    }
+  })
+
+  test.each([
+    'input',
+    'output',
+    'missing',
+    'extra',
+    'order',
+    'duplicate',
+    'cutoff',
+    'foreign cutoff',
+    'version',
+    'schema',
+    'input schema',
+    'output schema',
+    'command version',
+    'command kind',
+    'inbox kind',
+    'command ID',
+    'command run',
+    'command thread',
+    'inbox thread',
+    'inbox run',
+    'input identity',
+    'input text',
+    'retained ledger poison',
+    'missing completion',
+  ])(`${entrypoint} rejects seeded material fault without mutation: %s`, async (fault) => {
+    const fixture = await legacyFixture()
+    try {
+      const { threadID } = await seedConversation(fixture, 'pi', true)
+      const first = await seedRun(fixture, threadID)
+      const second = await seedRun(fixture, threadID)
+      // Exercise the run-ID tiebreaker, without inventing snapshot timestamps.
+      await fixture.query("UPDATE execution.runs SET created_at='2026-01-01'")
+      await seedFinal(fixture, first, 'outbox')
+      await seedFinal(fixture, second, 'outbox')
+      await fixture.up()
+      await fixture.validate()
+      const runs = [first, second].sort((a, b) => a.runID.localeCompare(b.runID))
+      const context = contextFor(runs)
+      const turn = context.turns[0]
+      if (!turn) throw new Error('Expected seeded turn')
+      const mutations: Record<string, () => unknown> = {
+        input: () => {
+          turn.input = { ...turn.input, text: 'Wrong input' }
+        },
+        output: () => {
+          turn.output.text = 'Wrong output'
+        },
+        missing: () => context.turns.shift(),
+        extra: () => context.turns.push({ ...turn, runID: crypto.randomUUID() }),
+        order: () => context.turns.reverse(),
+        duplicate: () => context.turns.push(turn),
+        cutoff: () => {
+          context.throughRunID = runs[0]?.runID ?? null
+        },
+        'foreign cutoff': () => {
+          context.throughRunID = crypto.randomUUID()
+        },
+        version: () => {
+          context.version = 2
+        },
+        schema: () => Object.assign(context, { provider: 'opaque' }),
+        'input schema': () => Object.assign(turn.input, { toolCalls: [] }),
+        'output schema': () => Object.assign(turn.output, { runState: 'opaque' }),
+        'inbox kind': () => fixture.query("UPDATE execution.command_inbox SET kind='cancel'"),
+        'inbox thread': () =>
+          fixture.query('UPDATE execution.command_inbox SET thread_id=$1', [crypto.randomUUID()]),
+        'inbox run': () =>
+          fixture.query('UPDATE execution.command_inbox SET run_id=$1', [crypto.randomUUID()]),
+        'retained ledger poison': () =>
+          fixture.query(
+            `UPDATE execution.event_outbox SET event=event || '{"version":"1"}'::jsonb`,
+          ),
+        'missing completion': () => fixture.query('UPDATE execution.runs SET completion=NULL'),
+      }
+      const commandChanges = {
+        'command version': { version: '1' },
+        'command kind': { kind: 'cancel' },
+        'command ID': { commandID: crypto.randomUUID() },
+        'command run': { runID: crypto.randomUUID() },
+        'command thread': { threadID: crypto.randomUUID() },
+        'input identity': { input: { ...first.input, messageID: crypto.randomUUID() } },
+        'input text': { input: { ...first.input, text: 'Wrong accepted text' } },
+      }
+      for (const [name, changes] of Object.entries(commandChanges)) {
+        mutations[name] = () =>
+          fixture.query(
+            'UPDATE execution.command_inbox SET command=command || $1 WHERE command_id=$2',
+            [changes, first.commandID],
+          )
+      }
+      const mutate = mutations[fault]
+      if (!mutate) throw new Error('Expected fault mutation')
+      await mutate()
+      await insertSnapshot(fixture, threadID, 'openai', context)
+      const before = await retainedState(fixture)
+      await Promise.resolve(
+        expect(fixture.validate(entrypoint)).rejects.toThrow('requires explicit offline recovery'),
+      )
+      expect(await retainedState(fixture)).toEqual(before)
+    } finally {
+      await fixture.close()
+    }
+  })
+}

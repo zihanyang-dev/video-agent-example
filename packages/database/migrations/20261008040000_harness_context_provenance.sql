@@ -1,4 +1,6 @@
 -- migrate:up
+-- Revalidate installations that already applied 20261008030000. The standalone
+-- predicates intentionally match that gate; dbmate has no migration include.
 -- Stop server and execution workers before applying. This is validation only:
 -- never erase a completion, a retained ledger, or an immutable context to pass.
 -- The historical context backfill accepted JSON string versions and discarded
